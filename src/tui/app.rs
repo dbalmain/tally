@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tui_input::Input;
 
 use crate::{
-    Account, Bank, Category, CategorySource, FuzzyMatcher, SearchQuery, Transaction,
+    Account, Bank, Category, CategorySource, DbSearchQuery, FuzzyMatcher, Transaction,
     TransactionFilter, TransactionStore, TransactionWithEnrichment, Transfer, TransferSource,
     TransferWithTransactions,
 };
@@ -57,7 +57,8 @@ impl TodoSubTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    Search,
+    DbSearch,
+    FuzzySearch,
     Category,
     TransferPending,
     TransferNoMatch,
@@ -82,8 +83,12 @@ pub struct App {
     pub error_message: Option<String>,
     pub banks: HashMap<i64, Bank>,
     pub accounts: HashMap<i64, Account>,
-    pub search_input: Input,
-    pub search_query: SearchQuery,
+    pub db_search_input: Input,
+    pub db_search_query: DbSearchQuery,
+    pub fuzzy_search_input: Input,
+    pub fuzzy_pattern: String,
+    pub db_search_active: bool,
+    pub fuzzy_search_active: bool,
     pub fuzzy_matcher: FuzzyMatcher,
     filtered_transaction_idx: Vec<usize>,
     filtered_transfer_idx: Vec<usize>,
@@ -228,8 +233,12 @@ impl App {
             error_message: None,
             banks,
             accounts,
-            search_input: Input::default(),
-            search_query: SearchQuery::default(),
+            db_search_input: Input::default(),
+            db_search_query: DbSearchQuery::default(),
+            fuzzy_search_input: Input::default(),
+            fuzzy_pattern: String::new(),
+            db_search_active: false,
+            fuzzy_search_active: false,
             fuzzy_matcher: FuzzyMatcher::new(),
             tx_by_id: HashMap::new(),
             category_by_tx_id: HashMap::new(),
@@ -643,42 +652,114 @@ impl App {
             .list_transfers_with_transactions(true)
             .unwrap_or_default();
         self.rebuild_caches();
-        self.apply_search_filter();
+        self.apply_fuzzy_filter();
     }
 
-    pub fn start_search(&mut self) {
-        self.input_mode = InputMode::Search;
+    // ==================== DB Search ====================
+
+    pub fn start_db_search(&mut self) {
+        self.input_mode = InputMode::DbSearch;
+        self.db_search_active = true;
     }
 
-    pub fn handle_search_input(&mut self, req: tui_input::InputRequest) {
-        self.search_input.handle(req);
-        self.search_query = SearchQuery::parse(self.search_input.value());
-        self.apply_search_filter();
+    pub fn handle_db_search_input(&mut self, req: tui_input::InputRequest) {
+        self.db_search_input.handle(req);
+        let (query, transition_to_fuzzy) = DbSearchQuery::parse(self.db_search_input.value());
+
+        if transition_to_fuzzy {
+            // Remove " ~" from input and transition to fuzzy mode
+            let trimmed = self.db_search_input.value()[..self.db_search_input.value().len() - 2].to_string();
+            self.db_search_input = Input::new(trimmed.clone());
+            self.db_search_query = DbSearchQuery::parse(&trimmed).0;
+            self.reload_from_db();
+            self.start_fuzzy_search();
+        } else {
+            self.db_search_query = query;
+            self.reload_from_db();
+        }
         self.selected_index = 0;
     }
 
-    pub fn clear_search(&mut self) {
-        self.search_input.reset();
-        self.search_query = SearchQuery::default();
-        self.apply_search_filter();
+    pub fn clear_db_search(&mut self) {
+        self.db_search_input.reset();
+        self.db_search_query = DbSearchQuery::default();
+        self.db_search_active = false;
+        self.reload_from_db();
         self.selected_index = 0;
         self.input_mode = InputMode::Normal;
     }
 
-    pub fn confirm_search(&mut self) {
+    pub fn confirm_db_search(&mut self) {
         self.input_mode = InputMode::Normal;
     }
 
-    pub fn search_value(&self) -> &str {
-        self.search_input.value()
+    pub fn db_search_value(&self) -> &str {
+        self.db_search_input.value()
     }
 
-    pub fn search_cursor(&self) -> usize {
-        self.search_input.visual_cursor()
+    pub fn db_search_cursor(&self) -> usize {
+        self.db_search_input.visual_cursor()
     }
 
-    fn apply_search_filter(&mut self) {
-        if self.search_query.is_empty() {
+    // ==================== Fuzzy Search ====================
+
+    pub fn start_fuzzy_search(&mut self) {
+        self.input_mode = InputMode::FuzzySearch;
+        self.fuzzy_search_active = true;
+    }
+
+    pub fn handle_fuzzy_search_input(&mut self, req: tui_input::InputRequest) {
+        self.fuzzy_search_input.handle(req);
+        self.fuzzy_pattern = self.fuzzy_search_input.value().to_string();
+        self.apply_fuzzy_filter();
+        self.selected_index = 0;
+    }
+
+    pub fn clear_fuzzy_search(&mut self) {
+        self.fuzzy_search_input.reset();
+        self.fuzzy_pattern.clear();
+        self.fuzzy_search_active = false;
+        self.apply_fuzzy_filter();
+        self.selected_index = 0;
+        // Return to DB search mode if it's still active, else normal
+        if self.db_search_active {
+            self.input_mode = InputMode::DbSearch;
+        } else {
+            self.input_mode = InputMode::Normal;
+        }
+    }
+
+    pub fn confirm_fuzzy_search(&mut self) {
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn fuzzy_search_value(&self) -> &str {
+        self.fuzzy_search_input.value()
+    }
+
+    pub fn fuzzy_search_cursor(&self) -> usize {
+        self.fuzzy_search_input.visual_cursor()
+    }
+
+    // ==================== Filtering Logic ====================
+
+    /// Reload transactions from DB based on current db_search_query
+    fn reload_from_db(&mut self) {
+        let filter = self.db_search_query.to_filter(Some(500));
+        self.transactions = self
+            .store
+            .query_transactions(&filter)
+            .unwrap_or_default();
+        // For now, other lists (uncategorized, ai_reviews, etc.) don't use DB search
+        // They keep their full data and fuzzy filter is applied
+        self.rebuild_caches();
+        self.apply_fuzzy_filter();
+    }
+
+    /// Apply fuzzy filter on top of loaded data
+    fn apply_fuzzy_filter(&mut self) {
+        if self.fuzzy_pattern.is_empty() {
+            // No fuzzy filter - show all loaded data
             self.filtered_transaction_idx = (0..self.transactions.len()).collect();
             self.filtered_transfer_idx = (0..self.linked_transfers.len()).collect();
             self.filtered_uncategorized_idx = (0..self.uncategorized.len()).collect();
@@ -687,13 +768,13 @@ impl App {
             return;
         }
 
-        let mut matcher = FuzzyMatcher::new();
+        let pattern = &self.fuzzy_pattern;
 
         self.filtered_transaction_idx = self
             .transactions
             .iter()
             .enumerate()
-            .filter(|(_, tx)| self.matches_transaction(tx, &mut matcher))
+            .filter(|(_, tx)| self.fuzzy_matcher.fuzzy_matches(pattern, &tx.description))
             .map(|(i, _)| i)
             .collect();
 
@@ -702,8 +783,8 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, twt)| {
-                self.matches_transaction(&twt.from_transaction, &mut matcher)
-                    || self.matches_transaction(&twt.to_transaction, &mut matcher)
+                self.fuzzy_matcher.fuzzy_matches(pattern, &twt.from_transaction.description)
+                    || self.fuzzy_matcher.fuzzy_matches(pattern, &twt.to_transaction.description)
             })
             .map(|(i, _)| i)
             .collect();
@@ -712,7 +793,7 @@ impl App {
             .uncategorized
             .iter()
             .enumerate()
-            .filter(|(_, tx)| self.matches_transaction(tx, &mut matcher))
+            .filter(|(_, tx)| self.fuzzy_matcher.fuzzy_matches(pattern, &tx.description))
             .map(|(i, _)| i)
             .collect();
 
@@ -720,7 +801,7 @@ impl App {
             .ai_reviews
             .iter()
             .enumerate()
-            .filter(|(_, r)| self.matches_transaction(&r.transaction, &mut matcher))
+            .filter(|(_, r)| self.fuzzy_matcher.fuzzy_matches(pattern, &r.transaction.description))
             .map(|(i, _)| i)
             .collect();
 
@@ -734,56 +815,14 @@ impl App {
                     self.tx_by_id.get(&tr.to_transaction_id),
                 ) {
                     (Some(from), Some(to)) => {
-                        self.matches_transaction(from, &mut matcher)
-                            || self.matches_transaction(to, &mut matcher)
+                        self.fuzzy_matcher.fuzzy_matches(pattern, &from.description)
+                            || self.fuzzy_matcher.fuzzy_matches(pattern, &to.description)
                     }
                     _ => true,
                 }
             })
             .map(|(i, _)| i)
             .collect();
-    }
-
-    fn matches_transaction(&self, tx: &Transaction, matcher: &mut FuzzyMatcher) -> bool {
-        let q = &self.search_query;
-
-        if q.date_from.is_some_and(|from| tx.date < from) {
-            return false;
-        }
-        if q.date_to.is_some_and(|to| tx.date > to) {
-            return false;
-        }
-        if q.amount_min.is_some_and(|min| tx.amount_cents < min) {
-            return false;
-        }
-        if q.amount_max.is_some_and(|max| tx.amount_cents > max) {
-            return false;
-        }
-        if let Some(ref bank_filter) = q.bank {
-            let bank_name = self.bank_name(tx.bank_id).to_lowercase();
-            if !bank_name.contains(bank_filter) {
-                return false;
-            }
-        }
-        if let Some(ref account_filter) = q.account {
-            let account_name = self.account_name(tx.account_id).to_lowercase();
-            if !account_name.contains(account_filter) {
-                return false;
-            }
-        }
-        if let Some(ref category_filter) = q.category {
-            let cat = self
-                .get_cached_category(tx.id)
-                .map(|s| s.to_lowercase())
-                .unwrap_or_default();
-            if !cat.contains(category_filter) {
-                return false;
-            }
-        }
-        if !q.text_match.is_empty() && !matcher.matches(&q.text_match, &tx.description) {
-            return false;
-        }
-        true
     }
 
     pub fn is_transfer_candidate(&self, tx_id: i64) -> bool {

@@ -3,38 +3,39 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Matcher, Utf32Str,
 };
-use regex::Regex;
 
-/// How to match text in descriptions
-#[derive(Debug, Clone)]
-pub enum TextMatch {
-    /// Case-insensitive substring match (default)
-    Exact(String),
-    /// Fuzzy match using nucleo (~pattern)
-    Fuzzy(String),
-    /// Regex match (/pattern/ or /pattern/i)
-    Regex { pattern: Regex, original: String },
+use crate::TransactionFilter;
+
+/// Text matching mode for DB search
+#[derive(Debug, Clone, Default)]
+pub enum DbTextMatch {
+    #[default]
+    None,
+    /// Case-insensitive substring match (LIKE %pattern%)
+    Substring(String),
+    /// Regex match using SQLite REGEXP UDF
+    Regex {
+        /// The regex pattern string (with (?i) prefix if case-insensitive)
+        pattern: String,
+        /// The original input (e.g., "/pattern/i")
+        original: String,
+    },
 }
 
-impl Default for TextMatch {
-    fn default() -> Self {
-        TextMatch::Exact(String::new())
-    }
-}
-
-impl TextMatch {
-    /// Check if the text match pattern is empty.
+impl DbTextMatch {
     pub fn is_empty(&self) -> bool {
         match self {
-            TextMatch::Exact(s) => s.is_empty(),
-            TextMatch::Fuzzy(s) => s.is_empty(),
-            TextMatch::Regex { original, .. } => original.is_empty(),
+            DbTextMatch::None => true,
+            DbTextMatch::Substring(s) => s.is_empty(),
+            DbTextMatch::Regex { original, .. } => original.is_empty(),
         }
     }
 }
 
+/// DB-backed search query with structured filters and text/regex matching.
+/// Parsed from user input like: `date:2024-01 amount:>100 bank:Chase groceries`
 #[derive(Debug, Default, Clone)]
-pub struct SearchQuery {
+pub struct DbSearchQuery {
     pub date_from: Option<NaiveDate>,
     pub date_to: Option<NaiveDate>,
     pub amount_min: Option<i64>,
@@ -42,13 +43,20 @@ pub struct SearchQuery {
     pub bank: Option<String>,
     pub account: Option<String>,
     pub category: Option<String>,
-    pub text_match: TextMatch,
+    pub text_match: DbTextMatch,
 }
 
-impl SearchQuery {
+impl DbSearchQuery {
     /// Parse a search query string with support for filters and text matching.
-    pub fn parse(input: &str) -> Self {
-        let mut query = SearchQuery::default();
+    /// Returns the query and whether it ends with ` ~` (transition to fuzzy mode).
+    pub fn parse(input: &str) -> (Self, bool) {
+        let (input, transition_to_fuzzy) = if let Some(stripped) = input.strip_suffix(" ~") {
+            (stripped, true)
+        } else {
+            (input, false)
+        };
+
+        let mut query = DbSearchQuery::default();
         let mut text_parts = Vec::new();
 
         for token in tokenize(input) {
@@ -68,8 +76,8 @@ impl SearchQuery {
         }
 
         let text = text_parts.join(" ");
-        query.text_match = parse_text_match(&text);
-        query
+        query.text_match = parse_db_text_match(&text);
+        (query, transition_to_fuzzy)
     }
 
     /// Check if all query fields are empty.
@@ -82,6 +90,29 @@ impl SearchQuery {
             && self.account.is_none()
             && self.category.is_none()
             && self.text_match.is_empty()
+    }
+
+    /// Convert to a TransactionFilter for database queries.
+    pub fn to_filter(&self, limit: Option<usize>) -> TransactionFilter {
+        TransactionFilter {
+            from_date: self.date_from,
+            to_date: self.date_to,
+            amount_min: self.amount_min,
+            amount_max: self.amount_max,
+            bank_name_prefix: self.bank.clone(),
+            account_name_prefix: self.account.clone(),
+            category_contains: self.category.clone(),
+            description_contains: match &self.text_match {
+                DbTextMatch::Substring(s) => Some(s.clone()),
+                _ => None,
+            },
+            description_regex: match &self.text_match {
+                DbTextMatch::Regex { pattern, .. } => Some(pattern.clone()),
+                _ => None,
+            },
+            limit,
+            ..Default::default()
+        }
     }
 }
 
@@ -126,9 +157,9 @@ fn tokenize(input: &str) -> Vec<String> {
     tokens
 }
 
-fn parse_text_match(text: &str) -> TextMatch {
+fn parse_db_text_match(text: &str) -> DbTextMatch {
     if text.is_empty() {
-        return TextMatch::Exact(String::new());
+        return DbTextMatch::None;
     }
 
     // Check for regex: /pattern/ or /pattern/i
@@ -143,24 +174,17 @@ fn parse_text_match(text: &str) -> TextMatch {
             pattern.to_string()
         };
 
-        if let Ok(regex) = Regex::new(&regex_pattern) {
-            return TextMatch::Regex {
-                pattern: regex,
-                original: text.to_string(),
-            };
-        }
+        return DbTextMatch::Regex {
+            pattern: regex_pattern,
+            original: text.to_string(),
+        };
     }
 
-    // Check for fuzzy: ~pattern
-    if let Some(rest) = text.strip_prefix('~') {
-        return TextMatch::Fuzzy(rest.to_string());
-    }
-
-    // Default: exact case-insensitive substring match (pre-lowercase for efficiency)
-    TextMatch::Exact(text.to_lowercase())
+    // Default: case-insensitive substring match
+    DbTextMatch::Substring(text.to_string())
 }
 
-fn parse_date_range(s: &str, query: &mut SearchQuery) {
+fn parse_date_range(s: &str, query: &mut DbSearchQuery) {
     if let Some((from, to)) = s.split_once("..") {
         query.date_from = parse_date_start(from);
         query.date_to = parse_date_end(to);
@@ -228,7 +252,7 @@ fn last_day_of_month(date: NaiveDate) -> NaiveDate {
     .unwrap()
 }
 
-fn parse_amount_range(s: &str, query: &mut SearchQuery) {
+fn parse_amount_range(s: &str, query: &mut DbSearchQuery) {
     if let Some((from, to)) = s.split_once("..") {
         query.amount_min = parse_cents(from);
         query.amount_max = parse_cents(to);
@@ -295,21 +319,6 @@ impl FuzzyMatcher {
         }
         self.score(pattern, haystack).is_some()
     }
-
-    /// Match haystack against the given TextMatch.
-    pub fn matches(&mut self, text_match: &TextMatch, haystack: &str) -> bool {
-        match text_match {
-            TextMatch::Exact(pattern) => {
-                if pattern.is_empty() {
-                    return true;
-                }
-                // Pattern is already lowercased at parse time
-                haystack.to_lowercase().contains(pattern)
-            }
-            TextMatch::Fuzzy(pattern) => self.fuzzy_matches(pattern, haystack),
-            TextMatch::Regex { pattern, .. } => pattern.is_match(haystack),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -317,119 +326,112 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_simple_exact() {
-        let q = SearchQuery::parse("coffee shop");
-        assert!(matches!(q.text_match, TextMatch::Exact(ref s) if s == "coffee shop"));
+    fn test_parse_simple_substring() {
+        let (q, transition) = DbSearchQuery::parse("coffee shop");
+        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee shop"));
         assert!(q.date_from.is_none());
-    }
-
-    #[test]
-    fn test_parse_fuzzy() {
-        let q = SearchQuery::parse("~cofshp");
-        assert!(matches!(q.text_match, TextMatch::Fuzzy(ref s) if s == "cofshp"));
+        assert!(!transition);
     }
 
     #[test]
     fn test_parse_regex() {
-        let q = SearchQuery::parse("/cof.*shop/i");
-        assert!(matches!(q.text_match, TextMatch::Regex { .. }));
+        let (q, _) = DbSearchQuery::parse("/cof.*shop/i");
+        assert!(matches!(q.text_match, DbTextMatch::Regex { ref pattern, .. } if pattern == "(?i)cof.*shop"));
+    }
+
+    #[test]
+    fn test_parse_regex_case_sensitive() {
+        let (q, _) = DbSearchQuery::parse("/Coffee/");
+        assert!(matches!(q.text_match, DbTextMatch::Regex { ref pattern, .. } if pattern == "Coffee"));
     }
 
     #[test]
     fn test_parse_date_range() {
-        let q = SearchQuery::parse("date:2024-01..2024-06");
+        let (q, _) = DbSearchQuery::parse("date:2024-01..2024-06");
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
-        // End of June
         assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 6, 30).unwrap()));
     }
 
     #[test]
     fn test_parse_date_single_full() {
-        let q = SearchQuery::parse("date:2024-03-15");
+        let (q, _) = DbSearchQuery::parse("date:2024-03-15");
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()));
         assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()));
     }
 
     #[test]
     fn test_parse_date_month() {
-        // "date:2025-09" should show whole month
-        let q = SearchQuery::parse("date:2025-09");
+        let (q, _) = DbSearchQuery::parse("date:2025-09");
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2025, 9, 1).unwrap()));
         assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2025, 9, 30).unwrap()));
     }
 
     #[test]
     fn test_parse_date_february_leap_year() {
-        let q = SearchQuery::parse("date:2024-02");
+        let (q, _) = DbSearchQuery::parse("date:2024-02");
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()));
         assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 2, 29).unwrap()));
     }
 
     #[test]
     fn test_parse_date_year_only() {
-        let q = SearchQuery::parse("date:2024");
+        let (q, _) = DbSearchQuery::parse("date:2024");
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
         assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()));
     }
 
     #[test]
     fn test_parse_amount_range() {
-        let q = SearchQuery::parse("amount:50..200");
+        let (q, _) = DbSearchQuery::parse("amount:50..200");
         assert_eq!(q.amount_min, Some(5000));
         assert_eq!(q.amount_max, Some(20000));
     }
 
     #[test]
     fn test_parse_amount_greater() {
-        let q = SearchQuery::parse("amount:>100");
+        let (q, _) = DbSearchQuery::parse("amount:>100");
         assert_eq!(q.amount_min, Some(10000));
         assert!(q.amount_max.is_none());
     }
 
     #[test]
     fn test_parse_negative_amount() {
-        let q = SearchQuery::parse("amount:-50");
+        let (q, _) = DbSearchQuery::parse("amount:-50");
         assert_eq!(q.amount_min, Some(-5000));
         assert_eq!(q.amount_max, Some(-5000));
     }
 
     #[test]
     fn test_parse_combined() {
-        let q = SearchQuery::parse("date:2024-01 amount:>100 bank:Chase groceries");
+        let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 bank:Chase groceries");
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
         assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()));
         assert_eq!(q.amount_min, Some(10000));
         assert_eq!(q.bank, Some("Chase".to_string()));
-        assert!(matches!(q.text_match, TextMatch::Exact(ref s) if s == "groceries"));
+        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "groceries"));
     }
 
     #[test]
-    fn test_matcher_exact() {
-        let mut m = FuzzyMatcher::new();
-        let exact = TextMatch::Exact("cityside".to_string());
-        assert!(m.matches(&exact, "CITYSIDE BANK"));
-        assert!(m.matches(&exact, "cityside"));
-        assert!(!m.matches(&exact, "city side")); // not a substring match
+    fn test_parse_transition_to_fuzzy() {
+        let (q, transition) = DbSearchQuery::parse("date:2024 coffee ~");
+        assert!(transition);
+        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee"));
+        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
     }
 
     #[test]
-    fn test_matcher_fuzzy() {
-        let mut m = FuzzyMatcher::new();
-        let fuzzy = TextMatch::Fuzzy("ctysd".to_string());
-        assert!(m.matches(&fuzzy, "CITYSIDE BANK"));
-        assert!(m.matches(&fuzzy, "cityside"));
+    fn test_parse_no_transition_without_space() {
+        let (_, transition) = DbSearchQuery::parse("coffee~");
+        assert!(!transition);
     }
 
     #[test]
-    fn test_matcher_regex() {
+    fn test_fuzzy_matcher() {
         let mut m = FuzzyMatcher::new();
-        let regex = TextMatch::Regex {
-            pattern: Regex::new("(?i)ci\\w+de").unwrap(),
-            original: "/ci\\w+de/i".to_string(),
-        };
-        assert!(m.matches(&regex, "Cityside"));
-        assert!(m.matches(&regex, "CITYSIDE"));
-        assert!(!m.matches(&regex, "city"));
+        assert!(m.fuzzy_matches("ctysd", "CITYSIDE BANK"));
+        assert!(m.fuzzy_matches("ctysd", "cityside"));
+        assert!(m.fuzzy_matches("", "anything"));
+        assert!(!m.fuzzy_matches("xyz", "cityside"));
     }
 
     #[test]
@@ -452,20 +454,42 @@ mod tests {
 
     #[test]
     fn test_parse_account_quoted() {
-        let q = SearchQuery::parse(r#"account:"Orange Everyday""#);
+        let (q, _) = DbSearchQuery::parse(r#"account:"Orange Everyday""#);
         assert_eq!(q.account, Some("Orange Everyday".to_string()));
     }
 
     #[test]
     fn test_parse_account_backslash() {
-        let q = SearchQuery::parse(r"account:Orange\ Everyday");
+        let (q, _) = DbSearchQuery::parse(r"account:Orange\ Everyday");
         assert_eq!(q.account, Some("Orange Everyday".to_string()));
     }
 
     #[test]
     fn test_parse_bank_quoted_with_text() {
-        let q = SearchQuery::parse(r#"bank:"My Bank" coffee"#);
+        let (q, _) = DbSearchQuery::parse(r#"bank:"My Bank" coffee"#);
         assert_eq!(q.bank, Some("My Bank".to_string()));
-        assert!(matches!(q.text_match, TextMatch::Exact(ref s) if s == "coffee"));
+        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee"));
+    }
+
+    #[test]
+    fn test_to_filter() {
+        let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 bank:Chase groceries");
+        let filter = q.to_filter(Some(500));
+
+        assert_eq!(filter.from_date, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+        assert_eq!(filter.to_date, Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()));
+        assert_eq!(filter.amount_min, Some(10000));
+        assert_eq!(filter.bank_name_prefix, Some("Chase".to_string()));
+        assert_eq!(filter.description_contains, Some("groceries".to_string()));
+        assert_eq!(filter.limit, Some(500));
+    }
+
+    #[test]
+    fn test_to_filter_regex() {
+        let (q, _) = DbSearchQuery::parse("/coffee.*/i");
+        let filter = q.to_filter(None);
+
+        assert!(filter.description_contains.is_none());
+        assert_eq!(filter.description_regex, Some("(?i)coffee.*".to_string()));
     }
 }

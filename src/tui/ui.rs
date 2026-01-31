@@ -13,20 +13,26 @@ use super::app::{App, InputMode, Tab, TodoSubTab};
 const DETAILS_HEIGHT: u16 = 8;
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let has_search = app.input_mode == InputMode::Search || !app.search_value().is_empty();
+    let has_db_search = app.db_search_active || app.input_mode == InputMode::DbSearch;
+    let has_fuzzy_search = app.fuzzy_search_active || app.input_mode == InputMode::FuzzySearch;
+    let has_any_search = has_db_search || has_fuzzy_search;
+
+    // Calculate how many search rows we need
+    let search_rows = (has_db_search as u16) + (has_fuzzy_search as u16);
+
     // For Todo tab, search bar is drawn inside draw_todo (below sub-tabs)
-    let search_in_header = has_search && app.current_tab != Tab::Todo;
-    let header_height = if search_in_header { 3 } else { 2 };
+    let search_in_header = has_any_search && app.current_tab != Tab::Todo;
+    let header_height = if search_in_header { 2 + search_rows } else { 2 };
 
     let chunks =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).split(f.area());
 
-    draw_header(f, app, chunks[0], search_in_header);
+    draw_header(f, app, chunks[0], search_in_header, has_db_search, has_fuzzy_search);
 
     match app.current_tab {
         Tab::Transactions => draw_transactions(f, app, chunks[1]),
         Tab::Transfers => draw_transfers(f, app, chunks[1]),
-        Tab::Todo => draw_todo(f, app, chunks[1], has_search),
+        Tab::Todo => draw_todo(f, app, chunks[1], has_db_search, has_fuzzy_search),
     }
 
     if app.input_mode == InputMode::Category {
@@ -42,49 +48,85 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_header(f: &mut Frame, app: &App, area: Rect, has_search: bool) {
+fn draw_header(f: &mut Frame, app: &App, area: Rect, has_search: bool, has_db_search: bool, has_fuzzy_search: bool) {
     if has_search {
-        // Tabs on first row, search bar on second row
-        let chunks = Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(area);
+        let search_rows = (has_db_search as u16) + (has_fuzzy_search as u16);
+        let mut constraints = vec![Constraint::Length(2)];
+        for _ in 0..search_rows {
+            constraints.push(Constraint::Length(1));
+        }
+        let chunks = Layout::vertical(constraints).split(area);
 
         draw_tabs(f, app, chunks[0]);
-        draw_search_bar(f, app, chunks[1]);
+
+        let mut search_idx = 1;
+        if has_db_search {
+            draw_db_search_bar(f, app, chunks[search_idx]);
+            search_idx += 1;
+        }
+        if has_fuzzy_search {
+            draw_fuzzy_search_bar(f, app, chunks[search_idx]);
+        }
     } else {
         draw_tabs(f, app, area);
     }
 }
 
-fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
-    let is_active = app.input_mode == InputMode::Search;
-    let search_value = app.search_value();
+fn draw_db_search_bar(f: &mut Frame, app: &App, area: Rect) {
+    let is_active = app.input_mode == InputMode::DbSearch;
+    let search_value = app.db_search_value();
 
     if is_active {
-        let cursor_pos = app.search_cursor();
-
-        // Split text at cursor position for visual cursor
-        let (before_cursor, after_cursor) = search_value.split_at(
-            search_value
-                .char_indices()
-                .nth(cursor_pos)
-                .map(|(i, _)| i)
-                .unwrap_or(search_value.len()),
-        );
+        let cursor_pos = app.db_search_cursor();
+        let (before_cursor, after_cursor) = split_at_char_index(search_value, cursor_pos);
 
         let search_line = Line::from(vec![
             Span::styled("/", Style::default().fg(Color::DarkGray)),
-            Span::styled(before_cursor, Style::default().fg(Color::Yellow)),
-            Span::styled("▌", Style::default().fg(Color::Yellow)),
-            Span::styled(after_cursor, Style::default().fg(Color::Yellow)),
+            Span::styled(before_cursor, Style::default().fg(Color::Cyan)),
+            Span::styled("▌", Style::default().fg(Color::Cyan)),
+            Span::styled(after_cursor, Style::default().fg(Color::Cyan)),
         ]);
         f.render_widget(Paragraph::new(search_line), area);
     } else {
-        // Inactive search bar with filter value
         let search_line = Line::from(vec![
             Span::styled("/", Style::default().fg(Color::DarkGray)),
             Span::styled(search_value, Style::default().fg(Color::DarkGray)),
         ]);
         f.render_widget(Paragraph::new(search_line), area);
     }
+}
+
+fn draw_fuzzy_search_bar(f: &mut Frame, app: &App, area: Rect) {
+    let is_active = app.input_mode == InputMode::FuzzySearch;
+    let search_value = app.fuzzy_search_value();
+
+    if is_active {
+        let cursor_pos = app.fuzzy_search_cursor();
+        let (before_cursor, after_cursor) = split_at_char_index(search_value, cursor_pos);
+
+        let search_line = Line::from(vec![
+            Span::styled("~", Style::default().fg(Color::DarkGray)),
+            Span::styled(before_cursor, Style::default().fg(Color::Yellow)),
+            Span::styled("▌", Style::default().fg(Color::Yellow)),
+            Span::styled(after_cursor, Style::default().fg(Color::Yellow)),
+        ]);
+        f.render_widget(Paragraph::new(search_line), area);
+    } else {
+        let search_line = Line::from(vec![
+            Span::styled("~", Style::default().fg(Color::DarkGray)),
+            Span::styled(search_value, Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(search_line), area);
+    }
+}
+
+fn split_at_char_index(s: &str, char_idx: usize) -> (&str, &str) {
+    let byte_idx = s
+        .char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    s.split_at(byte_idx)
 }
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
@@ -190,17 +232,30 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_todo(f: &mut Frame, app: &App, area: Rect, has_search: bool) {
-    let header_height = if has_search { 3 } else { 2 };
+fn draw_todo(f: &mut Frame, app: &App, area: Rect, has_db_search: bool, has_fuzzy_search: bool) {
+    let search_rows = (has_db_search as u16) + (has_fuzzy_search as u16);
+    let has_any_search = has_db_search || has_fuzzy_search;
+    let header_height = if has_any_search { 2 + search_rows } else { 2 };
     let chunks =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).split(area);
 
-    // Draw sub-tabs and optionally search bar
-    if has_search {
-        let header_chunks =
-            Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(chunks[0]);
+    // Draw sub-tabs and optionally search bars
+    if has_any_search {
+        let mut constraints = vec![Constraint::Length(2)];
+        for _ in 0..search_rows {
+            constraints.push(Constraint::Length(1));
+        }
+        let header_chunks = Layout::vertical(constraints).split(chunks[0]);
         draw_todo_subtabs(f, app, header_chunks[0]);
-        draw_search_bar(f, app, header_chunks[1]);
+
+        let mut search_idx = 1;
+        if has_db_search {
+            draw_db_search_bar(f, app, header_chunks[search_idx]);
+            search_idx += 1;
+        }
+        if has_fuzzy_search {
+            draw_fuzzy_search_bar(f, app, header_chunks[search_idx]);
+        }
     } else {
         draw_todo_subtabs(f, app, chunks[0]);
     }

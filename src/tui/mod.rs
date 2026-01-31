@@ -61,7 +61,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::BackTab => app.previous_tab(),
                         KeyCode::Char('[') => app.previous_subtab(),
                         KeyCode::Char(']') => app.next_subtab(),
-                        KeyCode::Char('/') => app.start_search(),
+                        KeyCode::Char('/') => app.start_db_search(),
+                        KeyCode::Char('~') => app.start_fuzzy_search(),
                         KeyCode::Char('c') => app.start_category_edit(),
                         KeyCode::Char('t') => app.start_transfer_mark(),
                         KeyCode::Char('d') => app.delete_transfer(),
@@ -71,9 +72,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         }
                         _ => {}
                     },
-                    InputMode::Search => match key.code {
-                        KeyCode::Esc => app.clear_search(),
-                        KeyCode::Enter => app.confirm_search(),
+                    InputMode::DbSearch => match key.code {
+                        KeyCode::Esc => app.clear_db_search(),
+                        KeyCode::Enter => app.confirm_db_search(),
                         KeyCode::Tab => {
                             if key.modifiers.contains(KeyModifiers::SHIFT) {
                                 app.previous_tab();
@@ -84,35 +85,78 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::BackTab => app.previous_tab(),
                         KeyCode::Down => app.next(),
                         KeyCode::Up => app.previous(),
-                        // Handle text input via tui-input
                         KeyCode::Char(c) => {
-                            app.handle_search_input(InputRequest::InsertChar(c));
+                            app.handle_db_search_input(InputRequest::InsertChar(c));
                         }
                         KeyCode::Backspace => {
-                            app.handle_search_input(InputRequest::DeletePrevChar);
+                            app.handle_db_search_input(InputRequest::DeletePrevChar);
                         }
                         KeyCode::Delete => {
-                            app.handle_search_input(InputRequest::DeleteNextChar);
+                            app.handle_db_search_input(InputRequest::DeleteNextChar);
                         }
                         KeyCode::Left => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_search_input(InputRequest::GoToPrevWord);
+                                app.handle_db_search_input(InputRequest::GoToPrevWord);
                             } else {
-                                app.handle_search_input(InputRequest::GoToPrevChar);
+                                app.handle_db_search_input(InputRequest::GoToPrevChar);
                             }
                         }
                         KeyCode::Right => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_search_input(InputRequest::GoToNextWord);
+                                app.handle_db_search_input(InputRequest::GoToNextWord);
                             } else {
-                                app.handle_search_input(InputRequest::GoToNextChar);
+                                app.handle_db_search_input(InputRequest::GoToNextChar);
                             }
                         }
                         KeyCode::Home => {
-                            app.handle_search_input(InputRequest::GoToStart);
+                            app.handle_db_search_input(InputRequest::GoToStart);
                         }
                         KeyCode::End => {
-                            app.handle_search_input(InputRequest::GoToEnd);
+                            app.handle_db_search_input(InputRequest::GoToEnd);
+                        }
+                        _ => {}
+                    },
+                    InputMode::FuzzySearch => match key.code {
+                        KeyCode::Esc => app.clear_fuzzy_search(),
+                        KeyCode::Enter => app.confirm_fuzzy_search(),
+                        KeyCode::Tab => {
+                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                app.previous_tab();
+                            } else {
+                                app.next_tab();
+                            }
+                        }
+                        KeyCode::BackTab => app.previous_tab(),
+                        KeyCode::Down => app.next(),
+                        KeyCode::Up => app.previous(),
+                        KeyCode::Char(c) => {
+                            app.handle_fuzzy_search_input(InputRequest::InsertChar(c));
+                        }
+                        KeyCode::Backspace => {
+                            app.handle_fuzzy_search_input(InputRequest::DeletePrevChar);
+                        }
+                        KeyCode::Delete => {
+                            app.handle_fuzzy_search_input(InputRequest::DeleteNextChar);
+                        }
+                        KeyCode::Left => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.handle_fuzzy_search_input(InputRequest::GoToPrevWord);
+                            } else {
+                                app.handle_fuzzy_search_input(InputRequest::GoToPrevChar);
+                            }
+                        }
+                        KeyCode::Right => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.handle_fuzzy_search_input(InputRequest::GoToNextWord);
+                            } else {
+                                app.handle_fuzzy_search_input(InputRequest::GoToNextChar);
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.handle_fuzzy_search_input(InputRequest::GoToStart);
+                        }
+                        KeyCode::End => {
+                            app.handle_fuzzy_search_input(InputRequest::GoToEnd);
                         }
                         _ => {}
                     },

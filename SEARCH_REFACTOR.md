@@ -33,33 +33,33 @@ When both active: DB search runs first, fuzzy filters those results. Escape clea
 - [x] Add `category_contains` with LEFT JOIN to enrichments/categories
 - [x] Update `query_transactions()` to build SQL for all new filters
 
-### Step 3: Create new search query types
-- [ ] `DbSearchQuery` with structured filters + text/regex
-- [ ] `DbTextMatch::Substring` and `DbTextMatch::Regex`
-- [ ] `FuzzySearchQuery` (just pattern string)
-- [ ] Parsing for both
+### Step 3: Create new search query types ✓
+- [x] `DbSearchQuery` with structured filters + text/regex
+- [x] `DbTextMatch::Substring` and `DbTextMatch::Regex`
+- [x] Fuzzy search is just a pattern string in App
+- [x] `to_filter()` converts DbSearchQuery to TransactionFilter
 
-### Step 4: Update App state
-- [ ] Replace single search with `db_search_input`, `fuzzy_search_input`
-- [ ] Add `db_search_active`, `fuzzy_search_active` flags
-- [ ] Update `InputMode` enum
+### Step 4: Update App state ✓
+- [x] Replace single search with `db_search_input`, `fuzzy_search_input`
+- [x] Add `db_search_active`, `fuzzy_search_active` flags
+- [x] Update `InputMode` enum (DbSearch, FuzzySearch)
 
-### Step 5: Implement stacked filtering logic
-- [ ] `apply_filters()` reloads from DB when db_search changes
-- [ ] Fuzzy filter applies on top of loaded results
-- [ ] Works on all tabs (transactions, transfers, uncategorized, ai_reviews, transfer_reviews)
+### Step 5: Implement stacked filtering logic ✓
+- [x] `reload_from_db()` queries DB with `db_search_query.to_filter()`
+- [x] `apply_fuzzy_filter()` filters loaded results with nucleo
+- [x] Works on all tabs (transactions, transfers, uncategorized, ai_reviews, transfer_reviews)
 
-### Step 6: Update key handling
-- [ ] `/` starts DB search
-- [ ] `~` starts fuzzy search (from normal mode)
-- [ ] ` ~` at end of DB search input transitions to fuzzy
-- [ ] Escape clears fuzzy first, then DB search
-- [ ] Enter confirms current input
+### Step 6: Update key handling ✓
+- [x] `/` starts DB search
+- [x] `~` starts fuzzy search (from normal mode)
+- [x] ` ~` at end of DB search input transitions to fuzzy
+- [x] Escape clears fuzzy first, then DB search
+- [x] Enter confirms current input
 
-### Step 7: Update UI rendering
-- [ ] Show both search bars when both active (DB above, fuzzy below)
-- [ ] Cursor in active input
-- [ ] Color coding: cyan for DB search, yellow for fuzzy
+### Step 7: Update UI rendering ✓
+- [x] Show both search bars when both active (DB above, fuzzy below)
+- [x] Cursor in active input
+- [x] Color coding: cyan for DB search, yellow for fuzzy
 
 ## Filter Behavior
 
@@ -87,4 +87,4 @@ When both active: DB search runs first, fuzzy filters those results. Escape clea
 ## Progress
 
 Started: Yes
-Current step: 3
+Completed: Yes
