@@ -32,6 +32,7 @@ src/
 ├── db.rs                   # SQLite schema and initialization
 ├── store.rs                # TransactionStore: all database operations
 ├── import.rs               # Import script execution and file discovery
+├── search.rs               # Search query parser and fuzzy matcher
 ├── error.rs                # Error types
 └── tui/
     ├── mod.rs              # TUI entry point, event loop, key handling

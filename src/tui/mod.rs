@@ -10,11 +10,13 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use tui_input::InputRequest;
 
 use crate::{Result, TransactionStore};
 
 use app::InputMode;
 
+/// Launch the interactive TUI application.
 pub fn run(store: TransactionStore) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -41,8 +43,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         terminal.draw(|f| ui::draw(f, app))?;
 
         if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match app.input_mode {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match app.input_mode {
                     InputMode::Normal => match key.code {
                         KeyCode::Char('q') => return Ok(()),
                         KeyCode::Char('j') | KeyCode::Down => app.next(),
@@ -57,12 +61,58 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::BackTab => app.previous_tab(),
                         KeyCode::Char('[') => app.previous_subtab(),
                         KeyCode::Char(']') => app.next_subtab(),
+                        KeyCode::Char('/') => app.start_search(),
                         KeyCode::Char('c') => app.start_category_edit(),
                         KeyCode::Char('t') => app.start_transfer_mark(),
                         KeyCode::Char('d') => app.delete_transfer(),
                         KeyCode::Enter => {
                             app.confirm_ai_category();
                             app.confirm_transfer_review();
+                        }
+                        _ => {}
+                    },
+                    InputMode::Search => match key.code {
+                        KeyCode::Esc => app.clear_search(),
+                        KeyCode::Enter => app.confirm_search(),
+                        KeyCode::Tab => {
+                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                app.previous_tab();
+                            } else {
+                                app.next_tab();
+                            }
+                        }
+                        KeyCode::BackTab => app.previous_tab(),
+                        KeyCode::Down => app.next(),
+                        KeyCode::Up => app.previous(),
+                        // Handle text input via tui-input
+                        KeyCode::Char(c) => {
+                            app.handle_search_input(InputRequest::InsertChar(c));
+                        }
+                        KeyCode::Backspace => {
+                            app.handle_search_input(InputRequest::DeletePrevChar);
+                        }
+                        KeyCode::Delete => {
+                            app.handle_search_input(InputRequest::DeleteNextChar);
+                        }
+                        KeyCode::Left => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.handle_search_input(InputRequest::GoToPrevWord);
+                            } else {
+                                app.handle_search_input(InputRequest::GoToPrevChar);
+                            }
+                        }
+                        KeyCode::Right => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.handle_search_input(InputRequest::GoToNextWord);
+                            } else {
+                                app.handle_search_input(InputRequest::GoToNextChar);
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.handle_search_input(InputRequest::GoToStart);
+                        }
+                        KeyCode::End => {
+                            app.handle_search_input(InputRequest::GoToEnd);
                         }
                         _ => {}
                     },
@@ -83,12 +133,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::Char('k') | KeyCode::Up => app.previous(),
                         _ => {}
                     },
-                    InputMode::TransferNoMatch => match key.code {
-                        KeyCode::Esc => app.cancel_input(),
-                        _ => {}
-                    },
+                    InputMode::TransferNoMatch => {
+                        if key.code == KeyCode::Esc {
+                            app.cancel_input();
+                        }
+                    }
                 }
-            }
         }
     }
 }

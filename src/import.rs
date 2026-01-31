@@ -4,7 +4,7 @@ use std::process::Command;
 
 use crate::{Error, RawTransaction, Result};
 
-pub fn find_import_script(exports_dir: &Path, bank: &str, account: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn find_import_script(exports_dir: &Path, bank: &str, account: &str) -> Option<std::path::PathBuf> {
     let account_script = exports_dir.join(bank).join(account).join("import");
     if account_script.exists() {
         return Some(account_script);
@@ -18,7 +18,7 @@ pub fn find_import_script(exports_dir: &Path, bank: &str, account: &str) -> Opti
     None
 }
 
-pub fn run_import_script(
+pub(crate) fn run_import_script(
     script_path: &Path,
     csv_file: &Path,
 ) -> Result<Vec<RawTransaction>> {
@@ -45,7 +45,7 @@ pub fn run_import_script(
     Ok(transactions)
 }
 
-pub fn compute_hash(date: &str, description: &str, amount_cents: i64, balance_cents: i64) -> String {
+pub(crate) fn compute_hash(date: &str, description: &str, amount_cents: i64, balance_cents: i64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(date.as_bytes());
     hasher.update(b"|");
@@ -57,23 +57,19 @@ pub fn compute_hash(date: &str, description: &str, amount_cents: i64, balance_ce
     hex::encode(hasher.finalize())
 }
 
-pub fn find_csv_files(account_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+pub(crate) fn find_csv_files(account_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(account_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension() {
-                if ext.eq_ignore_ascii_case("csv") {
-                    files.push(path);
-                }
-            }
+        if path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csv")) {
+            files.push(path);
         }
     }
     Ok(files)
 }
 
-pub fn hash_file(path: &Path) -> Result<String> {
+pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let contents = std::fs::read(path)?;
     let mut hasher = Sha256::new();
     hasher.update(&contents);

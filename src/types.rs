@@ -2,6 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Transaction data from import script output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawTransaction {
     pub date: String,
@@ -14,6 +15,7 @@ pub struct RawTransaction {
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
+/// Imported transaction from a bank account.
 #[derive(Debug, Clone)]
 pub struct Transaction {
     pub id: i64,
@@ -29,6 +31,7 @@ pub struct Transaction {
     pub import_batch_id: i64,
 }
 
+/// Bank institution.
 #[derive(Debug, Clone)]
 pub struct Bank {
     pub id: i64,
@@ -36,6 +39,7 @@ pub struct Bank {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+/// Bank account.
 #[derive(Debug, Clone)]
 pub struct Account {
     pub id: i64,
@@ -44,6 +48,7 @@ pub struct Account {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+/// Tracked CSV import file metadata.
 #[derive(Debug, Clone)]
 pub struct ImportedFile {
     pub id: i64,
@@ -54,6 +59,7 @@ pub struct ImportedFile {
     pub import_batch_id: i64,
 }
 
+/// Summary of changes from a refresh operation.
 #[derive(Debug, Default)]
 pub struct RefreshReport {
     pub banks_added: usize,
@@ -65,6 +71,7 @@ pub struct RefreshReport {
     pub transactions_skipped: usize,
 }
 
+/// Query filters for transactions.
 #[derive(Debug, Default, Clone)]
 pub struct TransactionFilter {
     pub bank_id: Option<i64>,
@@ -76,6 +83,7 @@ pub struct TransactionFilter {
     pub offset: Option<usize>,
 }
 
+/// Hierarchical category (e.g., "Food/Groceries").
 #[derive(Debug, Clone)]
 pub struct Category {
     pub id: i64,
@@ -83,6 +91,7 @@ pub struct Category {
     pub created_at: DateTime<Utc>,
 }
 
+/// How a category was assigned to a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CategorySource {
     Manual,
@@ -91,6 +100,7 @@ pub enum CategorySource {
 }
 
 impl CategorySource {
+    /// Convert to string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
             CategorySource::Manual => "manual",
@@ -98,17 +108,22 @@ impl CategorySource {
             CategorySource::Rule => "rule",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for CategorySource {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "manual" => Some(CategorySource::Manual),
-            "ai" => Some(CategorySource::Ai),
-            "rule" => Some(CategorySource::Rule),
-            _ => None,
+            "manual" => Ok(CategorySource::Manual),
+            "ai" => Ok(CategorySource::Ai),
+            "rule" => Ok(CategorySource::Rule),
+            _ => Err(()),
         }
     }
 }
 
+/// Category and metadata enrichment for a transaction.
 #[derive(Debug, Clone)]
 pub struct TransactionEnrichment {
     pub id: i64,
@@ -121,6 +136,7 @@ pub struct TransactionEnrichment {
     pub updated_at: DateTime<Utc>,
 }
 
+/// How a transfer between transactions was detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferSource {
     Manual,
@@ -128,22 +144,28 @@ pub enum TransferSource {
 }
 
 impl TransferSource {
+    /// Convert to string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
             TransferSource::Manual => "manual",
             TransferSource::Auto => "auto",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for TransferSource {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "manual" => Some(TransferSource::Manual),
-            "auto" => Some(TransferSource::Auto),
-            _ => None,
+            "manual" => Ok(TransferSource::Manual),
+            "auto" => Ok(TransferSource::Auto),
+            _ => Err(()),
         }
     }
 }
 
+/// Link between two transactions identified as a transfer.
 #[derive(Debug, Clone)]
 pub struct Transfer {
     pub id: i64,
@@ -154,6 +176,7 @@ pub struct Transfer {
     pub created_at: DateTime<Utc>,
 }
 
+/// Transaction with its category enrichment.
 #[derive(Debug, Clone)]
 pub struct TransactionWithEnrichment {
     pub transaction: Transaction,
@@ -161,6 +184,7 @@ pub struct TransactionWithEnrichment {
     pub category: Option<Category>,
 }
 
+/// Transfer with both resolved transactions.
 #[derive(Debug, Clone)]
 pub struct TransferWithTransactions {
     pub transfer: Transfer,

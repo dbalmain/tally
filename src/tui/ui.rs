@@ -13,14 +13,20 @@ use super::app::{App, InputMode, Tab, TodoSubTab};
 const DETAILS_HEIGHT: u16 = 8;
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(f.area());
+    let has_search = app.input_mode == InputMode::Search || !app.search_value().is_empty();
+    // For Todo tab, search bar is drawn inside draw_todo (below sub-tabs)
+    let search_in_header = has_search && app.current_tab != Tab::Todo;
+    let header_height = if search_in_header { 3 } else { 2 };
 
-    draw_tabs(f, app, chunks[0]);
+    let chunks =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).split(f.area());
+
+    draw_header(f, app, chunks[0], search_in_header);
 
     match app.current_tab {
         Tab::Transactions => draw_transactions(f, app, chunks[1]),
         Tab::Transfers => draw_transfers(f, app, chunks[1]),
-        Tab::Todo => draw_todo(f, app, chunks[1]),
+        Tab::Todo => draw_todo(f, app, chunks[1], has_search),
     }
 
     if app.input_mode == InputMode::Category {
@@ -33,6 +39,51 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if let Some(ref msg) = app.error_message {
         draw_error_popup(f, msg);
+    }
+}
+
+fn draw_header(f: &mut Frame, app: &App, area: Rect, has_search: bool) {
+    if has_search {
+        // Tabs on first row, search bar on second row
+        let chunks = Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(area);
+
+        draw_tabs(f, app, chunks[0]);
+        draw_search_bar(f, app, chunks[1]);
+    } else {
+        draw_tabs(f, app, area);
+    }
+}
+
+fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
+    let is_active = app.input_mode == InputMode::Search;
+    let search_value = app.search_value();
+
+    if is_active {
+        let cursor_pos = app.search_cursor();
+
+        // Split text at cursor position for visual cursor
+        let (before_cursor, after_cursor) = search_value.split_at(
+            search_value
+                .char_indices()
+                .nth(cursor_pos)
+                .map(|(i, _)| i)
+                .unwrap_or(search_value.len()),
+        );
+
+        let search_line = Line::from(vec![
+            Span::styled("/", Style::default().fg(Color::DarkGray)),
+            Span::styled(before_cursor, Style::default().fg(Color::Yellow)),
+            Span::styled("▌", Style::default().fg(Color::Yellow)),
+            Span::styled(after_cursor, Style::default().fg(Color::Yellow)),
+        ]);
+        f.render_widget(Paragraph::new(search_line), area);
+    } else {
+        // Inactive search bar with filter value
+        let search_line = Line::from(vec![
+            Span::styled("/", Style::default().fg(Color::DarkGray)),
+            Span::styled(search_value, Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(search_line), area);
     }
 }
 
@@ -61,15 +112,21 @@ fn draw_transactions(f: &mut Frame, app: &App, area: Rect) {
     let chunks =
         Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(area);
 
-    draw_transaction_table(f, app, &app.transactions, app.selected_index, chunks[0]);
+    draw_transaction_table(
+        f,
+        app,
+        &app.filtered_transactions,
+        app.selected_index,
+        chunks[0],
+    );
 
-    if let Some(tx) = app.transactions.get(app.selected_index) {
+    if let Some(tx) = app.filtered_transactions.get(app.selected_index) {
         draw_transaction_details(f, app, tx, chunks[1]);
     }
 }
 
 fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
-    if app.linked_transfers.is_empty() {
+    if app.filtered_transfers.is_empty() {
         let text = Paragraph::new(vec![
             Line::from(""),
             Line::from(vec![Span::styled(
@@ -85,11 +142,11 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
         Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(area);
 
     let visible_height = chunks[0].height as usize;
-    let total = app.linked_transfers.len();
+    let total = app.filtered_transfers.len();
     let offset = calculate_scroll_offset(app.selected_index, total, visible_height);
 
     let rows: Vec<Row> = app
-        .linked_transfers
+        .filtered_transfers
         .iter()
         .enumerate()
         .skip(offset)
@@ -132,21 +189,65 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(table, chunks[0]);
 
-    if let Some(twt) = app.linked_transfers.get(app.selected_index) {
+    if let Some(twt) = app.filtered_transfers.get(app.selected_index) {
         draw_transfer_details(f, app, twt, chunks[1]);
     }
 }
 
-fn draw_todo(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
+fn draw_todo(f: &mut Frame, app: &App, area: Rect, has_search: bool) {
+    let header_height = if has_search { 3 } else { 2 };
+    let chunks =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).split(area);
 
+    // Draw sub-tabs and optionally search bar
+    if has_search {
+        let header_chunks =
+            Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(chunks[0]);
+        draw_todo_subtabs(f, app, header_chunks[0]);
+        draw_search_bar(f, app, header_chunks[1]);
+    } else {
+        draw_todo_subtabs(f, app, chunks[0]);
+    }
+
+    let content_chunks =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(chunks[1]);
+
+    match app.todo_subtab {
+        TodoSubTab::Uncategorized => {
+            draw_transaction_table(
+                f,
+                app,
+                &app.filtered_uncategorized,
+                app.selected_index,
+                content_chunks[0],
+            );
+            if let Some(tx) = app.filtered_uncategorized.get(app.selected_index) {
+                draw_transaction_details(f, app, tx, content_chunks[1]);
+            }
+        }
+        TodoSubTab::AiReview => {
+            draw_ai_review_table(f, app, content_chunks[0]);
+            if let Some(review) = app.filtered_ai_reviews.get(app.selected_index) {
+                draw_ai_review_details(f, app, review, content_chunks[1]);
+            }
+        }
+        TodoSubTab::TransferReview => {
+            draw_transfer_review_table(f, app, content_chunks[0]);
+            if let Some(transfer) = app.filtered_transfer_reviews.get(app.selected_index) {
+                draw_pending_transfer_details(f, app, transfer, content_chunks[1]);
+            }
+        }
+    }
+}
+
+fn draw_todo_subtabs(f: &mut Frame, app: &App, area: Rect) {
     let subtitles: Vec<Line> = TodoSubTab::all()
         .iter()
         .map(|t| {
             let count = match t {
-                TodoSubTab::Uncategorized => app.uncategorized.len(),
-                TodoSubTab::AiReview => app.ai_reviews.len(),
-                TodoSubTab::TransferReview => app.transfer_reviews.len(),
+                TodoSubTab::Uncategorized => app.filtered_uncategorized.len(),
+                TodoSubTab::AiReview => app.filtered_ai_reviews.len(),
+                TodoSubTab::TransferReview => app.filtered_transfer_reviews.len(),
             };
             Line::from(format!("{} ({})", t.title(), count))
         })
@@ -163,37 +264,7 @@ fn draw_todo(f: &mut Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().fg(Color::Cyan))
         .divider("  ");
 
-    f.render_widget(subtabs, chunks[0]);
-
-    let content_chunks =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(chunks[1]);
-
-    match app.todo_subtab {
-        TodoSubTab::Uncategorized => {
-            draw_transaction_table(
-                f,
-                app,
-                &app.uncategorized,
-                app.selected_index,
-                content_chunks[0],
-            );
-            if let Some(tx) = app.uncategorized.get(app.selected_index) {
-                draw_transaction_details(f, app, tx, content_chunks[1]);
-            }
-        }
-        TodoSubTab::AiReview => {
-            draw_ai_review_table(f, app, content_chunks[0]);
-            if let Some(review) = app.ai_reviews.get(app.selected_index) {
-                draw_ai_review_details(f, app, review, content_chunks[1]);
-            }
-        }
-        TodoSubTab::TransferReview => {
-            draw_transfer_review_table(f, app, content_chunks[0]);
-            if let Some(transfer) = app.transfer_reviews.get(app.selected_index) {
-                draw_pending_transfer_details(f, app, transfer, content_chunks[1]);
-            }
-        }
-    }
+    f.render_widget(subtabs, area);
 }
 
 fn draw_transaction_table(
@@ -274,11 +345,11 @@ fn draw_transaction_table(
 
 fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
     let visible_height = area.height as usize;
-    let total = app.ai_reviews.len();
+    let total = app.filtered_ai_reviews.len();
     let offset = calculate_scroll_offset(app.selected_index, total, visible_height);
 
     let rows: Vec<Row> = app
-        .ai_reviews
+        .filtered_ai_reviews
         .iter()
         .enumerate()
         .skip(offset)
@@ -336,7 +407,7 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
-    if app.transfer_reviews.is_empty() {
+    if app.filtered_transfer_reviews.is_empty() {
         let text = Paragraph::new(vec![
             Line::from(""),
             Line::from(vec![Span::styled(
@@ -349,11 +420,11 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let visible_height = area.height as usize;
-    let total = app.transfer_reviews.len();
+    let total = app.filtered_transfer_reviews.len();
     let offset = calculate_scroll_offset(app.selected_index, total, visible_height);
 
     let rows: Vec<Row> = app
-        .transfer_reviews
+        .filtered_transfer_reviews
         .iter()
         .enumerate()
         .skip(offset)
@@ -483,9 +554,7 @@ fn draw_error_popup(f: &mut Frame, msg: &str) {
 }
 
 fn calculate_scroll_offset(selected: usize, total: usize, visible_height: usize) -> usize {
-    if total <= visible_height {
-        0
-    } else if selected < visible_height / 2 {
+    if total <= visible_height || selected < visible_height / 2 {
         0
     } else if selected > total - visible_height / 2 {
         total.saturating_sub(visible_height)

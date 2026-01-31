@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tally::TransactionStore;
 
 fn main() {
@@ -14,7 +14,7 @@ fn main() {
     }
 }
 
-fn run_refresh(db_path: &PathBuf, exports_dir: &PathBuf) {
+fn run_refresh(db_path: &Path, exports_dir: &Path) {
     let mut store = TransactionStore::open(db_path, exports_dir)
         .expect("Failed to open transaction store");
 
@@ -39,7 +39,7 @@ fn run_refresh(db_path: &PathBuf, exports_dir: &PathBuf) {
     }
 }
 
-fn run_tui(db_path: &PathBuf, exports_dir: &PathBuf) {
+fn run_tui(db_path: &Path, exports_dir: &Path) {
     let store = TransactionStore::open(db_path, exports_dir)
         .expect("Failed to open transaction store");
 

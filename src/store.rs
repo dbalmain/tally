@@ -16,6 +16,7 @@ pub struct TransactionStore {
 }
 
 impl TransactionStore {
+    /// Open or create the database at the given path.
     pub fn open(db_path: &Path, exports_dir: &Path) -> Result<Self> {
         let conn = Connection::open(db_path)?;
         init_db(&conn)?;
@@ -25,6 +26,7 @@ impl TransactionStore {
         })
     }
 
+    /// Open an in-memory database for testing.
     pub fn open_in_memory(exports_dir: &Path) -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         init_db(&conn)?;
@@ -34,6 +36,7 @@ impl TransactionStore {
         })
     }
 
+    /// Scan exports directory and import all new transactions.
     pub fn refresh(&mut self) -> Result<RefreshReport> {
         let mut report = RefreshReport::default();
 
@@ -66,6 +69,7 @@ impl TransactionStore {
         Ok(report)
     }
 
+    /// List all non-deleted banks.
     pub fn list_banks(&self) -> Result<Vec<Bank>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, deleted_at FROM banks WHERE deleted_at IS NULL ORDER BY name",
@@ -86,6 +90,7 @@ impl TransactionStore {
         Ok(banks)
     }
 
+    /// List all non-deleted accounts for a bank.
     pub fn list_accounts(&self, bank_id: i64) -> Result<Vec<Account>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, bank_id, name, deleted_at FROM accounts 
@@ -108,6 +113,7 @@ impl TransactionStore {
         Ok(accounts)
     }
 
+    /// Query transactions with optional filters.
     pub fn query_transactions(&self, filter: &TransactionFilter) -> Result<Vec<Transaction>> {
         let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description, 
@@ -371,6 +377,7 @@ impl TransactionStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_transaction(
         &self,
         account_id: i64,
@@ -473,6 +480,7 @@ impl TransactionStore {
 
     // ==================== Categories ====================
 
+    /// List all categories in path order.
     pub fn list_categories(&self) -> Result<Vec<Category>> {
         let mut stmt = self
             .conn
@@ -482,13 +490,14 @@ impl TransactionStore {
                 Ok(Category {
                     id: row.get(0)?,
                     path: row.get(1)?,
-                    created_at: parse_datetime(&row.get::<_, String>(2)?),
+                    created_at: parse_datetime(&row.get::<_, String>(2)?)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(categories)
     }
 
+    /// Find categories matching a fuzzy query.
     pub fn find_categories(&self, query: &str) -> Result<Vec<Category>> {
         let all = self.list_categories()?;
         let query_lower = query.to_lowercase();
@@ -496,17 +505,14 @@ impl TransactionStore {
             .into_iter()
             .filter_map(|cat| {
                 let path_lower = cat.path.to_lowercase();
-                if let Some(score) = fuzzy_match(&path_lower, &query_lower) {
-                    Some((score, cat))
-                } else {
-                    None
-                }
+                fuzzy_match(&path_lower, &query_lower).map(|score| (score, cat))
             })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         Ok(scored.into_iter().map(|(_, cat)| cat).collect())
     }
 
+    /// Get or create a category by path.
     pub fn get_or_create_category(&mut self, path: &str) -> Result<i64> {
         let normalized = path.trim().trim_matches('/');
         if let Some(id) = self
@@ -528,6 +534,7 @@ impl TransactionStore {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Get a category by ID.
     pub fn get_category(&self, id: i64) -> Result<Option<Category>> {
         self.conn
             .query_row(
@@ -537,7 +544,7 @@ impl TransactionStore {
                     Ok(Category {
                         id: row.get(0)?,
                         path: row.get(1)?,
-                        created_at: parse_datetime(&row.get::<_, String>(2)?),
+                        created_at: parse_datetime(&row.get::<_, String>(2)?)?,
                     })
                 },
             )
@@ -545,6 +552,7 @@ impl TransactionStore {
             .map_err(Into::into)
     }
 
+    /// Get the category assigned to a transaction.
     pub fn get_transaction_category(&self, transaction_id: i64) -> Result<Option<Category>> {
         self.conn
             .query_row(
@@ -557,7 +565,7 @@ impl TransactionStore {
                     Ok(Category {
                         id: row.get(0)?,
                         path: row.get(1)?,
-                        created_at: parse_datetime(&row.get::<_, String>(2)?),
+                        created_at: parse_datetime(&row.get::<_, String>(2)?)?,
                     })
                 },
             )
@@ -567,6 +575,7 @@ impl TransactionStore {
 
     // ==================== Enrichments ====================
 
+    /// Get enrichment data for a transaction.
     pub fn get_enrichment(&self, transaction_id: i64) -> Result<Option<TransactionEnrichment>> {
         self.conn
             .query_row(
@@ -574,12 +583,13 @@ impl TransactionStore {
                         ai_confidence, created_at, updated_at 
                  FROM transaction_enrichments WHERE transaction_id = ?",
                 [transaction_id],
-                |row| Ok(parse_enrichment(row)),
+                parse_enrichment,
             )
             .optional()
             .map_err(Into::into)
     }
 
+    /// Set or update the category for a transaction.
     pub fn set_category(
         &mut self,
         transaction_id: i64,
@@ -612,6 +622,7 @@ impl TransactionStore {
         Ok(())
     }
 
+    /// Mark a category as user-confirmed.
     pub fn confirm_category(&mut self, transaction_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE transaction_enrichments SET category_confirmed = 1, updated_at = ? WHERE transaction_id = ?",
@@ -622,6 +633,7 @@ impl TransactionStore {
 
     // ==================== Transfers ====================
 
+    /// Create a transfer linking two transactions.
     pub fn create_transfer(
         &mut self,
         from_transaction_id: i64,
@@ -643,6 +655,7 @@ impl TransactionStore {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Mark a transfer as user-confirmed.
     pub fn confirm_transfer(&mut self, transfer_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE transfers SET confirmed = 1 WHERE id = ?",
@@ -651,12 +664,14 @@ impl TransactionStore {
         Ok(())
     }
 
+    /// Delete a transfer.
     pub fn delete_transfer(&mut self, transfer_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM transfers WHERE id = ?", [transfer_id])?;
         Ok(())
     }
 
+    /// Get the transfer (if any) involving a transaction.
     pub fn get_transfer_for_transaction(&self, transaction_id: i64) -> Result<Option<Transfer>> {
         self.conn
             .query_row(
@@ -664,12 +679,13 @@ impl TransactionStore {
                  FROM transfers 
                  WHERE from_transaction_id = ? OR to_transaction_id = ?",
                 params![transaction_id, transaction_id],
-                |row| Ok(parse_transfer(row)),
+                parse_transfer,
             )
             .optional()
             .map_err(Into::into)
     }
 
+    /// Find potential matching transactions for a transfer.
     pub fn find_matching_transfer_candidates(&self, tx: &Transaction) -> Result<Vec<Transaction>> {
         let opposite_amount = -tx.amount_cents;
         
@@ -690,7 +706,7 @@ impl TransactionStore {
         let mut transactions: Vec<Transaction> = stmt
             .query_map(
                 params![opposite_amount, tx.account_id, tx.id, tx.date.to_string()],
-                |row| Ok(parse_transaction(row)),
+                parse_transaction,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -711,7 +727,7 @@ impl TransactionStore {
             transactions = stmt
                 .query_map(
                     params![opposite_amount, tx.id, tx.date.to_string()],
-                    |row| Ok(parse_transaction(row)),
+                    parse_transaction,
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
         }
@@ -721,6 +737,7 @@ impl TransactionStore {
 
     // ==================== Todo Queries ====================
 
+    /// Get transactions that need categorization.
     pub fn get_uncategorized_transactions(&self, limit: usize) -> Result<Vec<Transaction>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
@@ -736,11 +753,12 @@ impl TransactionStore {
              LIMIT ?",
         )?;
         let transactions = stmt
-            .query_map([limit as i64], |row| Ok(parse_transaction(row)))?
+            .query_map([limit as i64], parse_transaction)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(transactions)
     }
 
+    /// Get transactions with AI-suggested categories pending review.
     pub fn get_pending_ai_reviews(&self, limit: usize) -> Result<Vec<TransactionWithEnrichment>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
@@ -760,13 +778,13 @@ impl TransactionStore {
         )?;
         let results = stmt
             .query_map([limit as i64], |row| {
-                let transaction = parse_transaction(row);
-                let enrichment = Some(parse_enrichment_at_offset(row, 11));
+                let transaction = parse_transaction(row)?;
+                let enrichment = Some(parse_enrichment_at_offset(row, 11)?);
                 let category = if row.get::<_, Option<i64>>(19)?.is_some() {
                     Some(Category {
                         id: row.get(19)?,
                         path: row.get(20)?,
-                        created_at: parse_datetime(&row.get::<_, String>(21)?),
+                        created_at: parse_datetime(&row.get::<_, String>(21)?)?,
                     })
                 } else {
                     None
@@ -781,6 +799,7 @@ impl TransactionStore {
         Ok(results)
     }
 
+    /// Get transfers pending user confirmation.
     pub fn get_pending_transfer_reviews(&self, limit: usize) -> Result<Vec<Transfer>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_transaction_id, to_transaction_id, source, confirmed, created_at
@@ -790,11 +809,12 @@ impl TransactionStore {
              LIMIT ?",
         )?;
         let transfers = stmt
-            .query_map([limit as i64], |row| Ok(parse_transfer(row)))?
+            .query_map([limit as i64], parse_transfer)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(transfers)
     }
 
+    /// Get a transaction by ID.
     pub fn get_transaction_by_id(&self, id: i64) -> Result<Option<Transaction>> {
         self.conn
             .query_row(
@@ -804,12 +824,13 @@ impl TransactionStore {
                  JOIN accounts a ON t.account_id = a.id
                  WHERE t.id = ?",
                 [id],
-                |row| Ok(parse_transaction(row)),
+                parse_transaction,
             )
             .optional()
             .map_err(Into::into)
     }
 
+    /// List transfers, optionally filtered to confirmed only.
     pub fn list_transfers(&self, confirmed_only: bool) -> Result<Vec<Transfer>> {
         let sql = if confirmed_only {
             "SELECT id, from_transaction_id, to_transaction_id, source, confirmed, created_at
@@ -820,11 +841,12 @@ impl TransactionStore {
         };
         let mut stmt = self.conn.prepare(sql)?;
         let transfers = stmt
-            .query_map([], |row| Ok(parse_transfer(row)))?
+            .query_map([], parse_transfer)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(transfers)
     }
 
+    /// List transfers with all transaction data resolved.
     pub fn list_transfers_with_transactions(
         &self,
         confirmed_only: bool,
@@ -849,64 +871,79 @@ impl TransactionStore {
     }
 }
 
-fn parse_datetime(s: &str) -> chrono::DateTime<Utc> {
+fn parse_datetime(s: &str) -> rusqlite::Result<chrono::DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
-        .unwrap()
-        .with_timezone(&Utc)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(e),
+        ))
 }
 
-fn parse_transaction(row: &rusqlite::Row) -> Transaction {
-    let metadata_str: String = row.get(8).unwrap_or_default();
+fn parse_transaction(row: &rusqlite::Row) -> rusqlite::Result<Transaction> {
+    let metadata_str: String = row.get(8)?;
     let metadata: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(&metadata_str).unwrap_or_default();
-    let date_str: String = row.get(3).unwrap_or_default();
-    let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+    let date_str: String = row.get(3)?;
+    let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+    })?;
 
-    Transaction {
-        id: row.get(0).unwrap(),
-        bank_id: row.get(1).unwrap(),
-        account_id: row.get(2).unwrap(),
+    Ok(Transaction {
+        id: row.get(0)?,
+        bank_id: row.get(1)?,
+        account_id: row.get(2)?,
         date,
-        description: row.get(4).unwrap(),
-        amount_cents: row.get(5).unwrap(),
-        balance_cents: row.get(6).unwrap(),
-        hash: row.get(7).unwrap(),
+        description: row.get(4)?,
+        amount_cents: row.get(5)?,
+        balance_cents: row.get(6)?,
+        hash: row.get(7)?,
         metadata,
-        source_file: row.get(9).unwrap(),
-        import_batch_id: row.get(10).unwrap(),
-    }
+        source_file: row.get(9)?,
+        import_batch_id: row.get(10)?,
+    })
 }
 
-fn parse_enrichment(row: &rusqlite::Row) -> TransactionEnrichment {
+fn parse_enrichment(row: &rusqlite::Row) -> rusqlite::Result<TransactionEnrichment> {
     parse_enrichment_at_offset(row, 0)
 }
 
-fn parse_enrichment_at_offset(row: &rusqlite::Row, offset: usize) -> TransactionEnrichment {
-    TransactionEnrichment {
-        id: row.get(offset).unwrap(),
-        transaction_id: row.get(offset + 1).unwrap(),
-        category_id: row.get(offset + 2).unwrap(),
+fn parse_enrichment_at_offset(
+    row: &rusqlite::Row,
+    offset: usize,
+) -> rusqlite::Result<TransactionEnrichment> {
+    Ok(TransactionEnrichment {
+        id: row.get(offset)?,
+        transaction_id: row.get(offset + 1)?,
+        category_id: row.get(offset + 2)?,
         category_source: row
-            .get::<_, Option<String>>(offset + 3)
-            .unwrap()
-            .and_then(|s| CategorySource::from_str(&s)),
-        category_confirmed: row.get::<_, i32>(offset + 4).unwrap() != 0,
-        ai_confidence: row.get(offset + 5).unwrap(),
-        created_at: parse_datetime(&row.get::<_, String>(offset + 6).unwrap()),
-        updated_at: parse_datetime(&row.get::<_, String>(offset + 7).unwrap()),
-    }
+            .get::<_, Option<String>>(offset + 3)?
+            .and_then(|s| s.parse().ok()),
+        category_confirmed: row.get::<_, i32>(offset + 4)? != 0,
+        ai_confidence: row.get(offset + 5)?,
+        created_at: parse_datetime(&row.get::<_, String>(offset + 6)?)?,
+        updated_at: parse_datetime(&row.get::<_, String>(offset + 7)?)?,
+    })
 }
 
-fn parse_transfer(row: &rusqlite::Row) -> Transfer {
-    Transfer {
-        id: row.get(0).unwrap(),
-        from_transaction_id: row.get(1).unwrap(),
-        to_transaction_id: row.get(2).unwrap(),
-        source: TransferSource::from_str(&row.get::<_, String>(3).unwrap()).unwrap(),
-        confirmed: row.get::<_, i32>(4).unwrap() != 0,
-        created_at: parse_datetime(&row.get::<_, String>(5).unwrap()),
-    }
+fn parse_transfer(row: &rusqlite::Row) -> rusqlite::Result<Transfer> {
+    let source_str: String = row.get(3)?;
+    let source = source_str.parse().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            format!("invalid transfer source: {}", source_str).into(),
+        )
+    })?;
+    Ok(Transfer {
+        id: row.get(0)?,
+        from_transaction_id: row.get(1)?,
+        to_transaction_id: row.get(2)?,
+        source,
+        confirmed: row.get::<_, i32>(4)? != 0,
+        created_at: parse_datetime(&row.get::<_, String>(5)?)?,
+    })
 }
 
 fn fuzzy_match(haystack: &str, needle: &str) -> Option<i32> {

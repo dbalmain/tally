@@ -81,7 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_enrichments_confirmed ON transaction_enrichments(
 CREATE INDEX IF NOT EXISTS idx_transfers_confirmed ON transfers(confirmed);
 "#;
 
-pub fn init_db(conn: &Connection) -> Result<()> {
+pub(crate) fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
     Ok(())
 }
