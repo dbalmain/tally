@@ -78,7 +78,13 @@ pub struct TransactionFilter {
     pub account_id: Option<i64>,
     pub from_date: Option<NaiveDate>,
     pub to_date: Option<NaiveDate>,
+    pub amount_min: Option<i64>,
+    pub amount_max: Option<i64>,
+    pub bank_name_prefix: Option<String>,
+    pub account_name_prefix: Option<String>,
+    pub category_contains: Option<String>,
     pub description_contains: Option<String>,
+    pub description_regex: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }

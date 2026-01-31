@@ -115,13 +115,24 @@ impl TransactionStore {
     pub fn query_transactions(&self, filter: &TransactionFilter) -> Result<Vec<Transaction>> {
         use rusqlite::types::Value;
 
+        let needs_category_join = filter.category_contains.is_some();
+
         let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description, 
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
-             WHERE a.deleted_at IS NULL",
+             JOIN banks b ON a.bank_id = b.id",
         );
+
+        if needs_category_join {
+            sql.push_str(
+                " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
+                 LEFT JOIN categories c ON e.category_id = c.id",
+            );
+        }
+
+        sql.push_str(" WHERE a.deleted_at IS NULL");
         let mut params: Vec<Value> = Vec::new();
 
         if let Some(bank_id) = filter.bank_id {
@@ -140,9 +151,33 @@ impl TransactionStore {
             sql.push_str(" AND t.date <= ?");
             params.push(Value::Text(to_date.to_string()));
         }
+        if let Some(amount_min) = filter.amount_min {
+            sql.push_str(" AND t.amount_cents >= ?");
+            params.push(Value::Integer(amount_min));
+        }
+        if let Some(amount_max) = filter.amount_max {
+            sql.push_str(" AND t.amount_cents <= ?");
+            params.push(Value::Integer(amount_max));
+        }
+        if let Some(ref prefix) = filter.bank_name_prefix {
+            sql.push_str(" AND LOWER(b.name) LIKE ?");
+            params.push(Value::Text(format!("{}%", prefix.to_lowercase())));
+        }
+        if let Some(ref prefix) = filter.account_name_prefix {
+            sql.push_str(" AND LOWER(a.name) LIKE ?");
+            params.push(Value::Text(format!("{}%", prefix.to_lowercase())));
+        }
+        if let Some(ref cat) = filter.category_contains {
+            sql.push_str(" AND LOWER(c.path) LIKE ?");
+            params.push(Value::Text(format!("%{}%", cat.to_lowercase())));
+        }
         if let Some(ref desc) = filter.description_contains {
             sql.push_str(" AND t.description LIKE ?");
             params.push(Value::Text(format!("%{}%", desc)));
+        }
+        if let Some(ref regex) = filter.description_regex {
+            sql.push_str(" AND regexp(?, t.description)");
+            params.push(Value::Text(regex.clone()));
         }
 
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
@@ -1082,5 +1117,91 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
 
         let banks = store.list_banks().unwrap();
         assert!(banks.is_empty());
+    }
+
+    #[test]
+    fn test_query_transactions_amount_filter() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        // Transaction has amount -10000 cents
+        let filter = TransactionFilter {
+            amount_min: Some(-10000),
+            amount_max: Some(-10000),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // Out of range
+        let filter = TransactionFilter {
+            amount_min: Some(0),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert!(txs.is_empty());
+    }
+
+    #[test]
+    fn test_query_transactions_bank_name_prefix() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        // "Test" prefix matches "TestBank"
+        let filter = TransactionFilter {
+            bank_name_prefix: Some("Test".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // Case insensitive
+        let filter = TransactionFilter {
+            bank_name_prefix: Some("test".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // "Bank" does not match (starts-with, not contains)
+        let filter = TransactionFilter {
+            bank_name_prefix: Some("Bank".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert!(txs.is_empty());
+    }
+
+    #[test]
+    fn test_query_transactions_description_regex() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        // Regex matches
+        let filter = TransactionFilter {
+            description_regex: Some("Test.*action".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // Case-insensitive regex
+        let filter = TransactionFilter {
+            description_regex: Some("(?i)TEST".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // Non-matching regex
+        let filter = TransactionFilter {
+            description_regex: Some("^Coffee".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert!(txs.is_empty());
     }
 }

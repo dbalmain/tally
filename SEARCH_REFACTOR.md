@@ -23,15 +23,15 @@ When both active: DB search runs first, fuzzy filters those results. Escape clea
 
 ## Implementation Steps
 
-### Step 1: Add REGEXP UDF to SQLite
-- [ ] Register `regexp(pattern, text)` function in `src/db.rs`
-- [ ] Call from `init_db()`
+### Step 1: Add REGEXP UDF to SQLite ✓
+- [x] Register `regexp(pattern, text)` function in `src/db.rs`
+- [x] Call from `init_db()`
 
-### Step 2: Extend TransactionFilter and query_transactions
-- [ ] Add `amount_min`, `amount_max`, `text_substring`, `text_regex` to `TransactionFilter`
-- [ ] Add `bank_name_prefix`, `account_name_prefix` for starts-with matching
-- [ ] Update `query_transactions()` to build SQL for new filters
-- [ ] Add category filter with JOIN
+### Step 2: Extend TransactionFilter and query_transactions ✓
+- [x] Add `amount_min`, `amount_max`, `description_regex` to `TransactionFilter`
+- [x] Add `bank_name_prefix`, `account_name_prefix` for starts-with matching
+- [x] Add `category_contains` with LEFT JOIN to enrichments/categories
+- [x] Update `query_transactions()` to build SQL for all new filters
 
 ### Step 3: Create new search query types
 - [ ] `DbSearchQuery` with structured filters + text/regex
@@ -86,5 +86,5 @@ When both active: DB search runs first, fuzzy filters those results. Escape clea
 
 ## Progress
 
-Started: Not yet
-Current step: 1
+Started: Yes
+Current step: 3
