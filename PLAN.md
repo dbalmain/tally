@@ -4,7 +4,7 @@ Prioritized improvements identified from code review. Work through these one at 
 
 ## Medium Priority
 
-### 2. [ ] Improve `query_transactions` parameter building
+### 2. [x] Improve `query_transactions` parameter building
 
 **Why:** Currently uses `Vec<Box<dyn ToSql>>` which heap-allocates per parameter.
 

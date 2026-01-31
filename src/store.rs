@@ -113,6 +113,8 @@ impl TransactionStore {
 
     /// Query transactions with optional filters.
     pub fn query_transactions(&self, filter: &TransactionFilter) -> Result<Vec<Transaction>> {
+        use rusqlite::types::Value;
+
         let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description, 
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
@@ -120,45 +122,43 @@ impl TransactionStore {
              JOIN accounts a ON t.account_id = a.id
              WHERE a.deleted_at IS NULL",
         );
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut params: Vec<Value> = Vec::new();
 
         if let Some(bank_id) = filter.bank_id {
             sql.push_str(" AND a.bank_id = ?");
-            params_vec.push(Box::new(bank_id));
+            params.push(Value::Integer(bank_id));
         }
         if let Some(account_id) = filter.account_id {
             sql.push_str(" AND t.account_id = ?");
-            params_vec.push(Box::new(account_id));
+            params.push(Value::Integer(account_id));
         }
         if let Some(ref from_date) = filter.from_date {
             sql.push_str(" AND t.date >= ?");
-            params_vec.push(Box::new(from_date.to_string()));
+            params.push(Value::Text(from_date.to_string()));
         }
         if let Some(ref to_date) = filter.to_date {
             sql.push_str(" AND t.date <= ?");
-            params_vec.push(Box::new(to_date.to_string()));
+            params.push(Value::Text(to_date.to_string()));
         }
         if let Some(ref desc) = filter.description_contains {
             sql.push_str(" AND t.description LIKE ?");
-            params_vec.push(Box::new(format!("%{}%", desc)));
+            params.push(Value::Text(format!("%{}%", desc)));
         }
 
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
 
         if let Some(limit) = filter.limit {
             sql.push_str(" LIMIT ?");
-            params_vec.push(Box::new(limit as i64));
+            params.push(Value::Integer(limit as i64));
         }
         if let Some(offset) = filter.offset {
             sql.push_str(" OFFSET ?");
-            params_vec.push(Box::new(offset as i64));
+            params.push(Value::Integer(offset as i64));
         }
-
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
         let transactions = stmt
-            .query_map(params_refs.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(params), |row| {
                 let metadata_str: String = row.get(8)?;
                 let metadata: std::collections::HashMap<String, serde_json::Value> =
                     serde_json::from_str(&metadata_str).unwrap_or_default();
