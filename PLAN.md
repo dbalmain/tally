@@ -22,7 +22,7 @@ params_vec.push(Box::new(bank_id));
 
 ---
 
-### 3. [ ] Push more filtering into SQL
+### 3. [x] Push more filtering into SQL
 
 **Why:** Currently loads 500 transactions then filters in memory. For structured filters (date, amount, bank, account), SQL is more efficient.
 
@@ -30,7 +30,13 @@ params_vec.push(Box::new(bank_id));
 
 **Target:** Build dynamic SQL WHERE clauses for date/amount/bank/account filters.
 
-**Files:** `src/tui/app.rs`, `src/store.rs`
+**Solution:** Split search into two modes:
+- `/` (DB search): All structured filters pushed to SQL via `DbSearchQuery.to_filter()`
+- `~` (Fuzzy search): In-memory nucleo fuzzy matching on loaded results
+- Both can be active simultaneously (stacked)
+- See SEARCH_REFACTOR.md for full implementation details
+
+**Files:** `src/search.rs`, `src/tui/app.rs`, `src/tui/mod.rs`, `src/tui/ui.rs`, `src/store.rs`
 
 **Effort:** M (2-4h)
 
