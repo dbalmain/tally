@@ -79,11 +79,10 @@ impl TransactionStore {
                 Ok(Bank {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    deleted_at: row.get::<_, Option<String>>(2)?.map(|s| {
-                        chrono::DateTime::parse_from_rfc3339(&s)
-                            .unwrap()
-                            .with_timezone(&Utc)
-                    }),
+                    deleted_at: row
+                        .get::<_, Option<String>>(2)?
+                        .map(|s| parse_datetime(&s))
+                        .transpose()?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -102,11 +101,10 @@ impl TransactionStore {
                     id: row.get(0)?,
                     bank_id: row.get(1)?,
                     name: row.get(2)?,
-                    deleted_at: row.get::<_, Option<String>>(3)?.map(|s| {
-                        chrono::DateTime::parse_from_rfc3339(&s)
-                            .unwrap()
-                            .with_timezone(&Utc)
-                    }),
+                    deleted_at: row
+                        .get::<_, Option<String>>(3)?
+                        .map(|s| parse_datetime(&s))
+                        .transpose()?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -846,26 +844,39 @@ impl TransactionStore {
         Ok(transfers)
     }
 
-    /// List transfers with all transaction data resolved.
+    /// List transfers with all transaction data resolved (single query, no N+1).
     pub fn list_transfers_with_transactions(
         &self,
         confirmed_only: bool,
     ) -> Result<Vec<TransferWithTransactions>> {
-        let transfers = self.list_transfers(confirmed_only)?;
-        let mut result = Vec::with_capacity(transfers.len());
+        let sql = format!(
+            "SELECT 
+                tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at,
+                ft.id, fa.bank_id, ft.account_id, ft.date, ft.description, ft.amount_cents, ft.balance_cents, ft.hash, ft.metadata, ft.source_file, ft.import_batch_id,
+                tt.id, ta.bank_id, tt.account_id, tt.date, tt.description, tt.amount_cents, tt.balance_cents, tt.hash, tt.metadata, tt.source_file, tt.import_batch_id
+             FROM transfers tr
+             JOIN transactions ft ON ft.id = tr.from_transaction_id
+             JOIN accounts fa ON fa.id = ft.account_id
+             JOIN transactions tt ON tt.id = tr.to_transaction_id
+             JOIN accounts ta ON ta.id = tt.account_id
+             {}
+             ORDER BY tr.created_at DESC",
+            if confirmed_only { "WHERE tr.confirmed = 1" } else { "" }
+        );
 
-        for transfer in transfers {
-            if let (Some(from_tx), Some(to_tx)) = (
-                self.get_transaction_by_id(transfer.from_transaction_id)?,
-                self.get_transaction_by_id(transfer.to_transaction_id)?,
-            ) {
-                result.push(TransferWithTransactions {
+        let mut stmt = self.conn.prepare(&sql)?;
+        let result = stmt
+            .query_map([], |row| {
+                let transfer = parse_transfer(row)?;
+                let from_transaction = parse_transaction_at_offset(row, 6)?;
+                let to_transaction = parse_transaction_at_offset(row, 17)?;
+                Ok(TransferWithTransactions {
                     transfer,
-                    from_transaction: from_tx,
-                    to_transaction: to_tx,
-                });
-            }
-        }
+                    from_transaction,
+                    to_transaction,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(result)
     }
@@ -882,26 +893,30 @@ fn parse_datetime(s: &str) -> rusqlite::Result<chrono::DateTime<Utc>> {
 }
 
 fn parse_transaction(row: &rusqlite::Row) -> rusqlite::Result<Transaction> {
-    let metadata_str: String = row.get(8)?;
+    parse_transaction_at_offset(row, 0)
+}
+
+fn parse_transaction_at_offset(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<Transaction> {
+    let metadata_str: String = row.get(offset + 8)?;
     let metadata: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(&metadata_str).unwrap_or_default();
-    let date_str: String = row.get(3)?;
+    let date_str: String = row.get(offset + 3)?;
     let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(offset + 3, rusqlite::types::Type::Text, Box::new(e))
     })?;
 
     Ok(Transaction {
-        id: row.get(0)?,
-        bank_id: row.get(1)?,
-        account_id: row.get(2)?,
+        id: row.get(offset)?,
+        bank_id: row.get(offset + 1)?,
+        account_id: row.get(offset + 2)?,
         date,
-        description: row.get(4)?,
-        amount_cents: row.get(5)?,
-        balance_cents: row.get(6)?,
-        hash: row.get(7)?,
+        description: row.get(offset + 4)?,
+        amount_cents: row.get(offset + 5)?,
+        balance_cents: row.get(offset + 6)?,
+        hash: row.get(offset + 7)?,
         metadata,
-        source_file: row.get(9)?,
-        import_batch_id: row.get(10)?,
+        source_file: row.get(offset + 9)?,
+        import_batch_id: row.get(offset + 10)?,
     })
 }
 

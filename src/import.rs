@@ -40,8 +40,7 @@ pub(crate) fn run_import_script(
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let transactions: Vec<RawTransaction> = serde_json::from_str(&stdout)?;
+    let transactions: Vec<RawTransaction> = serde_json::from_slice(&output.stdout)?;
     Ok(transactions)
 }
 
@@ -51,9 +50,9 @@ pub(crate) fn compute_hash(date: &str, description: &str, amount_cents: i64, bal
     hasher.update(b"|");
     hasher.update(description.as_bytes());
     hasher.update(b"|");
-    hasher.update(amount_cents.to_string().as_bytes());
+    hasher.update(amount_cents.to_le_bytes());
     hasher.update(b"|");
-    hasher.update(balance_cents.to_string().as_bytes());
+    hasher.update(balance_cents.to_le_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -70,9 +69,18 @@ pub(crate) fn find_csv_files(account_dir: &Path) -> Result<Vec<std::path::PathBu
 }
 
 pub(crate) fn hash_file(path: &Path) -> Result<String> {
-    let contents = std::fs::read(path)?;
+    use std::io::{BufReader, Read};
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
-    hasher.update(&contents);
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
     Ok(hex::encode(hasher.finalize()))
 }
 

@@ -112,21 +112,18 @@ fn draw_transactions(f: &mut Frame, app: &App, area: Rect) {
     let chunks =
         Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(area);
 
-    draw_transaction_table(
-        f,
-        app,
-        &app.filtered_transactions,
-        app.selected_index,
-        chunks[0],
-    );
+    let transactions: Vec<_> = app.filtered_transactions().collect();
+    draw_transaction_table(f, app, &transactions, app.selected_index, chunks[0]);
 
-    if let Some(tx) = app.filtered_transactions.get(app.selected_index) {
+    if let Some(tx) = app.get_filtered_transaction(app.selected_index) {
         draw_transaction_details(f, app, tx, chunks[1]);
     }
 }
 
 fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
-    if app.filtered_transfers.is_empty() {
+    let transfers: Vec<_> = app.filtered_transfers().collect();
+
+    if transfers.is_empty() {
         let text = Paragraph::new(vec![
             Line::from(""),
             Line::from(vec![Span::styled(
@@ -142,11 +139,10 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
         Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(area);
 
     let visible_height = chunks[0].height as usize;
-    let total = app.filtered_transfers.len();
+    let total = transfers.len();
     let offset = calculate_scroll_offset(app.selected_index, total, visible_height);
 
-    let rows: Vec<Row> = app
-        .filtered_transfers
+    let rows: Vec<Row> = transfers
         .iter()
         .enumerate()
         .skip(offset)
@@ -164,11 +160,11 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
 
             Row::new(vec![
                 Cell::from(from.date.to_string()).style(Style::default().bg(bg)),
-                Cell::from(from.description.clone()).style(Style::default().bg(bg)),
+                Cell::from(from.description.as_str()).style(Style::default().bg(bg)),
                 Cell::from(Line::from(format_cents(from.amount_cents)).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Red).bg(bg)),
                 Cell::from("→").style(Style::default().fg(Color::Cyan).bg(bg)),
-                Cell::from(to.description.clone()).style(Style::default().bg(bg)),
+                Cell::from(to.description.as_str()).style(Style::default().bg(bg)),
                 Cell::from(Line::from(format_cents(to.amount_cents)).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Green).bg(bg)),
             ])
@@ -189,7 +185,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(table, chunks[0]);
 
-    if let Some(twt) = app.filtered_transfers.get(app.selected_index) {
+    if let Some(twt) = app.get_filtered_transfer(app.selected_index) {
         draw_transfer_details(f, app, twt, chunks[1]);
     }
 }
@@ -214,26 +210,21 @@ fn draw_todo(f: &mut Frame, app: &App, area: Rect, has_search: bool) {
 
     match app.todo_subtab {
         TodoSubTab::Uncategorized => {
-            draw_transaction_table(
-                f,
-                app,
-                &app.filtered_uncategorized,
-                app.selected_index,
-                content_chunks[0],
-            );
-            if let Some(tx) = app.filtered_uncategorized.get(app.selected_index) {
+            let uncategorized: Vec<_> = app.filtered_uncategorized().collect();
+            draw_transaction_table(f, app, &uncategorized, app.selected_index, content_chunks[0]);
+            if let Some(tx) = app.get_filtered_uncategorized(app.selected_index) {
                 draw_transaction_details(f, app, tx, content_chunks[1]);
             }
         }
         TodoSubTab::AiReview => {
             draw_ai_review_table(f, app, content_chunks[0]);
-            if let Some(review) = app.filtered_ai_reviews.get(app.selected_index) {
+            if let Some(review) = app.get_filtered_ai_review(app.selected_index) {
                 draw_ai_review_details(f, app, review, content_chunks[1]);
             }
         }
         TodoSubTab::TransferReview => {
             draw_transfer_review_table(f, app, content_chunks[0]);
-            if let Some(transfer) = app.filtered_transfer_reviews.get(app.selected_index) {
+            if let Some(transfer) = app.get_filtered_transfer_review(app.selected_index) {
                 draw_pending_transfer_details(f, app, transfer, content_chunks[1]);
             }
         }
@@ -245,9 +236,9 @@ fn draw_todo_subtabs(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|t| {
             let count = match t {
-                TodoSubTab::Uncategorized => app.filtered_uncategorized.len(),
-                TodoSubTab::AiReview => app.filtered_ai_reviews.len(),
-                TodoSubTab::TransferReview => app.filtered_transfer_reviews.len(),
+                TodoSubTab::Uncategorized => app.filtered_uncategorized_len(),
+                TodoSubTab::AiReview => app.filtered_ai_reviews_len(),
+                TodoSubTab::TransferReview => app.filtered_transfer_reviews_len(),
             };
             Line::from(format!("{} ({})", t.title(), count))
         })
@@ -270,7 +261,7 @@ fn draw_todo_subtabs(f: &mut Frame, app: &App, area: Rect) {
 fn draw_transaction_table(
     f: &mut Frame,
     app: &App,
-    transactions: &[crate::Transaction],
+    transactions: &[&crate::Transaction],
     selected: usize,
     area: Rect,
 ) {
@@ -321,7 +312,7 @@ fn draw_transaction_table(
 
             Row::new(vec![
                 Cell::from(tx.date.to_string()).style(Style::default().fg(fg).bg(bg)),
-                Cell::from(tx.description.clone()).style(Style::default().fg(fg).bg(bg)),
+                Cell::from(tx.description.as_str()).style(Style::default().fg(fg).bg(bg)),
                 Cell::from(Line::from(amount).alignment(Alignment::Right))
                     .style(Style::default().fg(amount_color).bg(bg)),
                 Cell::from(Line::from(balance).alignment(Alignment::Right))
@@ -344,12 +335,12 @@ fn draw_transaction_table(
 }
 
 fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
+    let ai_reviews: Vec<_> = app.filtered_ai_reviews().collect();
     let visible_height = area.height as usize;
-    let total = app.filtered_ai_reviews.len();
+    let total = ai_reviews.len();
     let offset = calculate_scroll_offset(app.selected_index, total, visible_height);
 
-    let rows: Vec<Row> = app
-        .filtered_ai_reviews
+    let rows: Vec<Row> = ai_reviews
         .iter()
         .enumerate()
         .skip(offset)
@@ -383,10 +374,10 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
 
             Row::new(vec![
                 Cell::from(tx.date.to_string()).style(Style::default().bg(bg)),
-                Cell::from(tx.description.clone()).style(Style::default().bg(bg)),
+                Cell::from(tx.description.as_str()).style(Style::default().bg(bg)),
                 Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
                     .style(Style::default().fg(amount_color).bg(bg)),
-                Cell::from(category_path.to_string()).style(Style::default().fg(Color::Yellow).bg(bg)),
+                Cell::from(category_path).style(Style::default().fg(Color::Yellow).bg(bg)),
                 Cell::from(confidence).style(Style::default().fg(Color::Cyan).bg(bg)),
             ])
         })
@@ -407,7 +398,9 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
-    if app.filtered_transfer_reviews.is_empty() {
+    let transfer_reviews: Vec<_> = app.filtered_transfer_reviews().collect();
+
+    if transfer_reviews.is_empty() {
         let text = Paragraph::new(vec![
             Line::from(""),
             Line::from(vec![Span::styled(
@@ -420,11 +413,10 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let visible_height = area.height as usize;
-    let total = app.filtered_transfer_reviews.len();
+    let total = transfer_reviews.len();
     let offset = calculate_scroll_offset(app.selected_index, total, visible_height);
 
-    let rows: Vec<Row> = app
-        .filtered_transfer_reviews
+    let rows: Vec<Row> = transfer_reviews
         .iter()
         .enumerate()
         .skip(offset)
@@ -594,27 +586,16 @@ fn draw_transaction_details(f: &mut Frame, app: &App, tx: &Transaction, area: Re
         serde_json::to_string(&tx.metadata).unwrap_or_default()
     };
 
-    let transfer_info = app
-        .store
-        .get_transfer_for_transaction(tx.id)
-        .ok()
-        .flatten()
-        .and_then(|transfer| {
-            let other_id = if transfer.from_transaction_id == tx.id {
-                transfer.to_transaction_id
-            } else {
-                transfer.from_transaction_id
-            };
-            app.store.get_transaction_by_id(other_id).ok().flatten()
-        });
+    let transfer_info = app.get_cached_transfer(tx.id).and_then(|transfer| {
+        let other_id = if transfer.from_transaction_id == tx.id {
+            transfer.to_transaction_id
+        } else {
+            transfer.from_transaction_id
+        };
+        app.get_cached_transaction(other_id)
+    });
 
-    let category = app
-        .store
-        .get_transaction_category(tx.id)
-        .ok()
-        .flatten()
-        .map(|c| c.path)
-        .unwrap_or_default();
+    let category = app.get_cached_category(tx.id).unwrap_or_default();
 
     let mut lines = vec![
         Line::from(""),
@@ -789,11 +770,11 @@ fn draw_pending_transfer_details(
     transfer: &crate::Transfer,
     area: Rect,
 ) {
-    let from_tx = app.store.get_transaction_by_id(transfer.from_transaction_id);
-    let to_tx = app.store.get_transaction_by_id(transfer.to_transaction_id);
-
-    let (from_tx, to_tx) = match (from_tx, to_tx) {
-        (Ok(Some(f)), Ok(Some(t))) => (f, t),
+    let (from_tx, to_tx) = match (
+        app.get_cached_transaction(transfer.from_transaction_id),
+        app.get_cached_transaction(transfer.to_transaction_id),
+    ) {
+        (Some(f), Some(t)) => (f, t),
         _ => {
             let lines = vec![Line::from(vec![
                 Span::styled("Error: ", Style::default().fg(Color::Red)),

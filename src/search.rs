@@ -156,8 +156,8 @@ fn parse_text_match(text: &str) -> TextMatch {
         return TextMatch::Fuzzy(rest.to_string());
     }
 
-    // Default: exact case-insensitive substring match
-    TextMatch::Exact(text.to_string())
+    // Default: exact case-insensitive substring match (pre-lowercase for efficiency)
+    TextMatch::Exact(text.to_lowercase())
 }
 
 fn parse_date_range(s: &str, query: &mut SearchQuery) {
@@ -259,6 +259,7 @@ fn parse_cents(s: &str) -> Option<i64> {
 
 pub struct FuzzyMatcher {
     matcher: Matcher,
+    buf: Vec<char>,
 }
 
 impl Default for FuzzyMatcher {
@@ -272,6 +273,7 @@ impl FuzzyMatcher {
     pub fn new() -> Self {
         Self {
             matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
+            buf: Vec::new(),
         }
     }
 
@@ -281,8 +283,8 @@ impl FuzzyMatcher {
             return Some(0);
         }
         let pat = Pattern::parse(pattern, CaseMatching::Ignore, Normalization::Smart);
-        let mut buf = Vec::new();
-        let haystack = Utf32Str::new(haystack, &mut buf);
+        self.buf.clear();
+        let haystack = Utf32Str::new(haystack, &mut self.buf);
         pat.score(haystack, &mut self.matcher)
     }
 
@@ -301,7 +303,8 @@ impl FuzzyMatcher {
                 if pattern.is_empty() {
                     return true;
                 }
-                haystack.to_lowercase().contains(&pattern.to_lowercase())
+                // Pattern is already lowercased at parse time
+                haystack.to_lowercase().contains(pattern)
             }
             TextMatch::Fuzzy(pattern) => self.fuzzy_matches(pattern, haystack),
             TextMatch::Regex { pattern, .. } => pattern.is_match(haystack),

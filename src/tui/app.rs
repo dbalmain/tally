@@ -85,11 +85,97 @@ pub struct App {
     pub search_input: Input,
     pub search_query: SearchQuery,
     pub fuzzy_matcher: FuzzyMatcher,
-    pub filtered_transactions: Vec<Transaction>,
-    pub filtered_transfers: Vec<TransferWithTransactions>,
-    pub filtered_uncategorized: Vec<Transaction>,
-    pub filtered_ai_reviews: Vec<TransactionWithEnrichment>,
-    pub filtered_transfer_reviews: Vec<Transfer>,
+    filtered_transaction_idx: Vec<usize>,
+    filtered_transfer_idx: Vec<usize>,
+    filtered_uncategorized_idx: Vec<usize>,
+    filtered_ai_review_idx: Vec<usize>,
+    filtered_transfer_review_idx: Vec<usize>,
+    // Caches to avoid DB queries during render/filter
+    tx_by_id: HashMap<i64, Transaction>,
+    category_by_tx_id: HashMap<i64, String>,
+    transfer_by_tx_id: HashMap<i64, Transfer>,
+}
+
+impl App {
+    pub fn filtered_transactions(&self) -> impl Iterator<Item = &Transaction> {
+        self.filtered_transaction_idx
+            .iter()
+            .filter_map(|&i| self.transactions.get(i))
+    }
+
+    pub fn filtered_transfers(&self) -> impl Iterator<Item = &TransferWithTransactions> {
+        self.filtered_transfer_idx
+            .iter()
+            .filter_map(|&i| self.linked_transfers.get(i))
+    }
+
+    pub fn filtered_uncategorized(&self) -> impl Iterator<Item = &Transaction> {
+        self.filtered_uncategorized_idx
+            .iter()
+            .filter_map(|&i| self.uncategorized.get(i))
+    }
+
+    pub fn filtered_ai_reviews(&self) -> impl Iterator<Item = &TransactionWithEnrichment> {
+        self.filtered_ai_review_idx
+            .iter()
+            .filter_map(|&i| self.ai_reviews.get(i))
+    }
+
+    pub fn filtered_transfer_reviews(&self) -> impl Iterator<Item = &Transfer> {
+        self.filtered_transfer_review_idx
+            .iter()
+            .filter_map(|&i| self.transfer_reviews.get(i))
+    }
+
+    pub fn filtered_transactions_len(&self) -> usize {
+        self.filtered_transaction_idx.len()
+    }
+
+    pub fn filtered_transfers_len(&self) -> usize {
+        self.filtered_transfer_idx.len()
+    }
+
+    pub fn filtered_uncategorized_len(&self) -> usize {
+        self.filtered_uncategorized_idx.len()
+    }
+
+    pub fn filtered_ai_reviews_len(&self) -> usize {
+        self.filtered_ai_review_idx.len()
+    }
+
+    pub fn filtered_transfer_reviews_len(&self) -> usize {
+        self.filtered_transfer_review_idx.len()
+    }
+
+    pub fn get_filtered_transaction(&self, filtered_idx: usize) -> Option<&Transaction> {
+        self.filtered_transaction_idx
+            .get(filtered_idx)
+            .and_then(|&i| self.transactions.get(i))
+    }
+
+    pub fn get_filtered_transfer(&self, filtered_idx: usize) -> Option<&TransferWithTransactions> {
+        self.filtered_transfer_idx
+            .get(filtered_idx)
+            .and_then(|&i| self.linked_transfers.get(i))
+    }
+
+    pub fn get_filtered_uncategorized(&self, filtered_idx: usize) -> Option<&Transaction> {
+        self.filtered_uncategorized_idx
+            .get(filtered_idx)
+            .and_then(|&i| self.uncategorized.get(i))
+    }
+
+    pub fn get_filtered_ai_review(&self, filtered_idx: usize) -> Option<&TransactionWithEnrichment> {
+        self.filtered_ai_review_idx
+            .get(filtered_idx)
+            .and_then(|&i| self.ai_reviews.get(i))
+    }
+
+    pub fn get_filtered_transfer_review(&self, filtered_idx: usize) -> Option<&Transfer> {
+        self.filtered_transfer_review_idx
+            .get(filtered_idx)
+            .and_then(|&i| self.transfer_reviews.get(i))
+    }
 }
 
 impl App {
@@ -108,21 +194,27 @@ impl App {
             .list_transfers_with_transactions(true)
             .unwrap_or_default();
 
-        let banks = store
-            .list_banks()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|b| (b.id, b))
-            .collect();
+        let bank_list = store.list_banks().unwrap_or_default();
+        let banks: HashMap<i64, Bank> = bank_list.iter().cloned().map(|b| (b.id, b)).collect();
 
         let mut accounts = HashMap::new();
-        for bank in store.list_banks().unwrap_or_default() {
+        for bank in &bank_list {
             for account in store.list_accounts(bank.id).unwrap_or_default() {
                 accounts.insert(account.id, account);
             }
         }
 
-        Self {
+        let mut app = Self {
+            filtered_transaction_idx: (0..transactions.len()).collect(),
+            filtered_transfer_idx: (0..linked_transfers.len()).collect(),
+            filtered_uncategorized_idx: (0..uncategorized.len()).collect(),
+            filtered_ai_review_idx: (0..ai_reviews.len()).collect(),
+            filtered_transfer_review_idx: (0..transfer_reviews.len()).collect(),
+            transactions,
+            linked_transfers,
+            uncategorized,
+            ai_reviews,
+            transfer_reviews,
             store,
             current_tab: Tab::Todo,
             todo_subtab: TodoSubTab::Uncategorized,
@@ -139,17 +231,87 @@ impl App {
             search_input: Input::default(),
             search_query: SearchQuery::default(),
             fuzzy_matcher: FuzzyMatcher::new(),
-            filtered_transactions: transactions.clone(),
-            filtered_transfers: linked_transfers.clone(),
-            filtered_uncategorized: uncategorized.clone(),
-            filtered_ai_reviews: ai_reviews.clone(),
-            filtered_transfer_reviews: transfer_reviews.clone(),
-            transactions,
-            linked_transfers,
-            uncategorized,
-            ai_reviews,
-            transfer_reviews,
+            tx_by_id: HashMap::new(),
+            category_by_tx_id: HashMap::new(),
+            transfer_by_tx_id: HashMap::new(),
+        };
+        app.rebuild_caches();
+        app
+    }
+
+    fn rebuild_caches(&mut self) {
+        // Build transaction lookup cache
+        self.tx_by_id.clear();
+        for tx in &self.transactions {
+            self.tx_by_id.insert(tx.id, tx.clone());
         }
+        for tx in &self.uncategorized {
+            self.tx_by_id.entry(tx.id).or_insert_with(|| tx.clone());
+        }
+        for review in &self.ai_reviews {
+            self.tx_by_id
+                .entry(review.transaction.id)
+                .or_insert_with(|| review.transaction.clone());
+        }
+        for twt in &self.linked_transfers {
+            self.tx_by_id
+                .entry(twt.from_transaction.id)
+                .or_insert_with(|| twt.from_transaction.clone());
+            self.tx_by_id
+                .entry(twt.to_transaction.id)
+                .or_insert_with(|| twt.to_transaction.clone());
+        }
+        // Load transactions for pending transfer reviews (they only have IDs)
+        for tr in &self.transfer_reviews {
+            if !self.tx_by_id.contains_key(&tr.from_transaction_id)
+                && let Ok(Some(tx)) = self.store.get_transaction_by_id(tr.from_transaction_id)
+            {
+                self.tx_by_id.insert(tr.from_transaction_id, tx);
+            }
+            if !self.tx_by_id.contains_key(&tr.to_transaction_id)
+                && let Ok(Some(tx)) = self.store.get_transaction_by_id(tr.to_transaction_id)
+            {
+                self.tx_by_id.insert(tr.to_transaction_id, tx);
+            }
+        }
+
+        // Build category cache from ai_reviews (they have category info)
+        self.category_by_tx_id.clear();
+        for review in &self.ai_reviews {
+            if let Some(ref cat) = review.category {
+                self.category_by_tx_id
+                    .insert(review.transaction.id, cat.path.clone());
+            }
+        }
+
+        // Build transfer lookup cache
+        self.transfer_by_tx_id.clear();
+        for twt in &self.linked_transfers {
+            self.transfer_by_tx_id
+                .insert(twt.from_transaction.id, twt.transfer.clone());
+            self.transfer_by_tx_id
+                .insert(twt.to_transaction.id, twt.transfer.clone());
+        }
+        for tr in &self.transfer_reviews {
+            self.transfer_by_tx_id
+                .entry(tr.from_transaction_id)
+                .or_insert_with(|| tr.clone());
+            self.transfer_by_tx_id
+                .entry(tr.to_transaction_id)
+                .or_insert_with(|| tr.clone());
+        }
+    }
+
+    pub fn get_cached_transaction(&self, id: i64) -> Option<&Transaction> {
+        self.tx_by_id.get(&id)
+    }
+
+    pub fn get_cached_category(&self, tx_id: i64) -> Option<&str> {
+        self.category_by_tx_id.get(&tx_id).map(|s| s.as_str())
+    }
+
+    pub fn get_cached_transfer(&self, tx_id: i64) -> Option<&Transfer> {
+        self.transfer_by_tx_id.get(&tx_id)
     }
 
     pub fn bank_name(&self, bank_id: i64) -> &str {
@@ -213,22 +375,15 @@ impl App {
         if len > 0 {
             if self.input_mode == InputMode::TransferPending && !self.transfer_candidates.is_empty()
             {
+                let current_tx_id = self.get_current_transaction(self.selected_index).map(|t| t.id);
                 let current_pos = self
                     .transfer_candidates
                     .iter()
-                    .position(|c| {
-                        self.current_transactions()
-                            .get(self.selected_index)
-                            .is_some_and(|t| t.id == c.id)
-                    })
+                    .position(|c| current_tx_id == Some(c.id))
                     .unwrap_or(0);
                 if current_pos + 1 < self.transfer_candidates.len() {
-                    let next_candidate = &self.transfer_candidates[current_pos + 1];
-                    if let Some(pos) = self
-                        .current_transactions()
-                        .iter()
-                        .position(|t| t.id == next_candidate.id)
-                    {
+                    let next_candidate_id = self.transfer_candidates[current_pos + 1].id;
+                    if let Some(pos) = self.find_filtered_position_by_tx_id(next_candidate_id) {
                         self.selected_index = pos;
                     }
                 }
@@ -243,22 +398,15 @@ impl App {
         if len > 0 {
             if self.input_mode == InputMode::TransferPending && !self.transfer_candidates.is_empty()
             {
+                let current_tx_id = self.get_current_transaction(self.selected_index).map(|t| t.id);
                 let current_pos = self
                     .transfer_candidates
                     .iter()
-                    .position(|c| {
-                        self.current_transactions()
-                            .get(self.selected_index)
-                            .is_some_and(|t| t.id == c.id)
-                    })
+                    .position(|c| current_tx_id == Some(c.id))
                     .unwrap_or(0);
                 if current_pos > 0 {
-                    let prev_candidate = &self.transfer_candidates[current_pos - 1];
-                    if let Some(pos) = self
-                        .current_transactions()
-                        .iter()
-                        .position(|t| t.id == prev_candidate.id)
-                    {
+                    let prev_candidate_id = self.transfer_candidates[current_pos - 1].id;
+                    if let Some(pos) = self.find_filtered_position_by_tx_id(prev_candidate_id) {
                         self.selected_index = pos;
                     }
                 }
@@ -270,42 +418,58 @@ impl App {
 
     fn list_len(&self) -> usize {
         match self.current_tab {
-            Tab::Transactions => self.filtered_transactions.len(),
-            Tab::Transfers => self.filtered_transfers.len(),
+            Tab::Transactions => self.filtered_transactions_len(),
+            Tab::Transfers => self.filtered_transfers_len(),
             Tab::Todo => match self.todo_subtab {
-                TodoSubTab::Uncategorized => self.filtered_uncategorized.len(),
-                TodoSubTab::AiReview => self.filtered_ai_reviews.len(),
-                TodoSubTab::TransferReview => self.filtered_transfer_reviews.len(),
+                TodoSubTab::Uncategorized => self.filtered_uncategorized_len(),
+                TodoSubTab::AiReview => self.filtered_ai_reviews_len(),
+                TodoSubTab::TransferReview => self.filtered_transfer_reviews_len(),
             },
         }
     }
 
-    pub fn current_transactions(&self) -> &[Transaction] {
+    fn current_transaction_indices(&self) -> &[usize] {
         match self.current_tab {
-            Tab::Transactions => &self.filtered_transactions,
+            Tab::Transactions => &self.filtered_transaction_idx,
             Tab::Transfers => &[],
             Tab::Todo => match self.todo_subtab {
-                TodoSubTab::Uncategorized => &self.filtered_uncategorized,
+                TodoSubTab::Uncategorized => &self.filtered_uncategorized_idx,
                 TodoSubTab::AiReview => &[],
                 TodoSubTab::TransferReview => &[],
             },
         }
     }
 
-    pub fn current_transfers(&self) -> &[TransferWithTransactions] {
-        &self.filtered_transfers
+    fn get_current_transaction(&self, filtered_idx: usize) -> Option<&Transaction> {
+        match self.current_tab {
+            Tab::Transactions => self.get_filtered_transaction(filtered_idx),
+            Tab::Transfers => None,
+            Tab::Todo => match self.todo_subtab {
+                TodoSubTab::Uncategorized => self.get_filtered_uncategorized(filtered_idx),
+                TodoSubTab::AiReview => None,
+                TodoSubTab::TransferReview => None,
+            },
+        }
     }
 
-    pub fn current_ai_reviews(&self) -> &[TransactionWithEnrichment] {
-        &self.filtered_ai_reviews
-    }
-
-    pub fn current_transfer_reviews(&self) -> &[Transfer] {
-        &self.filtered_transfer_reviews
+    fn find_filtered_position_by_tx_id(&self, tx_id: i64) -> Option<usize> {
+        let indices = self.current_transaction_indices();
+        let base_list: &[Transaction] = match self.current_tab {
+            Tab::Transactions => &self.transactions,
+            Tab::Transfers => return None,
+            Tab::Todo => match self.todo_subtab {
+                TodoSubTab::Uncategorized => &self.uncategorized,
+                TodoSubTab::AiReview => return None,
+                TodoSubTab::TransferReview => return None,
+            },
+        };
+        indices.iter().position(|&base_idx| {
+            base_list.get(base_idx).is_some_and(|tx| tx.id == tx_id)
+        })
     }
 
     pub fn selected_transaction(&self) -> Option<&Transaction> {
-        self.current_transactions().get(self.selected_index)
+        self.get_current_transaction(self.selected_index)
     }
 
     pub fn start_category_edit(&mut self) {
@@ -396,14 +560,13 @@ impl App {
             self.transfer_candidates = Vec::new();
         } else {
             self.pending_transfer_tx = Some(tx);
+            let first_id = candidates.first().map(|c| c.id);
             self.transfer_candidates = candidates;
             self.input_mode = InputMode::TransferPending;
-            if let Some(pos) = self.transfer_candidates.first().and_then(|first| {
-                self.current_transactions()
-                    .iter()
-                    .position(|t| t.id == first.id)
-            }) {
-                self.selected_index = pos;
+            if let Some(first_id) = first_id {
+                if let Some(pos) = self.find_filtered_position_by_tx_id(first_id) {
+                    self.selected_index = pos;
+                }
             }
         }
     }
@@ -479,6 +642,7 @@ impl App {
             .store
             .list_transfers_with_transactions(true)
             .unwrap_or_default();
+        self.rebuild_caches();
         self.apply_search_filter();
     }
 
@@ -515,77 +679,68 @@ impl App {
 
     fn apply_search_filter(&mut self) {
         if self.search_query.is_empty() {
-            self.filtered_transactions = self.transactions.clone();
-            self.filtered_transfers = self.linked_transfers.clone();
-            self.filtered_uncategorized = self.uncategorized.clone();
-            self.filtered_ai_reviews = self.ai_reviews.clone();
-            self.filtered_transfer_reviews = self.transfer_reviews.clone();
+            self.filtered_transaction_idx = (0..self.transactions.len()).collect();
+            self.filtered_transfer_idx = (0..self.linked_transfers.len()).collect();
+            self.filtered_uncategorized_idx = (0..self.uncategorized.len()).collect();
+            self.filtered_ai_review_idx = (0..self.ai_reviews.len()).collect();
+            self.filtered_transfer_review_idx = (0..self.transfer_reviews.len()).collect();
             return;
         }
 
         let mut matcher = FuzzyMatcher::new();
 
-        // If we have date filters, query the database directly
-        let has_date_filter =
-            self.search_query.date_from.is_some() || self.search_query.date_to.is_some();
-
-        let source_transactions = if has_date_filter {
-            let filter = TransactionFilter {
-                from_date: self.search_query.date_from,
-                to_date: self.search_query.date_to,
-                limit: Some(500),
-                ..Default::default()
-            };
-            self.store.query_transactions(&filter).unwrap_or_default()
-        } else {
-            self.transactions.clone()
-        };
-
-        self.filtered_transactions = source_transactions
-            .into_iter()
-            .filter(|tx| self.matches_transaction(tx, &mut matcher))
+        self.filtered_transaction_idx = self
+            .transactions
+            .iter()
+            .enumerate()
+            .filter(|(_, tx)| self.matches_transaction(tx, &mut matcher))
+            .map(|(i, _)| i)
             .collect();
 
-        self.filtered_transfers = self
+        self.filtered_transfer_idx = self
             .linked_transfers
             .iter()
-            .filter(|twt| {
+            .enumerate()
+            .filter(|(_, twt)| {
                 self.matches_transaction(&twt.from_transaction, &mut matcher)
                     || self.matches_transaction(&twt.to_transaction, &mut matcher)
             })
-            .cloned()
+            .map(|(i, _)| i)
             .collect();
 
-        self.filtered_uncategorized = self
+        self.filtered_uncategorized_idx = self
             .uncategorized
             .iter()
-            .filter(|tx| self.matches_transaction(tx, &mut matcher))
-            .cloned()
+            .enumerate()
+            .filter(|(_, tx)| self.matches_transaction(tx, &mut matcher))
+            .map(|(i, _)| i)
             .collect();
 
-        self.filtered_ai_reviews = self
+        self.filtered_ai_review_idx = self
             .ai_reviews
             .iter()
-            .filter(|r| self.matches_transaction(&r.transaction, &mut matcher))
-            .cloned()
+            .enumerate()
+            .filter(|(_, r)| self.matches_transaction(&r.transaction, &mut matcher))
+            .map(|(i, _)| i)
             .collect();
 
-        self.filtered_transfer_reviews = self
+        self.filtered_transfer_review_idx = self
             .transfer_reviews
             .iter()
-            .filter(|tr| {
+            .enumerate()
+            .filter(|(_, tr)| {
                 match (
-                    self.store.get_transaction_by_id(tr.from_transaction_id),
-                    self.store.get_transaction_by_id(tr.to_transaction_id),
+                    self.tx_by_id.get(&tr.from_transaction_id),
+                    self.tx_by_id.get(&tr.to_transaction_id),
                 ) {
-                    (Ok(Some(ref from)), Ok(Some(ref to))) => {
+                    (Some(from), Some(to)) => {
                         self.matches_transaction(from, &mut matcher)
                             || self.matches_transaction(to, &mut matcher)
                     }
                     _ => true,
                 }
             })
-            .cloned()
+            .map(|(i, _)| i)
             .collect();
     }
 
@@ -618,11 +773,8 @@ impl App {
         }
         if let Some(ref category_filter) = q.category {
             let cat = self
-                .store
-                .get_transaction_category(tx.id)
-                .ok()
-                .flatten()
-                .map(|c| c.path.to_lowercase())
+                .get_cached_category(tx.id)
+                .map(|s| s.to_lowercase())
                 .unwrap_or_default();
             if !cat.contains(category_filter) {
                 return false;
