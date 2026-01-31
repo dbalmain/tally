@@ -1,3 +1,5 @@
+use regex::Regex;
+use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
 
 use crate::Result;
@@ -83,6 +85,18 @@ CREATE INDEX IF NOT EXISTS idx_transfers_confirmed ON transfers(confirmed);
 
 pub(crate) fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
+    register_regexp_function(conn)?;
+    Ok(())
+}
+
+fn register_regexp_function(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function("regexp", 2, FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        let pattern: String = ctx.get(0)?;
+        let text: String = ctx.get(1)?;
+        let re = Regex::new(&pattern)
+            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+        Ok(re.is_match(&text))
+    })?;
     Ok(())
 }
 
@@ -107,5 +121,35 @@ mod tests {
         assert!(tables.contains(&"accounts".to_string()));
         assert!(tables.contains(&"transactions".to_string()));
         assert!(tables.contains(&"imported_files".to_string()));
+    }
+
+    #[test]
+    fn test_regexp_function() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+
+        // Test matching
+        let result: bool = conn
+            .query_row("SELECT regexp('cof.*fee', 'I love coffee')", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(result);
+
+        // Test non-matching
+        let result: bool = conn
+            .query_row("SELECT regexp('tea', 'I love coffee')", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!result);
+
+        // Test case-insensitive with (?i)
+        let result: bool = conn
+            .query_row("SELECT regexp('(?i)COFFEE', 'I love coffee')", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(result);
     }
 }
