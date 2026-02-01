@@ -32,11 +32,20 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.current_tab {
         Tab::Transactions => draw_transactions(f, app, chunks[1]),
         Tab::Transfers => draw_transfers(f, app, chunks[1]),
+        Tab::Categories => draw_categories(f, app, chunks[1]),
         Tab::Todo => draw_todo(f, app, chunks[1], has_db_search, has_fuzzy_search),
     }
 
     if app.input_mode == InputMode::Category {
         draw_category_popup(f, app);
+    }
+
+    if app.input_mode == InputMode::CategoryEdit {
+        draw_category_edit_popup(f, app);
+    }
+
+    if app.input_mode == InputMode::ConfirmMerge {
+        draw_confirm_popup(f, app);
     }
 
     if app.input_mode == InputMode::TransferNoMatch {
@@ -515,6 +524,138 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(table, area);
 }
 
+fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
+    if app.categories.is_empty() {
+        let text = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "No categories yet.",
+                Style::default().fg(Color::DarkGray),
+            )]),
+        ]);
+        f.render_widget(text, area);
+        return;
+    }
+
+    let visible_height = area.height as usize;
+    let total = app.categories.len();
+    let offset = calculate_scroll_offset(app.selected_index, total, visible_height);
+
+    let rows: Vec<Row> = app
+        .categories
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible_height)
+        .map(|(i, cat)| {
+            let is_selected = i == app.selected_index;
+            let bg = if is_selected {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
+
+            let tx_count = app.category_transaction_count(cat.id);
+
+            Row::new(vec![
+                Cell::from(cat.path.as_str()).style(Style::default().fg(Color::Yellow).bg(bg)),
+                Cell::from(Line::from(format!("{}", tx_count)).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::DarkGray).bg(bg)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [Constraint::Min(30), Constraint::Length(10)],
+    );
+
+    f.render_widget(table, area);
+}
+
+fn draw_category_edit_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect_fixed_height(50, 4, f.area());
+
+    f.render_widget(Clear, area);
+
+    let block = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    };
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let input_width = chunks[1].width as usize;
+    let scroll = app.category_edit_scroll(input_width);
+    let cursor_pos = app.category_edit_cursor();
+
+    // Display scrolled portion of input
+    let input_value = app.category_edit_value();
+    let visible: String = input_value.chars().skip(scroll).take(input_width).collect();
+    let input = Paragraph::new(visible).style(Style::default().fg(Color::Yellow));
+    f.render_widget(input, chunks[1]);
+
+    // Position cursor relative to scroll
+    let cursor_x = chunks[1].x + (cursor_pos - scroll) as u16;
+    f.set_cursor_position((cursor_x, chunks[1].y));
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::styled(" save  ", Style::default().fg(Color::White)),
+        Span::styled("Esc", Style::default().fg(Color::Cyan)),
+        Span::styled(" cancel", Style::default().fg(Color::White)),
+    ]));
+    f.render_widget(help, chunks[2]);
+}
+
+fn draw_confirm_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect_fixed_height(50, 4, f.area());
+
+    f.render_widget(Clear, area);
+
+    let block = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    };
+
+    let message = app.confirm_message.as_deref().unwrap_or("Confirm action?");
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let msg_line = Paragraph::new(message).style(Style::default().fg(Color::Yellow));
+    f.render_widget(msg_line, chunks[1]);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("y", Style::default().fg(Color::Green)),
+        Span::styled(" yes  ", Style::default().fg(Color::White)),
+        Span::styled("n", Style::default().fg(Color::Red)),
+        Span::styled(" no", Style::default().fg(Color::White)),
+    ]));
+    f.render_widget(help, chunks[2]);
+}
+
 fn draw_category_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(50, 60, f.area());
 
@@ -617,6 +758,14 @@ fn calculate_scroll_offset(selected: usize, total: usize, visible_height: usize)
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_width = r.width * percent_x / 100;
     let popup_height = r.height * percent_y / 100;
+    let x = (r.width - popup_width) / 2;
+    let y = (r.height - popup_height) / 2;
+    Rect::new(r.x + x, r.y + y, popup_width, popup_height)
+}
+
+fn centered_rect_fixed_height(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let popup_width = r.width * percent_x / 100;
+    let popup_height = height.min(r.height);
     let x = (r.width - popup_width) / 2;
     let y = (r.height - popup_height) / 2;
     Rect::new(r.x + x, r.y + y, popup_width, popup_height)

@@ -19,6 +19,9 @@ pub enum Error {
 
     #[error("No import script found for {bank}/{account}")]
     NoImportScript { bank: String, account: String },
+
+    #[error("Category already exists: {0}")]
+    CategoryExists(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

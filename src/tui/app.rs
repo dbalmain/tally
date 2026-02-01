@@ -12,18 +12,20 @@ use crate::{
 pub enum Tab {
     Transactions,
     Transfers,
+    Categories,
     Todo,
 }
 
 impl Tab {
     pub fn all() -> &'static [Tab] {
-        &[Tab::Transactions, Tab::Transfers, Tab::Todo]
+        &[Tab::Transactions, Tab::Transfers, Tab::Categories, Tab::Todo]
     }
 
     pub fn title(&self) -> &'static str {
         match self {
             Tab::Transactions => "Transactions",
             Tab::Transfers => "Transfers",
+            Tab::Categories => "Categories",
             Tab::Todo => "Todo",
         }
     }
@@ -60,6 +62,8 @@ pub enum InputMode {
     DbSearch,
     FuzzySearch,
     Category,
+    CategoryEdit,
+    ConfirmMerge,
     TransferPending,
     TransferNoMatch,
 }
@@ -99,6 +103,20 @@ pub struct App {
     tx_by_id: HashMap<i64, Transaction>,
     category_by_tx_id: HashMap<i64, String>,
     transfer_by_tx_id: HashMap<i64, Transfer>,
+    category_tx_count: HashMap<i64, usize>,
+    // Categories tab
+    pub categories: Vec<Category>,
+    // Category editing state
+    pub editing_category: Option<Category>,
+    pub category_edit_input: Input,
+    // Confirmation popup state
+    pub confirm_message: Option<String>,
+    pub confirm_action: Option<ConfirmAction>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    MergeCategory { source_id: i64, target_id: i64 },
 }
 
 impl App {
@@ -219,6 +237,8 @@ impl App {
             }
         }
 
+        let categories = store.list_categories().unwrap_or_default();
+
         let mut app = Self {
             filtered_transaction_idx: (0..transactions.len()).collect(),
             filtered_transfer_idx: (0..linked_transfers.len()).collect(),
@@ -253,6 +273,12 @@ impl App {
             tx_by_id: HashMap::new(),
             category_by_tx_id: HashMap::new(),
             transfer_by_tx_id: HashMap::new(),
+            category_tx_count: HashMap::new(),
+            categories,
+            editing_category: None,
+            category_edit_input: Input::default(),
+            confirm_message: None,
+            confirm_action: None,
         };
         app.rebuild_caches();
         app
@@ -318,6 +344,14 @@ impl App {
             self.transfer_by_tx_id
                 .entry(tr.to_transaction_id)
                 .or_insert_with(|| tr.clone());
+        }
+
+        // Build category transaction count cache
+        self.category_tx_count.clear();
+        for cat in &self.categories {
+            if let Ok(count) = self.store.count_transactions_in_category(cat.id) {
+                self.category_tx_count.insert(cat.id, count);
+            }
         }
     }
 
@@ -439,6 +473,7 @@ impl App {
         match self.current_tab {
             Tab::Transactions => self.filtered_transactions_len(),
             Tab::Transfers => self.filtered_transfers_len(),
+            Tab::Categories => self.categories.len(),
             Tab::Todo => match self.todo_subtab {
                 TodoSubTab::Uncategorized => self.filtered_uncategorized_len(),
                 TodoSubTab::AiReview => self.filtered_ai_reviews_len(),
@@ -451,6 +486,7 @@ impl App {
         match self.current_tab {
             Tab::Transactions => &self.filtered_transaction_idx,
             Tab::Transfers => &[],
+            Tab::Categories => &[],
             Tab::Todo => match self.todo_subtab {
                 TodoSubTab::Uncategorized => &self.filtered_uncategorized_idx,
                 TodoSubTab::AiReview => &[],
@@ -463,6 +499,7 @@ impl App {
         match self.current_tab {
             Tab::Transactions => self.get_filtered_transaction(filtered_idx),
             Tab::Transfers => None,
+            Tab::Categories => None,
             Tab::Todo => match self.todo_subtab {
                 TodoSubTab::Uncategorized => self.get_filtered_uncategorized(filtered_idx),
                 TodoSubTab::AiReview => None,
@@ -476,6 +513,7 @@ impl App {
         let base_list: &[Transaction] = match self.current_tab {
             Tab::Transactions => &self.transactions,
             Tab::Transfers => return None,
+            Tab::Categories => return None,
             Tab::Todo => match self.todo_subtab {
                 TodoSubTab::Uncategorized => &self.uncategorized,
                 TodoSubTab::AiReview => return None,
@@ -628,6 +666,8 @@ impl App {
         self.category_selected = 0;
         self.error_message = None;
         self.clear_transfer_mode();
+        self.clear_category_edit();
+        self.clear_confirm();
     }
 
     fn clear_transfer_mode(&mut self) {
@@ -640,8 +680,149 @@ impl App {
         }
     }
 
+    fn clear_category_edit(&mut self) {
+        self.editing_category = None;
+        self.category_edit_input.reset();
+    }
+
+    fn clear_confirm(&mut self) {
+        self.confirm_message = None;
+        self.confirm_action = None;
+    }
+
     pub fn refresh_data(&mut self) {
         self.reload_from_db();
+    }
+
+    // ==================== Category Editing (Categories Tab) ====================
+
+    pub fn selected_category(&self) -> Option<&Category> {
+        if self.current_tab == Tab::Categories {
+            self.categories.get(self.selected_index)
+        } else {
+            None
+        }
+    }
+
+    pub fn start_category_rename(&mut self) {
+        if let Some(cat) = self.selected_category().cloned() {
+            self.category_edit_input = Input::new(cat.path.clone());
+            self.editing_category = Some(cat);
+            self.input_mode = InputMode::CategoryEdit;
+        }
+    }
+
+    pub fn handle_category_edit_input(&mut self, req: tui_input::InputRequest) {
+        self.category_edit_input.handle(req);
+    }
+
+    pub fn category_edit_value(&self) -> &str {
+        self.category_edit_input.value()
+    }
+
+    pub fn category_edit_cursor(&self) -> usize {
+        self.category_edit_input.visual_cursor()
+    }
+
+    pub fn category_edit_scroll(&self, width: usize) -> usize {
+        self.category_edit_input.visual_scroll(width)
+    }
+
+    pub fn confirm_category_rename(&mut self) {
+        let Some(cat) = self.editing_category.take() else {
+            self.cancel_input();
+            return;
+        };
+
+        let new_path = self.category_edit_input.value().trim().to_string();
+        if new_path.is_empty() || new_path == cat.path {
+            self.cancel_input();
+            return;
+        }
+
+        match self.store.rename_category(cat.id, &new_path) {
+            Ok(()) => {
+                self.reload_categories();
+                self.move_cursor_to_category(&new_path);
+                self.input_mode = InputMode::Normal;
+                self.category_edit_input.reset();
+            }
+            Err(crate::Error::CategoryExists(existing_path)) => {
+                if let Ok(Some(target)) = self.store.get_category_by_path(&existing_path) {
+                    let source_count = self
+                        .store
+                        .count_transactions_in_category(cat.id)
+                        .unwrap_or(0);
+                    self.confirm_message = Some(format!(
+                        "Merge {} transaction{} into \"{}\"?",
+                        source_count,
+                        if source_count == 1 { "" } else { "s" },
+                        existing_path
+                    ));
+                    self.confirm_action = Some(ConfirmAction::MergeCategory {
+                        source_id: cat.id,
+                        target_id: target.id,
+                    });
+                    self.editing_category = Some(cat);
+                    self.input_mode = InputMode::ConfirmMerge;
+                } else {
+                    self.error_message = Some(format!("Category \"{}\" already exists", new_path));
+                    self.editing_category = Some(cat);
+                }
+            }
+            Err(e) => {
+                self.error_message = Some(format!("Failed to rename: {}", e));
+                self.editing_category = Some(cat);
+            }
+        }
+    }
+
+    pub fn confirm_merge(&mut self) {
+        let Some(ConfirmAction::MergeCategory { source_id, target_id }) = self.confirm_action.take() else {
+            self.cancel_input();
+            return;
+        };
+
+        match self.store.merge_categories(source_id, target_id) {
+            Ok(()) => {
+                self.reload_categories();
+                if let Ok(Some(target)) = self.store.get_category(target_id) {
+                    self.move_cursor_to_category(&target.path);
+                }
+            }
+            Err(e) => {
+                self.error_message = Some(format!("Failed to merge: {}", e));
+            }
+        }
+
+        self.clear_category_edit();
+        self.clear_confirm();
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn cancel_merge(&mut self) {
+        self.clear_confirm();
+        self.input_mode = InputMode::CategoryEdit;
+    }
+
+    fn reload_categories(&mut self) {
+        self.categories = self.store.list_categories().unwrap_or_default();
+        self.category_tx_count.clear();
+        for cat in &self.categories {
+            if let Ok(count) = self.store.count_transactions_in_category(cat.id) {
+                self.category_tx_count.insert(cat.id, count);
+            }
+        }
+    }
+
+    pub fn category_transaction_count(&self, category_id: i64) -> usize {
+        self.category_tx_count.get(&category_id).copied().unwrap_or(0)
+    }
+
+    fn move_cursor_to_category(&mut self, path: &str) {
+        if let Some(pos) = self.categories.iter().position(|c| c.path == path) {
+            self.selected_index = pos;
+        }
     }
 
     // ==================== DB Search ====================

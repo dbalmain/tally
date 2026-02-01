@@ -64,6 +64,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::Char('/') => app.start_db_search(),
                         KeyCode::Char('~') => app.start_fuzzy_search(),
                         KeyCode::Char('c') => app.start_category_edit(),
+                        KeyCode::Char('e') => app.start_category_rename(),
                         KeyCode::Char('t') => app.start_transfer_mark(),
                         KeyCode::Char('d') => app.delete_transfer(),
                         KeyCode::Enter => {
@@ -167,6 +168,49 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::Down => app.category_next(),
                         KeyCode::Up => app.category_previous(),
                         KeyCode::Char(c) => app.update_category_input(c),
+                        _ => {}
+                    },
+                    InputMode::CategoryEdit => match key.code {
+                        KeyCode::Esc => app.cancel_input(),
+                        KeyCode::Enter => app.confirm_category_rename(),
+                        KeyCode::Char(c) => {
+                            app.handle_category_edit_input(InputRequest::InsertChar(c));
+                        }
+                        KeyCode::Backspace => {
+                            app.handle_category_edit_input(InputRequest::DeletePrevChar);
+                        }
+                        KeyCode::Delete => {
+                            app.handle_category_edit_input(InputRequest::DeleteNextChar);
+                        }
+                        KeyCode::Left => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.handle_category_edit_input(InputRequest::GoToPrevWord);
+                            } else {
+                                app.handle_category_edit_input(InputRequest::GoToPrevChar);
+                            }
+                        }
+                        KeyCode::Right => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.handle_category_edit_input(InputRequest::GoToNextWord);
+                            } else {
+                                app.handle_category_edit_input(InputRequest::GoToNextChar);
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.handle_category_edit_input(InputRequest::GoToStart);
+                        }
+                        KeyCode::End => {
+                            app.handle_category_edit_input(InputRequest::GoToEnd);
+                        }
+                        _ => {}
+                    },
+                    InputMode::ConfirmMerge => match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                            app.confirm_merge();
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            app.cancel_merge();
+                        }
                         _ => {}
                     },
                     InputMode::TransferPending => match key.code {

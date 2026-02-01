@@ -662,6 +662,77 @@ impl TransactionStore {
         Ok(())
     }
 
+    /// Rename a category. Returns error if new name already exists.
+    pub fn rename_category(&mut self, category_id: i64, new_path: &str) -> Result<()> {
+        let normalized = new_path.trim().trim_matches('/');
+        
+        // Check if target name already exists
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM categories WHERE path = ? AND id != ?",
+                params![normalized, category_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        
+        if existing.is_some() {
+            return Err(Error::CategoryExists(normalized.to_string()));
+        }
+        
+        self.conn.execute(
+            "UPDATE categories SET path = ? WHERE id = ?",
+            params![normalized, category_id],
+        )?;
+        Ok(())
+    }
+
+    /// Merge source category into target category.
+    /// Moves all transactions from source to target, then deletes source.
+    pub fn merge_categories(&mut self, source_id: i64, target_id: i64) -> Result<()> {
+        // Move all enrichments from source category to target category
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE transaction_enrichments SET category_id = ?, updated_at = ? WHERE category_id = ?",
+            params![target_id, now, source_id],
+        )?;
+        
+        // Delete the source category
+        self.conn
+            .execute("DELETE FROM categories WHERE id = ?", [source_id])?;
+        
+        Ok(())
+    }
+
+    /// Get category by path.
+    pub fn get_category_by_path(&self, path: &str) -> Result<Option<Category>> {
+        let normalized = path.trim().trim_matches('/');
+        self.conn
+            .query_row(
+                "SELECT id, path, created_at FROM categories WHERE path = ?",
+                [normalized],
+                |row| {
+                    Ok(Category {
+                        id: row.get(0)?,
+                        path: row.get(1)?,
+                        created_at: parse_datetime(&row.get::<_, String>(2)?)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Count transactions in a category.
+    pub fn count_transactions_in_category(&self, category_id: i64) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM transaction_enrichments WHERE category_id = ?",
+            [category_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     // ==================== Transfers ====================
 
     /// Create a transfer linking two transactions.
@@ -1438,5 +1509,75 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         };
         let txs = store.query_transactions(&filter).unwrap();
         assert!(txs.is_empty());
+    }
+
+    #[test]
+    fn test_rename_category() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+
+        let cat_id = store.get_or_create_category("Food/Groceries").unwrap();
+        
+        // Rename should work
+        store.rename_category(cat_id, "Food/Supermarket").unwrap();
+        
+        let cat = store.get_category(cat_id).unwrap().unwrap();
+        assert_eq!(cat.path, "Food/Supermarket");
+    }
+
+    #[test]
+    fn test_rename_category_conflict() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+
+        store.get_or_create_category("Food/Groceries").unwrap();
+        let cat2_id = store.get_or_create_category("Food/Supermarket").unwrap();
+        
+        // Renaming to existing name should fail
+        let result = store.rename_category(cat2_id, "Food/Groceries");
+        assert!(matches!(result, Err(Error::CategoryExists(_))));
+    }
+
+    #[test]
+    fn test_merge_categories() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        let source_id = store.get_or_create_category("OldCategory").unwrap();
+        let target_id = store.get_or_create_category("NewCategory").unwrap();
+
+        // Assign a transaction to source category
+        let txs = store.query_transactions(&TransactionFilter::default()).unwrap();
+        let tx_id = txs[0].id;
+        store.set_category(tx_id, source_id, CategorySource::Manual, true, None).unwrap();
+
+        // Merge source into target
+        store.merge_categories(source_id, target_id).unwrap();
+
+        // Source category should be deleted
+        assert!(store.get_category(source_id).unwrap().is_none());
+
+        // Transaction should now have target category
+        let cat = store.get_transaction_category(tx_id).unwrap().unwrap();
+        assert_eq!(cat.id, target_id);
+    }
+
+    #[test]
+    fn test_count_transactions_in_category() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        let cat_id = store.get_or_create_category("TestCategory").unwrap();
+        
+        // Initially empty
+        assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 0);
+
+        // Assign transaction
+        let txs = store.query_transactions(&TransactionFilter::default()).unwrap();
+        store.set_category(txs[0].id, cat_id, CategorySource::Manual, true, None).unwrap();
+
+        assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 1);
     }
 }
