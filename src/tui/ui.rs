@@ -78,15 +78,17 @@ fn draw_db_search_bar(f: &mut Frame, app: &App, area: Rect) {
 
     if is_active {
         let cursor_pos = app.db_search_cursor();
-        let (before_cursor, after_cursor) = split_at_char_index(search_value, cursor_pos);
+        let (before_cursor, _) = split_at_char_index(search_value, cursor_pos);
 
         let search_line = Line::from(vec![
             Span::styled("/", Style::default().fg(Color::DarkGray)),
-            Span::styled(before_cursor, Style::default().fg(Color::Cyan)),
-            Span::styled("▌", Style::default().fg(Color::Cyan)),
-            Span::styled(after_cursor, Style::default().fg(Color::Cyan)),
+            Span::styled(search_value, Style::default().fg(Color::Cyan)),
         ]);
         f.render_widget(Paragraph::new(search_line), area);
+
+        // Position native terminal cursor after prefix "/" and before_cursor text
+        let cursor_x = area.x + 1 + before_cursor.len() as u16;
+        f.set_cursor_position((cursor_x, area.y));
     } else {
         let search_line = Line::from(vec![
             Span::styled("/", Style::default().fg(Color::DarkGray)),
@@ -102,15 +104,17 @@ fn draw_fuzzy_search_bar(f: &mut Frame, app: &App, area: Rect) {
 
     if is_active {
         let cursor_pos = app.fuzzy_search_cursor();
-        let (before_cursor, after_cursor) = split_at_char_index(search_value, cursor_pos);
+        let (before_cursor, _) = split_at_char_index(search_value, cursor_pos);
 
         let search_line = Line::from(vec![
             Span::styled("~", Style::default().fg(Color::DarkGray)),
-            Span::styled(before_cursor, Style::default().fg(Color::Yellow)),
-            Span::styled("▌", Style::default().fg(Color::Yellow)),
-            Span::styled(after_cursor, Style::default().fg(Color::Yellow)),
+            Span::styled(search_value, Style::default().fg(Color::Yellow)),
         ]);
         f.render_widget(Paragraph::new(search_line), area);
+
+        // Position native terminal cursor after prefix "~" and before_cursor text
+        let cursor_x = area.x + 1 + before_cursor.len() as u16;
+        f.set_cursor_position((cursor_x, area.y));
     } else {
         let search_line = Line::from(vec![
             Span::styled("~", Style::default().fg(Color::DarkGray)),
