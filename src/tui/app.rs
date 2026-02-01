@@ -192,11 +192,21 @@ impl App {
             })
             .unwrap_or_default();
 
-        let uncategorized = store.get_uncategorized_transactions(500).unwrap_or_default();
-        let ai_reviews = store.get_pending_ai_reviews(500).unwrap_or_default();
-        let transfer_reviews = store.get_pending_transfer_reviews(500).unwrap_or_default();
+        let default_filter = TransactionFilter {
+            limit: Some(500),
+            ..Default::default()
+        };
+        let uncategorized = store
+            .get_uncategorized_transactions(&default_filter)
+            .unwrap_or_default();
+        let ai_reviews = store
+            .get_pending_ai_reviews(&default_filter)
+            .unwrap_or_default();
+        let transfer_reviews = store
+            .get_pending_transfer_reviews(&default_filter)
+            .unwrap_or_default();
         let linked_transfers = store
-            .list_transfers_with_transactions(true)
+            .list_transfers_with_transactions(true, &default_filter)
             .unwrap_or_default();
 
         let bank_list = store.list_banks().unwrap_or_default();
@@ -572,10 +582,10 @@ impl App {
             let first_id = candidates.first().map(|c| c.id);
             self.transfer_candidates = candidates;
             self.input_mode = InputMode::TransferPending;
-            if let Some(first_id) = first_id {
-                if let Some(pos) = self.find_filtered_position_by_tx_id(first_id) {
-                    self.selected_index = pos;
-                }
+            if let Some(first_id) = first_id
+                && let Some(pos) = self.find_filtered_position_by_tx_id(first_id)
+            {
+                self.selected_index = pos;
             }
         }
     }
@@ -631,28 +641,7 @@ impl App {
     }
 
     pub fn refresh_data(&mut self) {
-        self.transactions = self
-            .store
-            .query_transactions(&TransactionFilter {
-                limit: Some(500),
-                ..Default::default()
-            })
-            .unwrap_or_default();
-        self.uncategorized = self
-            .store
-            .get_uncategorized_transactions(500)
-            .unwrap_or_default();
-        self.ai_reviews = self.store.get_pending_ai_reviews(500).unwrap_or_default();
-        self.transfer_reviews = self
-            .store
-            .get_pending_transfer_reviews(500)
-            .unwrap_or_default();
-        self.linked_transfers = self
-            .store
-            .list_transfers_with_transactions(true)
-            .unwrap_or_default();
-        self.rebuild_caches();
-        self.apply_fuzzy_filter();
+        self.reload_from_db();
     }
 
     // ==================== DB Search ====================
@@ -750,8 +739,22 @@ impl App {
             .store
             .query_transactions(&filter)
             .unwrap_or_default();
-        // For now, other lists (uncategorized, ai_reviews, etc.) don't use DB search
-        // They keep their full data and fuzzy filter is applied
+        self.uncategorized = self
+            .store
+            .get_uncategorized_transactions(&filter)
+            .unwrap_or_default();
+        self.ai_reviews = self
+            .store
+            .get_pending_ai_reviews(&filter)
+            .unwrap_or_default();
+        self.linked_transfers = self
+            .store
+            .list_transfers_with_transactions(true, &filter)
+            .unwrap_or_default();
+        self.transfer_reviews = self
+            .store
+            .get_pending_transfer_reviews(&filter)
+            .unwrap_or_default();
         self.rebuild_caches();
         self.apply_fuzzy_filter();
     }

@@ -42,6 +42,30 @@ params_vec.push(Box::new(bank_id));
 
 ---
 
+## Code Quality
+
+### 6. [ ] Add `bank_id`/`account_id` filter support for transfers
+
+**Why:** `build_transfer_filter_clause` handles `bank_name_prefix` and `account_name_prefix` but silently ignores `bank_id` and `account_id`, causing inconsistent behavior.
+
+**Target:** Add OR-based filtering for ID fields, matching the pattern used for name prefixes.
+
+**Files:** `src/store.rs`
+
+**Effort:** S (<1h)
+
+---
+
+### 7. [ ] Move `use rusqlite::types::Value` to module level
+
+**Why:** Currently repeated in each function that builds dynamic SQL. Module-level import reduces repetition.
+
+**Files:** `src/store.rs`
+
+**Effort:** S (<30m)
+
+---
+
 ## Future Scaling (10k+ transactions)
 
 ### 4. [ ] Add SQLite indices

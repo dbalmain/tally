@@ -770,30 +770,51 @@ impl TransactionStore {
 
     // ==================== Todo Queries ====================
 
-    /// Get transactions that need categorization.
-    pub fn get_uncategorized_transactions(&self, limit: usize) -> Result<Vec<Transaction>> {
-        let mut stmt = self.conn.prepare(
+    /// Get transactions that need categorization, with optional filters.
+    pub fn get_uncategorized_transactions(
+        &self,
+        filter: &TransactionFilter,
+    ) -> Result<Vec<Transaction>> {
+        use rusqlite::types::Value;
+
+        let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
+             JOIN banks b ON a.bank_id = b.id
              LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
              LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id
              WHERE a.deleted_at IS NULL
                AND (e.category_id IS NULL OR e.id IS NULL)
-               AND tr.id IS NULL
-             ORDER BY t.date DESC, t.id DESC
-             LIMIT ?",
-        )?;
+               AND tr.id IS NULL",
+        );
+        let mut params: Vec<Value> = Vec::new();
+
+        append_transaction_filters(&mut sql, &mut params, filter);
+
+        sql.push_str(" ORDER BY t.date DESC, t.id DESC");
+
+        if let Some(limit) = filter.limit {
+            sql.push_str(" LIMIT ?");
+            params.push(Value::Integer(limit as i64));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
         let transactions = stmt
-            .query_map([limit as i64], parse_transaction)?
+            .query_map(rusqlite::params_from_iter(params), parse_transaction)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(transactions)
     }
 
-    /// Get transactions with AI-suggested categories pending review.
-    pub fn get_pending_ai_reviews(&self, limit: usize) -> Result<Vec<TransactionWithEnrichment>> {
-        let mut stmt = self.conn.prepare(
+    /// Get transactions with AI-suggested categories pending review, with optional filters.
+    pub fn get_pending_ai_reviews(
+        &self,
+        filter: &TransactionFilter,
+    ) -> Result<Vec<TransactionWithEnrichment>> {
+        use rusqlite::types::Value;
+
+        let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id,
                     e.id, e.transaction_id, e.category_id, e.category_source, e.category_confirmed,
@@ -801,16 +822,27 @@ impl TransactionStore {
                     c.id, c.path, c.created_at
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
+             JOIN banks b ON a.bank_id = b.id
              JOIN transaction_enrichments e ON t.id = e.transaction_id
              LEFT JOIN categories c ON e.category_id = c.id
              WHERE a.deleted_at IS NULL
                AND e.category_source = 'ai'
-               AND e.category_confirmed = 0
-             ORDER BY t.date DESC, t.id DESC
-             LIMIT ?",
-        )?;
+               AND e.category_confirmed = 0",
+        );
+        let mut params: Vec<Value> = Vec::new();
+
+        append_transaction_filters(&mut sql, &mut params, filter);
+
+        sql.push_str(" ORDER BY t.date DESC, t.id DESC");
+
+        if let Some(limit) = filter.limit {
+            sql.push_str(" LIMIT ?");
+            params.push(Value::Integer(limit as i64));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
         let results = stmt
-            .query_map([limit as i64], |row| {
+            .query_map(rusqlite::params_from_iter(params), |row| {
                 let transaction = parse_transaction(row)?;
                 let enrichment = Some(parse_enrichment_at_offset(row, 11)?);
                 let category = if row.get::<_, Option<i64>>(19)?.is_some() {
@@ -832,17 +864,44 @@ impl TransactionStore {
         Ok(results)
     }
 
-    /// Get transfers pending user confirmation.
-    pub fn get_pending_transfer_reviews(&self, limit: usize) -> Result<Vec<Transfer>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, from_transaction_id, to_transaction_id, source, confirmed, created_at
-             FROM transfers
-             WHERE confirmed = 0
-             ORDER BY created_at DESC
-             LIMIT ?",
-        )?;
+    /// Get transfers pending user confirmation, with optional filters.
+    pub fn get_pending_transfer_reviews(
+        &self,
+        filter: &TransactionFilter,
+    ) -> Result<Vec<Transfer>> {
+        use rusqlite::types::Value;
+
+        let mut sql = String::from(
+            "SELECT tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at
+             FROM transfers tr
+             JOIN transactions ft ON ft.id = tr.from_transaction_id
+             JOIN accounts fa ON fa.id = ft.account_id
+             JOIN banks fb ON fb.id = fa.bank_id
+             JOIN transactions tt ON tt.id = tr.to_transaction_id
+             JOIN accounts ta ON ta.id = tt.account_id
+             JOIN banks tb ON tb.id = ta.bank_id
+             WHERE tr.confirmed = 0
+               AND fa.deleted_at IS NULL AND ta.deleted_at IS NULL",
+        );
+        let mut params: Vec<Value> = Vec::new();
+
+        let (filter_sql, filter_params) =
+            build_transfer_filter_clause(filter, "ft", "fa", "fb", "tt", "ta", "tb");
+        if !filter_sql.is_empty() {
+            sql.push_str(&filter_sql);
+            params.extend(filter_params);
+        }
+
+        sql.push_str(" ORDER BY tr.created_at DESC");
+
+        if let Some(limit) = filter.limit {
+            sql.push_str(" LIMIT ?");
+            params.push(Value::Integer(limit as i64));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
         let transfers = stmt
-            .query_map([limit as i64], parse_transfer)?
+            .query_map(rusqlite::params_from_iter(params), parse_transfer)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(transfers)
     }
@@ -879,29 +938,53 @@ impl TransactionStore {
         Ok(transfers)
     }
 
-    /// List transfers with all transaction data resolved (single query, no N+1).
+    /// List transfers with all transaction data resolved, with optional filters.
+    /// Filters match if EITHER the from or to transaction matches.
     pub fn list_transfers_with_transactions(
         &self,
         confirmed_only: bool,
+        filter: &TransactionFilter,
     ) -> Result<Vec<TransferWithTransactions>> {
-        let sql = format!(
-            "SELECT 
+        use rusqlite::types::Value;
+
+        let mut sql = String::from(
+            "SELECT
                 tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at,
-                ft.id, fa.bank_id, ft.account_id, ft.date, ft.description, ft.amount_cents, ft.balance_cents, ft.hash, ft.metadata, ft.source_file, ft.import_batch_id,
-                tt.id, ta.bank_id, tt.account_id, tt.date, tt.description, tt.amount_cents, tt.balance_cents, tt.hash, tt.metadata, tt.source_file, tt.import_batch_id
+                ft.id, fb.id, ft.account_id, ft.date, ft.description, ft.amount_cents, ft.balance_cents, ft.hash, ft.metadata, ft.source_file, ft.import_batch_id,
+                tt.id, tb.id, tt.account_id, tt.date, tt.description, tt.amount_cents, tt.balance_cents, tt.hash, tt.metadata, tt.source_file, tt.import_batch_id
              FROM transfers tr
              JOIN transactions ft ON ft.id = tr.from_transaction_id
              JOIN accounts fa ON fa.id = ft.account_id
+             JOIN banks fb ON fb.id = fa.bank_id
              JOIN transactions tt ON tt.id = tr.to_transaction_id
              JOIN accounts ta ON ta.id = tt.account_id
-             {}
-             ORDER BY tr.created_at DESC",
-            if confirmed_only { "WHERE tr.confirmed = 1" } else { "" }
+             JOIN banks tb ON tb.id = ta.bank_id
+             WHERE fa.deleted_at IS NULL AND ta.deleted_at IS NULL",
         );
+        let mut params: Vec<Value> = Vec::new();
+
+        if confirmed_only {
+            sql.push_str(" AND tr.confirmed = 1");
+        }
+
+        // Apply filters - match if EITHER from or to transaction matches
+        let (filter_sql, filter_params) =
+            build_transfer_filter_clause(filter, "ft", "fa", "fb", "tt", "ta", "tb");
+        if !filter_sql.is_empty() {
+            sql.push_str(&filter_sql);
+            params.extend(filter_params);
+        }
+
+        sql.push_str(" ORDER BY tr.created_at DESC");
+
+        if let Some(limit) = filter.limit {
+            sql.push_str(" LIMIT ?");
+            params.push(Value::Integer(limit as i64));
+        }
 
         let mut stmt = self.conn.prepare(&sql)?;
         let result = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(params), |row| {
                 let transfer = parse_transfer(row)?;
                 let from_transaction = parse_transaction_at_offset(row, 6)?;
                 let to_transaction = parse_transaction_at_offset(row, 17)?;
@@ -915,6 +998,158 @@ impl TransactionStore {
 
         Ok(result)
     }
+}
+
+/// Append common transaction filter clauses to SQL query.
+/// Assumes the query already has: t (transactions), a (accounts), b (banks) aliases.
+/// For category filtering, also needs: c (categories) alias from a LEFT JOIN.
+fn append_transaction_filters(
+    sql: &mut String,
+    params: &mut Vec<rusqlite::types::Value>,
+    filter: &TransactionFilter,
+) {
+    use rusqlite::types::Value;
+
+    if let Some(bank_id) = filter.bank_id {
+        sql.push_str(" AND a.bank_id = ?");
+        params.push(Value::Integer(bank_id));
+    }
+    if let Some(account_id) = filter.account_id {
+        sql.push_str(" AND t.account_id = ?");
+        params.push(Value::Integer(account_id));
+    }
+    if let Some(ref from_date) = filter.from_date {
+        sql.push_str(" AND t.date >= ?");
+        params.push(Value::Text(from_date.to_string()));
+    }
+    if let Some(ref to_date) = filter.to_date {
+        sql.push_str(" AND t.date <= ?");
+        params.push(Value::Text(to_date.to_string()));
+    }
+    if let Some(amount_min) = filter.amount_min {
+        sql.push_str(" AND t.amount_cents >= ?");
+        params.push(Value::Integer(amount_min));
+    }
+    if let Some(amount_max) = filter.amount_max {
+        sql.push_str(" AND t.amount_cents <= ?");
+        params.push(Value::Integer(amount_max));
+    }
+    if let Some(ref prefix) = filter.bank_name_prefix {
+        sql.push_str(" AND LOWER(b.name) LIKE ?");
+        params.push(Value::Text(format!("{}%", prefix.to_lowercase())));
+    }
+    if let Some(ref prefix) = filter.account_name_prefix {
+        sql.push_str(" AND LOWER(a.name) LIKE ?");
+        params.push(Value::Text(format!("{}%", prefix.to_lowercase())));
+    }
+    if let Some(ref desc) = filter.description_contains {
+        sql.push_str(" AND t.description LIKE ?");
+        params.push(Value::Text(format!("%{}%", desc)));
+    }
+    if let Some(ref regex) = filter.description_regex {
+        sql.push_str(" AND regexp(?, t.description)");
+        params.push(Value::Text(regex.clone()));
+    }
+}
+
+/// Build filter clause for transfers where EITHER from or to transaction matches.
+/// Returns (sql_clause, params) to append to the query.
+fn build_transfer_filter_clause(
+    filter: &TransactionFilter,
+    from_t: &str,
+    from_a: &str,
+    from_b: &str,
+    to_t: &str,
+    to_a: &str,
+    to_b: &str,
+) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+
+    let mut conditions_from = Vec::new();
+    let mut conditions_to = Vec::new();
+    let mut params = Vec::new();
+
+    // Helper to add condition to both sides
+    macro_rules! add_filter {
+        ($cond_from:expr, $cond_to:expr, $val:expr) => {
+            conditions_from.push($cond_from);
+            conditions_to.push($cond_to);
+            params.push($val.clone());
+            params.push($val);
+        };
+    }
+
+    if let Some(ref from_date) = filter.from_date {
+        add_filter!(
+            format!("{}.date >= ?", from_t),
+            format!("{}.date >= ?", to_t),
+            Value::Text(from_date.to_string())
+        );
+    }
+    if let Some(ref to_date) = filter.to_date {
+        add_filter!(
+            format!("{}.date <= ?", from_t),
+            format!("{}.date <= ?", to_t),
+            Value::Text(to_date.to_string())
+        );
+    }
+    if let Some(amount_min) = filter.amount_min {
+        add_filter!(
+            format!("{}.amount_cents >= ?", from_t),
+            format!("{}.amount_cents >= ?", to_t),
+            Value::Integer(amount_min)
+        );
+    }
+    if let Some(amount_max) = filter.amount_max {
+        add_filter!(
+            format!("{}.amount_cents <= ?", from_t),
+            format!("{}.amount_cents <= ?", to_t),
+            Value::Integer(amount_max)
+        );
+    }
+    if let Some(ref prefix) = filter.bank_name_prefix {
+        let pattern = Value::Text(format!("{}%", prefix.to_lowercase()));
+        add_filter!(
+            format!("LOWER({}.name) LIKE ?", from_b),
+            format!("LOWER({}.name) LIKE ?", to_b),
+            pattern
+        );
+    }
+    if let Some(ref prefix) = filter.account_name_prefix {
+        let pattern = Value::Text(format!("{}%", prefix.to_lowercase()));
+        add_filter!(
+            format!("LOWER({}.name) LIKE ?", from_a),
+            format!("LOWER({}.name) LIKE ?", to_a),
+            pattern
+        );
+    }
+    if let Some(ref desc) = filter.description_contains {
+        let pattern = Value::Text(format!("%{}%", desc));
+        add_filter!(
+            format!("{}.description LIKE ?", from_t),
+            format!("{}.description LIKE ?", to_t),
+            pattern
+        );
+    }
+    if let Some(ref regex) = filter.description_regex {
+        let pattern = Value::Text(regex.clone());
+        add_filter!(
+            format!("regexp(?, {}.description)", from_t),
+            format!("regexp(?, {}.description)", to_t),
+            pattern
+        );
+    }
+
+    if conditions_from.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    // Build: AND ((from_cond1 AND from_cond2 ...) OR (to_cond1 AND to_cond2 ...))
+    let from_clause = conditions_from.join(" AND ");
+    let to_clause = conditions_to.join(" AND ");
+    let sql = format!(" AND (({}) OR ({}))", from_clause, to_clause);
+
+    (sql, params)
 }
 
 fn parse_datetime(s: &str) -> rusqlite::Result<chrono::DateTime<Utc>> {
