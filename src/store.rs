@@ -1,5 +1,5 @@
 use chrono::{NaiveDate, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::Value, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 use crate::db::init_db;
@@ -113,8 +113,6 @@ impl TransactionStore {
 
     /// Query transactions with optional filters.
     pub fn query_transactions(&self, filter: &TransactionFilter) -> Result<Vec<Transaction>> {
-        use rusqlite::types::Value;
-
         let needs_category_join = filter.category_contains.is_some();
 
         let mut sql = String::from(
@@ -775,8 +773,6 @@ impl TransactionStore {
         &self,
         filter: &TransactionFilter,
     ) -> Result<Vec<Transaction>> {
-        use rusqlite::types::Value;
-
         let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
@@ -812,8 +808,6 @@ impl TransactionStore {
         &self,
         filter: &TransactionFilter,
     ) -> Result<Vec<TransactionWithEnrichment>> {
-        use rusqlite::types::Value;
-
         let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id,
@@ -869,8 +863,6 @@ impl TransactionStore {
         &self,
         filter: &TransactionFilter,
     ) -> Result<Vec<Transfer>> {
-        use rusqlite::types::Value;
-
         let mut sql = String::from(
             "SELECT tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at
              FROM transfers tr
@@ -945,8 +937,6 @@ impl TransactionStore {
         confirmed_only: bool,
         filter: &TransactionFilter,
     ) -> Result<Vec<TransferWithTransactions>> {
-        use rusqlite::types::Value;
-
         let mut sql = String::from(
             "SELECT
                 tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at,
@@ -1005,11 +995,9 @@ impl TransactionStore {
 /// For category filtering, also needs: c (categories) alias from a LEFT JOIN.
 fn append_transaction_filters(
     sql: &mut String,
-    params: &mut Vec<rusqlite::types::Value>,
+    params: &mut Vec<Value>,
     filter: &TransactionFilter,
 ) {
-    use rusqlite::types::Value;
-
     if let Some(bank_id) = filter.bank_id {
         sql.push_str(" AND a.bank_id = ?");
         params.push(Value::Integer(bank_id));
@@ -1062,9 +1050,7 @@ fn build_transfer_filter_clause(
     to_t: &str,
     to_a: &str,
     to_b: &str,
-) -> (String, Vec<rusqlite::types::Value>) {
-    use rusqlite::types::Value;
-
+) -> (String, Vec<Value>) {
     let mut conditions_from = Vec::new();
     let mut conditions_to = Vec::new();
     let mut params = Vec::new();
@@ -1079,6 +1065,20 @@ fn build_transfer_filter_clause(
         };
     }
 
+    if let Some(bank_id) = filter.bank_id {
+        add_filter!(
+            format!("{}.bank_id = ?", from_a),
+            format!("{}.bank_id = ?", to_a),
+            Value::Integer(bank_id)
+        );
+    }
+    if let Some(account_id) = filter.account_id {
+        add_filter!(
+            format!("{}.account_id = ?", from_t),
+            format!("{}.account_id = ?", to_t),
+            Value::Integer(account_id)
+        );
+    }
     if let Some(ref from_date) = filter.from_date {
         add_filter!(
             format!("{}.date >= ?", from_t),
