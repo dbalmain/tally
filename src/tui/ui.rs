@@ -214,15 +214,16 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
             let to = &twt.to_transaction;
 
             Row::new(vec![
-                Cell::from(from.date.to_string()).style(Style::default().bg(bg)),
-                Cell::from(from.description.as_str()).style(Style::default().bg(bg)),
+                Cell::from(from.date.to_string()),
+                Cell::from(from.description.as_str()),
                 Cell::from(Line::from(format_cents(from.amount_cents)).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Red).bg(bg)),
-                Cell::from("→").style(Style::default().fg(Color::Cyan).bg(bg)),
-                Cell::from(to.description.as_str()).style(Style::default().bg(bg)),
+                    .style(Style::default().fg(Color::Red)),
+                Cell::from("→").style(Style::default().fg(Color::Cyan)),
+                Cell::from(to.description.as_str()),
                 Cell::from(Line::from(format_cents(to.amount_cents)).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Green).bg(bg)),
+                    .style(Style::default().fg(Color::Green)),
             ])
+            .style(Style::default().bg(bg))
         })
         .collect();
 
@@ -379,13 +380,14 @@ fn draw_transaction_table(
             let balance = format_cents(tx.balance_cents);
 
             Row::new(vec![
-                Cell::from(tx.date.to_string()).style(Style::default().fg(fg).bg(bg)),
-                Cell::from(tx.description.as_str()).style(Style::default().fg(fg).bg(bg)),
+                Cell::from(tx.date.to_string()).style(Style::default().fg(fg)),
+                Cell::from(tx.description.as_str()).style(Style::default().fg(fg)),
                 Cell::from(Line::from(amount).alignment(Alignment::Right))
-                    .style(Style::default().fg(amount_color).bg(bg)),
+                    .style(Style::default().fg(amount_color)),
                 Cell::from(Line::from(balance).alignment(Alignment::Right))
-                    .style(Style::default().fg(fg).bg(bg)),
+                    .style(Style::default().fg(fg)),
             ])
+            .style(Style::default().bg(bg))
         })
         .collect();
 
@@ -441,13 +443,14 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
             };
 
             Row::new(vec![
-                Cell::from(tx.date.to_string()).style(Style::default().bg(bg)),
-                Cell::from(tx.description.as_str()).style(Style::default().bg(bg)),
+                Cell::from(tx.date.to_string()),
+                Cell::from(tx.description.as_str()),
                 Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
-                    .style(Style::default().fg(amount_color).bg(bg)),
-                Cell::from(category_path).style(Style::default().fg(Color::Yellow).bg(bg)),
-                Cell::from(confidence).style(Style::default().fg(Color::Cyan).bg(bg)),
+                    .style(Style::default().fg(amount_color)),
+                Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
+                Cell::from(confidence).style(Style::default().fg(Color::Cyan)),
             ])
+            .style(Style::default().bg(bg))
         })
         .collect();
 
@@ -502,12 +505,12 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
             let to_id = transfer.to_transaction_id.to_string();
 
             Row::new(vec![
-                Cell::from(format!("From: {}", from_id)).style(Style::default().bg(bg)),
-                Cell::from(format!("To: {}", to_id)).style(Style::default().bg(bg)),
-                Cell::from(source).style(Style::default().fg(Color::Cyan).bg(bg)),
-                Cell::from(transfer.created_at.format("%Y-%m-%d").to_string())
-                    .style(Style::default().bg(bg)),
+                Cell::from(format!("From: {}", from_id)),
+                Cell::from(format!("To: {}", to_id)),
+                Cell::from(source).style(Style::default().fg(Color::Cyan)),
+                Cell::from(transfer.created_at.format("%Y-%m-%d").to_string()),
             ])
+            .style(Style::default().bg(bg))
         })
         .collect();
 
@@ -549,26 +552,28 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
         .take(visible_height)
         .map(|(i, cat)| {
             let is_selected = i == app.selected_index;
-            let bg = if is_selected {
-                Color::DarkGray
+            let (bg, count_fg) = if is_selected {
+                (Color::DarkGray, Color::Gray)
             } else {
-                Color::Reset
+                (Color::Reset, Color::DarkGray)
             };
 
             let tx_count = app.category_transaction_count(cat.id);
 
             Row::new(vec![
-                Cell::from(cat.path.as_str()).style(Style::default().fg(Color::Yellow).bg(bg)),
                 Cell::from(Line::from(format!("{}", tx_count)).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::DarkGray).bg(bg)),
+                    .style(Style::default().fg(count_fg)),
+                Cell::from(cat.path.as_str()).style(Style::default().fg(Color::Yellow)),
             ])
+            .style(Style::default().bg(bg))
         })
         .collect();
 
     let table = Table::new(
         rows,
-        [Constraint::Min(30), Constraint::Length(10)],
-    );
+        [Constraint::Length(4), Constraint::Min(30)],
+    )
+    .column_spacing(1);
 
     f.render_widget(table, area);
 }
