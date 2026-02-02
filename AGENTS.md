@@ -134,12 +134,91 @@ Schema changes require deleting `tally.db` and re-importing. This keeps the code
 
 - **Whitespace over borders** — No box borders on tables or panels
 - **Context over labels** — Tab names provide context, no redundant headers
+- **Row-level styling** — Use `Row::style()` for backgrounds, not per-cell `.bg()`
 - **Color coding:**
   - Red: negative amounts, "from" in transfers
   - Green: positive amounts, "to" in transfers
   - Yellow: categories, pending items
   - Cyan: transfer indicators, confidence scores
   - DarkGray: labels, disabled items
+
+## TUI Key Bindings
+
+### Global (Normal Mode)
+| Key | Action |
+|-----|--------|
+| `q` | Quit |
+| `j` / `↓` | Next item |
+| `k` / `↑` | Previous item |
+| `Tab` / `Shift+Tab` | Next/previous tab |
+| `[` / `]` | Previous/next subtab (Todo) |
+| `/` | Start DB search |
+| `~` | Start fuzzy search |
+| `c` | Set category on transaction |
+| `e` | Rename category (Categories tab) |
+| `t` | Mark as transfer |
+| `d` | Delete transfer |
+| `Enter` | Confirm (AI review, transfer review) |
+
+### Search Modes (DB and Fuzzy)
+| Key | Action |
+|-----|--------|
+| `Esc` | Clear search and exit |
+| `Enter` | Confirm search |
+| `↑` / `↓` | Navigate results |
+| `Tab` | Switch tabs (keeps search active) |
+| Standard text editing | Left/Right, Ctrl+Left/Right, Home/End, Backspace, Delete |
+
+### Category Popup
+| Key | Action |
+|-----|--------|
+| `Esc` | Cancel |
+| `Enter` | Confirm selection |
+| `↑` / `↓` | Navigate suggestions |
+| Type | Filter categories |
+
+### Confirmation Popups
+| Key | Action |
+|-----|--------|
+| `y` / `Enter` | Confirm |
+| `n` / `Esc` | Cancel |
+
+## Search Syntax
+
+### DB Search (`/`)
+Filters are pushed to SQL for efficient querying. Syntax:
+
+**Filters:**
+- `date:2024-01-15` — Exact date
+- `date:2024-01` — Entire month
+- `date:2024` — Entire year
+- `date:2024-01..2024-06` — Date range
+- `date:>2024-01` / `date:<2024-06` — After/before
+- `amount:100` — Exact amount ($100.00)
+- `amount:>100` / `amount:<100` — Greater/less than
+- `amount:50..200` — Amount range
+- `bank:Chase` — Bank name prefix
+- `account:Checking` — Account name prefix
+- `category:Food` — Category contains
+
+**Text matching:**
+- `groceries` — Case-insensitive substring match
+- `/coffee.*/i` — Regex (case-insensitive with `i` flag)
+- `/Coffee/` — Regex (case-sensitive)
+
+**Quoting (for values with spaces):**
+- `account:"Orange Everyday"`
+- `account:Orange\ Everyday`
+
+**Combined example:**
+```
+date:2024-01 amount:>100 bank:Chase groceries
+```
+
+**Transition to fuzzy:** End with ` ~` to switch to fuzzy mode while keeping DB filters.
+
+### Fuzzy Search (`~`)
+In-memory fuzzy matching on loaded results using nucleo. Type any characters and matches are scored by how well they match (not just substring).
 
 ## Common Store Operations
 
