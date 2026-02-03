@@ -603,6 +603,48 @@ impl TransactionStore {
             .map_err(Into::into)
     }
 
+    /// Get categories for multiple transactions in bulk.
+    /// Returns a map of transaction_id -> category_path.
+    pub fn get_categories_for_transactions(
+        &self,
+        transaction_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, String>> {
+        use std::collections::HashMap;
+
+        if transaction_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = transaction_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT e.transaction_id, c.path 
+             FROM transaction_enrichments e
+             JOIN categories c ON c.id = e.category_id
+             WHERE e.transaction_id IN ({})",
+            placeholders
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = transaction_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut result = HashMap::new();
+        for row in rows {
+            let (tx_id, path) = row?;
+            result.insert(tx_id, path);
+        }
+        Ok(result)
+    }
+
     // ==================== Enrichments ====================
 
     /// Get enrichment data for a transaction.

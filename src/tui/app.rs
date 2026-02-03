@@ -320,13 +320,11 @@ impl App {
             }
         }
 
-        // Build category cache from ai_reviews (they have category info)
+        // Build category cache for all transactions
         self.category_by_tx_id.clear();
-        for review in &self.ai_reviews {
-            if let Some(ref cat) = review.category {
-                self.category_by_tx_id
-                    .insert(review.transaction.id, cat.path.clone());
-            }
+        let tx_ids: Vec<i64> = self.transactions.iter().map(|t| t.id).collect();
+        if let Ok(categories) = self.store.get_categories_for_transactions(&tx_ids) {
+            self.category_by_tx_id = categories;
         }
 
         // Build transfer lookup cache

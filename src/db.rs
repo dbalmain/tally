@@ -91,10 +91,13 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
 
 fn register_regexp_function(conn: &Connection) -> Result<()> {
     conn.create_scalar_function("regexp", 2, FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
-        let pattern: String = ctx.get(0)?;
+        // Use SQLite's auxiliary data to cache the compiled regex.
+        // When the pattern (arg 0) is constant across rows, SQLite preserves the cache.
+        let re = ctx.get_or_create_aux(0, |vr| -> std::result::Result<Regex, rusqlite::Error> {
+            let pattern = vr.as_str().map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+            Regex::new(pattern).map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
+        })?;
         let text: String = ctx.get(1)?;
-        let re = Regex::new(&pattern)
-            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
         Ok(re.is_match(&text))
     })?;
     Ok(())

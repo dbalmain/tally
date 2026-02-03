@@ -61,13 +61,19 @@ impl DbSearchQuery {
         let mut text_parts = Vec::new();
 
         for token in tokenize(input) {
-            if let Some(rest) = token.strip_prefix("date:") {
+            if let Some(rest) = token.strip_prefix("date:").or_else(|| token.strip_prefix("d:")) {
                 parse_date_range(rest, &mut query);
             } else if let Some(rest) = token.strip_prefix("amount:") {
                 parse_amount_range(rest, &mut query);
-            } else if let Some(rest) = token.strip_prefix("account:") {
+            } else if let Some(rest) = token
+                .strip_prefix("account:")
+                .or_else(|| token.strip_prefix("a:"))
+            {
                 query.accounts = rest.split('|').map(AccountPattern::parse).collect();
-            } else if let Some(rest) = token.strip_prefix("category:") {
+            } else if let Some(rest) = token
+                .strip_prefix("category:")
+                .or_else(|| token.strip_prefix("c:"))
+            {
                 query.categories = rest.split('|').map(|s| s.to_string()).collect();
             } else {
                 text_parts.push(token);
@@ -490,6 +496,31 @@ mod tests {
     fn test_parse_category_multiple() {
         let (q, _) = DbSearchQuery::parse("category:Food|Transport");
         assert_eq!(q.categories, vec!["Food", "Transport"]);
+    }
+
+    #[test]
+    fn test_parse_shortcuts() {
+        // d: for date
+        let (q, _) = DbSearchQuery::parse("d:2024-01");
+        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+        assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()));
+
+        // a: for account
+        let (q, _) = DbSearchQuery::parse("a:ING/Orange");
+        assert_eq!(q.accounts.len(), 1);
+        assert_eq!(q.accounts[0].bank_prefix, "ING");
+        assert_eq!(q.accounts[0].account_prefix, Some("Orange".to_string()));
+
+        // c: for category
+        let (q, _) = DbSearchQuery::parse("c:Food|Transport");
+        assert_eq!(q.categories, vec!["Food", "Transport"]);
+
+        // Combined shortcuts
+        let (q, _) = DbSearchQuery::parse("d:2024 a:Chase c:Food coffee");
+        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+        assert_eq!(q.accounts[0].bank_prefix, "Chase");
+        assert_eq!(q.categories, vec!["Food"]);
+        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee"));
     }
 
     #[test]
