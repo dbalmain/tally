@@ -2,8 +2,12 @@ use std::path::{Path, PathBuf};
 use tally::TransactionStore;
 
 fn main() {
-    // Initialize logging: RUST_LOG=debug cargo run -- tui
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // Initialize file logging: TALLY_LOG=debug cargo run -- tui
+    // Logs to ~/.local/share/tally/tally.<date>.log
+    match tally::logging::init() {
+        Ok(log_dir) => log::info!("Logging to {:?}", log_dir),
+        Err(e) => eprintln!("Warning: failed to initialize logging: {}", e),
+    }
 
     let args: Vec<String> = std::env::args().collect();
     let command = args.get(1).map(|s| s.as_str());
