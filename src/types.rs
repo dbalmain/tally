@@ -115,7 +115,9 @@ pub struct TransactionFilter {
     pub account_patterns: Vec<AccountPattern>,
     /// Category patterns (OR'd together, contains match). Empty means no filter.
     pub category_patterns: Vec<String>,
-    pub description_contains: Option<String>,
+    /// FTS5 query string for full-text search on description + metadata.
+    pub fts_query: Option<String>,
+    /// Regex pattern for description matching (fallback when FTS isn't suitable).
     pub description_regex: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,

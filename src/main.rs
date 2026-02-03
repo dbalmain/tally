@@ -40,8 +40,13 @@ fn run_refresh(db_path: &Path, exports_dir: &Path) {
 }
 
 fn run_tui(db_path: &Path, exports_dir: &Path) {
-    let store = TransactionStore::open(db_path, exports_dir)
+    let mut store = TransactionStore::open(db_path, exports_dir)
         .expect("Failed to open transaction store");
+
+    // Auto-refresh on TUI startup
+    if let Err(e) = store.refresh() {
+        eprintln!("Warning: refresh failed: {}", e);
+    }
 
     if let Err(e) = tally::tui::run(store) {
         eprintln!("TUI error: {}", e);

@@ -11,8 +11,13 @@ use crate::{AccountPattern, TransactionFilter};
 pub enum DbTextMatch {
     #[default]
     None,
-    /// Case-insensitive substring match (LIKE %pattern%)
-    Substring(String),
+    /// FTS5 full-text search query
+    Fts {
+        /// The FTS5 query string (translated from user input)
+        query: String,
+        /// The original user input
+        original: String,
+    },
     /// Regex match using SQLite REGEXP UDF
     Regex {
         /// The regex pattern string (with (?i) prefix if case-insensitive)
@@ -26,7 +31,7 @@ impl DbTextMatch {
     pub fn is_empty(&self) -> bool {
         match self {
             DbTextMatch::None => true,
-            DbTextMatch::Substring(s) => s.is_empty(),
+            DbTextMatch::Fts { original, .. } => original.is_empty(),
             DbTextMatch::Regex { original, .. } => original.is_empty(),
         }
     }
@@ -51,6 +56,12 @@ impl DbSearchQuery {
     /// Parse a search query string with support for filters and text matching.
     /// Returns the query and whether it ends with ` ~` (transition to fuzzy mode).
     pub fn parse(input: &str) -> (Self, bool) {
+        Self::parse_with_cursor(input, None)
+    }
+
+    /// Parse with cursor position for implicit prefix matching.
+    /// When cursor is at end of a term, adds * at that position for prefix matching.
+    pub fn parse_with_cursor(input: &str, cursor: Option<usize>) -> (Self, bool) {
         let (input, transition_to_fuzzy) = if let Some(stripped) = input.strip_suffix(" ~") {
             (stripped, true)
         } else {
@@ -58,9 +69,11 @@ impl DbSearchQuery {
         };
 
         let mut query = DbSearchQuery::default();
-        let mut text_parts = Vec::new();
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut text_token_ends: Vec<usize> = Vec::new(); // original positions where text tokens end
 
-        for token in tokenize(input) {
+        for token_info in tokenize_with_positions(input) {
+            let token = token_info.token;
             if let Some(rest) = token.strip_prefix("date:").or_else(|| token.strip_prefix("d:")) {
                 parse_date_range(rest, &mut query);
             } else if let Some(rest) = token.strip_prefix("amount:") {
@@ -77,11 +90,25 @@ impl DbSearchQuery {
                 query.categories = rest.split('|').map(|s| s.to_string()).collect();
             } else {
                 text_parts.push(token);
+                text_token_ends.push(token_info.end_pos);
             }
         }
 
         let text = text_parts.join(" ");
-        query.text_match = parse_db_text_match(&text);
+
+        // Find if cursor is at end of any text token, map to position in joined text
+        let cursor_in_text = cursor.and_then(|c| {
+            text_token_ends.iter().position(|&end| end == c).map(|idx| {
+                // Calculate position in joined text: sum of token lengths + spaces before
+                text_parts[..=idx]
+                    .iter()
+                    .map(|s| s.chars().count())
+                    .sum::<usize>()
+                    + idx // add idx spaces between tokens
+            })
+        });
+
+        query.text_match = parse_db_text_match(&text, cursor_in_text);
         (query, transition_to_fuzzy)
     }
 
@@ -105,8 +132,8 @@ impl DbSearchQuery {
             amount_max: self.amount_max,
             account_patterns: self.accounts.clone(),
             category_patterns: self.categories.clone(),
-            description_contains: match &self.text_match {
-                DbTextMatch::Substring(s) => Some(s.clone()),
+            fts_query: match &self.text_match {
+                DbTextMatch::Fts { query, .. } => Some(query.clone()),
                 _ => None,
             },
             description_regex: match &self.text_match {
@@ -119,15 +146,22 @@ impl DbSearchQuery {
     }
 }
 
+/// Token with its end position (character index) in the original input.
+/// End position is where the cursor would be if placed right after this token.
+struct TokenWithEnd {
+    token: String,
+    end_pos: usize,
+}
+
 /// Tokenize input handling quoted strings and backslash escapes.
-/// - `key:"value with spaces"` -> `key:value with spaces`
-/// - `key:value\ with\ spaces` -> `key:value with spaces`
-/// - Regular whitespace-separated tokens work as before
-fn tokenize(input: &str) -> Vec<String> {
+/// Returns tokens with their end positions for cursor tracking.
+fn tokenize_with_positions(input: &str) -> Vec<TokenWithEnd> {
     let mut tokens = Vec::new();
     let mut current = String::new();
+    let mut current_end = 0;
     let mut chars = input.chars().peekable();
     let mut in_quotes = false;
+    let mut pos = 0;
 
     while let Some(c) = chars.next() {
         match c {
@@ -135,32 +169,50 @@ fn tokenize(input: &str) -> Vec<String> {
                 // Backslash escape: consume next char literally
                 if let Some(next) = chars.next() {
                     current.push(next);
+                    pos += 2;
+                    current_end = pos;
+                } else {
+                    pos += 1;
                 }
             }
             '"' => {
                 in_quotes = !in_quotes;
+                pos += 1;
+                // Update end if we're building a token
+                if !current.is_empty() {
+                    current_end = pos;
+                }
             }
             ' ' | '\t' if !in_quotes => {
                 // End of token
                 if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
+                    tokens.push(TokenWithEnd {
+                        token: std::mem::take(&mut current),
+                        end_pos: current_end,
+                    });
                 }
+                pos += 1;
             }
             _ => {
                 current.push(c);
+                pos += 1;
+                current_end = pos;
             }
         }
     }
 
     // Don't forget the last token
     if !current.is_empty() {
-        tokens.push(current);
+        tokens.push(TokenWithEnd {
+            token: current,
+            end_pos: current_end,
+        });
     }
 
     tokens
 }
 
-fn parse_db_text_match(text: &str) -> DbTextMatch {
+fn parse_db_text_match(text: &str, cursor_pos: Option<usize>) -> DbTextMatch {
     if text.is_empty() {
         return DbTextMatch::None;
     }
@@ -183,8 +235,69 @@ fn parse_db_text_match(text: &str) -> DbTextMatch {
         };
     }
 
-    // Default: case-insensitive substring match
-    DbTextMatch::Substring(text.to_string())
+    // Default: FTS query
+    let query = parse_fts_query(text, cursor_pos);
+    DbTextMatch::Fts {
+        query,
+        original: text.to_string(),
+    }
+}
+
+/// Parse user FTS input into FTS5 query syntax.
+///
+/// Syntax:
+/// - `term1 term2` → AND (implicit, FTS5 default)
+/// - `term*` → prefix match
+/// - `"phrase"` → exact phrase
+/// - `(A B|C D)` → (A B) OR (C D)
+///
+/// Translation:
+/// - `|` inside parentheses becomes ` OR `
+/// - Unquoted terms are passed through
+/// - Quoted phrases are passed through
+/// - If `cursor_pos` is Some and points to end of a term, inserts `*` there
+fn parse_fts_query(input: &str, cursor_pos: Option<usize>) -> String {
+    let mut result = String::new();
+    let mut in_quotes = false;
+    let mut in_parens = false;
+
+    for (i, c) in input.chars().enumerate() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                result.push(c);
+            }
+            '(' if !in_quotes => {
+                in_parens = true;
+                result.push(c);
+            }
+            ')' if !in_quotes => {
+                in_parens = false;
+                result.push(c);
+            }
+            '|' if !in_quotes && in_parens => {
+                // Translate | to OR inside parentheses
+                result.push_str(" OR ");
+            }
+            _ => {
+                result.push(c);
+            }
+        }
+
+        // Check if we should insert * after this character
+        if let Some(cursor) = cursor_pos {
+            if i + 1 == cursor && !in_quotes {
+                // Cursor is right after this character
+                let next_char = input.chars().nth(i + 1);
+                let at_word_boundary = next_char.map_or(true, |nc| nc.is_whitespace());
+                if at_word_boundary && c.is_alphanumeric() {
+                    result.push('*');
+                }
+            }
+        }
+    }
+
+    result
 }
 
 fn parse_date_range(s: &str, query: &mut DbSearchQuery) {
@@ -329,9 +442,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_simple_substring() {
+    fn test_parse_simple_fts() {
         let (q, transition) = DbSearchQuery::parse("coffee shop");
-        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee shop"));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee shop"));
         assert!(q.date_from.is_none());
         assert!(!transition);
     }
@@ -413,14 +526,14 @@ mod tests {
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "Chase");
         assert_eq!(q.accounts[0].account_prefix, Some("".to_string()));
-        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "groceries"));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "groceries"));
     }
 
     #[test]
     fn test_parse_transition_to_fuzzy() {
         let (q, transition) = DbSearchQuery::parse("date:2024 coffee ~");
         assert!(transition);
-        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee"));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
     }
 
@@ -437,6 +550,13 @@ mod tests {
         assert!(m.fuzzy_matches("ctysd", "cityside"));
         assert!(m.fuzzy_matches("", "anything"));
         assert!(!m.fuzzy_matches("xyz", "cityside"));
+    }
+
+    fn tokenize(input: &str) -> Vec<String> {
+        tokenize_with_positions(input)
+            .into_iter()
+            .map(|t| t.token)
+            .collect()
     }
 
     #[test]
@@ -479,7 +599,7 @@ mod tests {
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "St");
         assert_eq!(q.accounts[0].account_prefix, None);
-        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee"));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
     }
 
     #[test]
@@ -520,7 +640,7 @@ mod tests {
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
         assert_eq!(q.accounts[0].bank_prefix, "Chase");
         assert_eq!(q.categories, vec!["Food"]);
-        assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee"));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
     }
 
     #[test]
@@ -533,7 +653,7 @@ mod tests {
         assert_eq!(filter.amount_min, Some(10000));
         assert_eq!(filter.account_patterns.len(), 1);
         assert_eq!(filter.account_patterns[0].bank_prefix, "Chase");
-        assert_eq!(filter.description_contains, Some("groceries".to_string()));
+        assert_eq!(filter.fts_query, Some("groceries".to_string()));
         assert_eq!(filter.limit, Some(500));
     }
 
@@ -542,7 +662,83 @@ mod tests {
         let (q, _) = DbSearchQuery::parse("/coffee.*/i");
         let filter = q.to_filter(None);
 
-        assert!(filter.description_contains.is_none());
+        assert!(filter.fts_query.is_none());
         assert_eq!(filter.description_regex, Some("(?i)coffee.*".to_string()));
+    }
+
+    #[test]
+    fn test_parse_fts_query() {
+        // Simple terms (implicit AND) - no cursor
+        assert_eq!(parse_fts_query("AAMI mar", None), "AAMI mar");
+
+        // Prefix match
+        assert_eq!(parse_fts_query("mar*", None), "mar*");
+
+        // Phrase match
+        assert_eq!(parse_fts_query("\"AAMI mar\"", None), "\"AAMI mar\"");
+
+        // OR groups
+        assert_eq!(parse_fts_query("(AAMI Mar|AAMI Sep)", None), "(AAMI Mar OR AAMI Sep)");
+
+        // Multiple OR groups
+        assert_eq!(
+            parse_fts_query("(foo|bar) baz (qux|quux)", None),
+            "(foo OR bar) baz (qux OR quux)"
+        );
+
+        // Pipe outside parens is preserved
+        assert_eq!(parse_fts_query("foo|bar", None), "foo|bar");
+
+        // Quoted phrase with pipe preserved
+        assert_eq!(parse_fts_query("\"foo|bar\"", None), "\"foo|bar\"");
+    }
+
+    #[test]
+    fn test_parse_fts_query_implicit_prefix() {
+        // Cursor at end of last term -> adds *
+        assert_eq!(parse_fts_query("coffee", Some(6)), "coffee*");
+        assert_eq!(parse_fts_query("coffee shop", Some(11)), "coffee shop*");
+
+        // Cursor at end of first term -> adds * there
+        assert_eq!(parse_fts_query("aam oct", Some(3)), "aam* oct");
+
+        // No prefix after explicit *, quote, or paren
+        assert_eq!(parse_fts_query("coffee*", Some(7)), "coffee*");
+        assert_eq!(parse_fts_query("\"coffee\"", Some(8)), "\"coffee\"");
+        assert_eq!(parse_fts_query("(foo|bar)", Some(9)), "(foo OR bar)");
+
+        // Cursor not at word boundary -> no prefix
+        assert_eq!(parse_fts_query("coffee", Some(3)), "coffee");
+    }
+
+    #[test]
+    fn test_parse_with_cursor_implicit_prefix() {
+        // Cursor at end of term -> adds prefix
+        let (q, _) = DbSearchQuery::parse_with_cursor("coffee", Some(6));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee*"));
+
+        // Cursor at end of first term in multi-word -> adds prefix there
+        let (q, _) = DbSearchQuery::parse_with_cursor("aam oct", Some(3));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "aam* oct"));
+
+        // Cursor in middle of term -> no prefix
+        let (q, _) = DbSearchQuery::parse_with_cursor("coffee", Some(3));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+
+        // Cursor after space (not at end of term) -> no prefix
+        let (q, _) = DbSearchQuery::parse_with_cursor("coffee ", Some(7));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+
+        // No cursor -> no prefix (programmatic use)
+        let (q, _) = DbSearchQuery::parse("coffee");
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+
+        // With filter, cursor at end of text term
+        let (q, _) = DbSearchQuery::parse_with_cursor("d:2024 coffee", Some(13));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee*"));
+
+        // With filter, cursor at end of first text term
+        let (q, _) = DbSearchQuery::parse_with_cursor("d:2024 aam oct", Some(10));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "aam* oct"));
     }
 }

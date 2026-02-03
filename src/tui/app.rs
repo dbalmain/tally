@@ -832,7 +832,9 @@ impl App {
 
     pub fn handle_db_search_input(&mut self, req: tui_input::InputRequest) {
         self.db_search_input.handle(req);
-        let (query, transition_to_fuzzy) = DbSearchQuery::parse(self.db_search_input.value());
+        let cursor = self.db_search_input.cursor();
+        let (query, transition_to_fuzzy) =
+            DbSearchQuery::parse_with_cursor(self.db_search_input.value(), Some(cursor));
 
         if transition_to_fuzzy {
             // Remove " ~" from input and transition to fuzzy mode

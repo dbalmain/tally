@@ -2,7 +2,7 @@ use chrono::{NaiveDate, Utc};
 use rusqlite::{params, types::Value, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
-use crate::db::init_db;
+use crate::db::{build_searchable_text, init_db};
 use crate::import::{compute_hash, find_csv_files, find_import_script, hash_file, run_import_script};
 use crate::{
     Account, AccountPattern, Bank, Category, CategorySource, Error, RefreshReport, Result,
@@ -40,15 +40,33 @@ impl TransactionStore {
     pub fn refresh(&mut self) -> Result<RefreshReport> {
         let mut report = RefreshReport::default();
 
+        // Wrap entire import in a transaction for performance
+        self.conn.execute("BEGIN", [])?;
+
+        let result = self.refresh_inner(&mut report);
+
+        match result {
+            Ok(()) => {
+                self.conn.execute("COMMIT", [])?;
+                Ok(report)
+            }
+            Err(e) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(e)
+            }
+        }
+    }
+
+    fn refresh_inner(&mut self, report: &mut RefreshReport) -> Result<()> {
         let batch_id = self.create_import_batch()?;
 
         let discovered = self.discover_banks_and_accounts()?;
 
         for (bank_name, account_names) in &discovered {
-            let bank_id = self.ensure_bank(bank_name, &mut report)?;
+            let bank_id = self.ensure_bank(bank_name, report)?;
 
             for account_name in account_names {
-                let account_id = self.ensure_account(bank_id, account_name, &mut report)?;
+                let account_id = self.ensure_account(bank_id, account_name, report)?;
 
                 self.import_account_transactions(
                     bank_id,
@@ -56,17 +74,17 @@ impl TransactionStore {
                     bank_name,
                     account_name,
                     batch_id,
-                    &mut report,
+                    report,
                 )?;
             }
         }
 
-        self.soft_delete_missing_banks(&discovered, &mut report)?;
-        self.soft_delete_missing_accounts(&discovered, &mut report)?;
+        self.soft_delete_missing_banks(&discovered, report)?;
+        self.soft_delete_missing_accounts(&discovered, report)?;
 
         self.complete_import_batch(batch_id)?;
 
-        Ok(report)
+        Ok(())
     }
 
     /// List all non-deleted banks.
@@ -114,6 +132,7 @@ impl TransactionStore {
     /// Query transactions with optional filters.
     pub fn query_transactions(&self, filter: &TransactionFilter) -> Result<Vec<Transaction>> {
         let needs_category_join = !filter.category_patterns.is_empty();
+        let needs_fts_join = filter.fts_query.is_some();
 
         let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
@@ -122,6 +141,10 @@ impl TransactionStore {
              JOIN accounts a ON t.account_id = a.id
              JOIN banks b ON a.bank_id = b.id",
         );
+
+        if needs_fts_join {
+            sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
+        }
 
         if needs_category_join {
             sql.push_str(
@@ -133,6 +156,10 @@ impl TransactionStore {
         sql.push_str(" WHERE a.deleted_at IS NULL");
         let mut params: Vec<Value> = Vec::new();
 
+        if let Some(ref fts_query) = filter.fts_query {
+            sql.push_str(" AND transactions_fts MATCH ?");
+            params.push(Value::Text(fts_query.clone()));
+        }
         if let Some(bank_id) = filter.bank_id {
             sql.push_str(" AND a.bank_id = ?");
             params.push(Value::Integer(bank_id));
@@ -167,10 +194,6 @@ impl TransactionStore {
             let (clause, pattern_params) = build_category_pattern_clause(&filter.category_patterns, "c.path");
             sql.push_str(&clause);
             params.extend(pattern_params);
-        }
-        if let Some(ref desc) = filter.description_contains {
-            sql.push_str(" AND t.description LIKE ?");
-            params.push(Value::Text(format!("%{}%", desc)));
         }
         if let Some(ref regex) = filter.description_regex {
             sql.push_str(" AND regexp(?, t.description)");
@@ -437,6 +460,17 @@ impl TransactionStore {
                 batch_id
             ],
         )?;
+
+        if result > 0 {
+            // Insert into FTS index
+            let rowid = self.conn.last_insert_rowid();
+            let searchable_text = build_searchable_text(description, metadata);
+            self.conn.execute(
+                "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
+                params![rowid, searchable_text],
+            )?;
+        }
+
         Ok(result > 0)
     }
 
@@ -885,17 +919,19 @@ impl TransactionStore {
         &self,
         filter: &TransactionFilter,
     ) -> Result<Vec<Transaction>> {
-        let mut sql = String::from(
+        let fts_join = build_fts_join_clause(filter);
+        let mut sql = format!(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
-             JOIN banks b ON a.bank_id = b.id
+             JOIN banks b ON a.bank_id = b.id{}
              LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
              LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id
              WHERE a.deleted_at IS NULL
                AND (e.category_id IS NULL OR e.id IS NULL)
                AND tr.id IS NULL",
+            fts_join
         );
         let mut params: Vec<Value> = Vec::new();
 
@@ -920,7 +956,8 @@ impl TransactionStore {
         &self,
         filter: &TransactionFilter,
     ) -> Result<Vec<TransactionWithEnrichment>> {
-        let mut sql = String::from(
+        let fts_join = build_fts_join_clause(filter);
+        let mut sql = format!(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id,
                     e.id, e.transaction_id, e.category_id, e.category_source, e.category_confirmed,
@@ -928,12 +965,13 @@ impl TransactionStore {
                     c.id, c.path, c.created_at
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
-             JOIN banks b ON a.bank_id = b.id
+             JOIN banks b ON a.bank_id = b.id{}
              JOIN transaction_enrichments e ON t.id = e.transaction_id
              LEFT JOIN categories c ON e.category_id = c.id
              WHERE a.deleted_at IS NULL
                AND e.category_source = 'ai'
                AND e.category_confirmed = 0",
+            fts_join
         );
         let mut params: Vec<Value> = Vec::new();
 
@@ -1166,14 +1204,27 @@ fn build_category_pattern_clause(patterns: &[String], category_col: &str) -> (St
     (clause, params)
 }
 
+/// Returns the FTS JOIN clause if FTS query is present, empty string otherwise.
+fn build_fts_join_clause(filter: &TransactionFilter) -> &'static str {
+    if filter.fts_query.is_some() {
+        " JOIN transactions_fts fts ON t.id = fts.rowid"
+    } else {
+        ""
+    }
+}
+
 /// Append common transaction filter clauses to SQL query.
 /// Assumes the query already has: t (transactions), a (accounts), b (banks) aliases.
-/// For category filtering, also needs: c (categories) alias from a LEFT JOIN.
+/// For FTS filtering, also needs: fts (transactions_fts) alias from a JOIN (use build_fts_join_clause).
 fn append_transaction_filters(
     sql: &mut String,
     params: &mut Vec<Value>,
     filter: &TransactionFilter,
 ) {
+    if let Some(ref fts_query) = filter.fts_query {
+        sql.push_str(" AND transactions_fts MATCH ?");
+        params.push(Value::Text(fts_query.clone()));
+    }
     if let Some(bank_id) = filter.bank_id {
         sql.push_str(" AND a.bank_id = ?");
         params.push(Value::Integer(bank_id));
@@ -1203,10 +1254,6 @@ fn append_transaction_filters(
             build_account_pattern_clause(&filter.account_patterns, "b.name", "a.name");
         sql.push_str(&clause);
         params.extend(pattern_params);
-    }
-    if let Some(ref desc) = filter.description_contains {
-        sql.push_str(" AND t.description LIKE ?");
-        params.push(Value::Text(format!("%{}%", desc)));
     }
     if let Some(ref regex) = filter.description_regex {
         sql.push_str(" AND regexp(?, t.description)");
@@ -1296,14 +1343,6 @@ fn build_transfer_filter_clause(
             params.extend(from_params);
             params.extend(to_params);
         }
-    }
-    if let Some(ref desc) = filter.description_contains {
-        let pattern = Value::Text(format!("%{}%", desc));
-        add_filter!(
-            format!("{}.description LIKE ?", from_t),
-            format!("{}.description LIKE ?", to_t),
-            pattern
-        );
     }
     if let Some(ref regex) = filter.description_regex {
         let pattern = Value::Text(regex.clone());
@@ -1701,5 +1740,53 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         store.set_category(txs[0].id, cat_id, CategorySource::Manual, true, None).unwrap();
 
         assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_query_transactions_fts() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        // The test transaction has description "Test transaction"
+        // FTS term search
+        let filter = TransactionFilter {
+            fts_query: Some("Test".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // Case insensitive
+        let filter = TransactionFilter {
+            fts_query: Some("test".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // Multiple terms (AND)
+        let filter = TransactionFilter {
+            fts_query: Some("Test transaction".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // No match
+        let filter = TransactionFilter {
+            fts_query: Some("Coffee".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert!(txs.is_empty());
+
+        // Prefix match
+        let filter = TransactionFilter {
+            fts_query: Some("trans*".to_string()),
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
     }
 }

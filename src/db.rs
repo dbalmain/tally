@@ -81,12 +81,54 @@ CREATE INDEX IF NOT EXISTS idx_accounts_bank ON accounts(bank_id);
 CREATE INDEX IF NOT EXISTS idx_enrichments_category ON transaction_enrichments(category_id);
 CREATE INDEX IF NOT EXISTS idx_enrichments_confirmed ON transaction_enrichments(category_confirmed);
 CREATE INDEX IF NOT EXISTS idx_transfers_confirmed ON transfers(confirmed);
+
+-- FTS5 virtual table for full-text search on transactions
+-- contentless: we don't duplicate data, just index it
+-- contentless_delete=1: allows DELETE operations
+CREATE VIRTUAL TABLE IF NOT EXISTS transactions_fts USING fts5(
+    searchable_text,
+    content='',
+    contentless_delete=1
+);
 "#;
 
 pub(crate) fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
     register_regexp_function(conn)?;
     Ok(())
+}
+
+/// Build searchable text from description and metadata for FTS indexing.
+/// Flattens all string and number values from metadata.
+pub fn build_searchable_text(
+    description: &str,
+    metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> String {
+    let mut parts = vec![description.to_string()];
+
+    for value in metadata.values() {
+        flatten_json_value(value, &mut parts);
+    }
+
+    parts.join(" ")
+}
+
+fn flatten_json_value(value: &serde_json::Value, parts: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => parts.push(s.clone()),
+        serde_json::Value::Number(n) => parts.push(n.to_string()),
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                flatten_json_value(item, parts);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for v in obj.values() {
+                flatten_json_value(v, parts);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn register_regexp_function(conn: &Connection) -> Result<()> {
@@ -124,6 +166,7 @@ mod tests {
         assert!(tables.contains(&"accounts".to_string()));
         assert!(tables.contains(&"transactions".to_string()));
         assert!(tables.contains(&"imported_files".to_string()));
+        assert!(tables.contains(&"transactions_fts".to_string()));
     }
 
     #[test]
@@ -154,5 +197,103 @@ mod tests {
             })
             .unwrap();
         assert!(result);
+    }
+
+    #[test]
+    fn test_fts5_basic() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+
+        // Insert test data
+        conn.execute(
+            "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (1, 'AAMI Insurance March payment')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (2, 'Coffee shop purchase')",
+            [],
+        )
+        .unwrap();
+
+        // Term search (implicit AND)
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transactions_fts WHERE transactions_fts MATCH 'AAMI March'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Case insensitive
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transactions_fts WHERE transactions_fts MATCH 'aami march'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Prefix match
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transactions_fts WHERE transactions_fts MATCH 'mar*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Phrase match
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transactions_fts WHERE transactions_fts MATCH '\"Coffee shop\"'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // OR query
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transactions_fts WHERE transactions_fts MATCH '(AAMI) OR (Coffee)'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_build_searchable_text() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "merchant".to_string(),
+            serde_json::Value::String("Woolworths".to_string()),
+        );
+        metadata.insert("amount".to_string(), serde_json::json!(42.50));
+
+        let text = build_searchable_text("Grocery purchase", &metadata);
+        assert!(text.contains("Grocery purchase"));
+        assert!(text.contains("Woolworths"));
+        assert!(text.contains("42.5"));
+    }
+
+    #[test]
+    fn test_build_searchable_text_nested() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "details".to_string(),
+            serde_json::json!({"category": "food", "tags": ["organic", "local"]}),
+        );
+
+        let text = build_searchable_text("Purchase", &metadata);
+        assert!(text.contains("Purchase"));
+        assert!(text.contains("food"));
+        assert!(text.contains("organic"));
+        assert!(text.contains("local"));
     }
 }
