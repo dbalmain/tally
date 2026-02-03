@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use tally::TransactionStore;
 
 fn main() {
+    // Initialize logging: RUST_LOG=debug cargo run -- tui
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+
     let args: Vec<String> = std::env::args().collect();
     let command = args.get(1).map(|s| s.as_str());
 
@@ -9,7 +12,7 @@ fn main() {
     let db_path = PathBuf::from("tally.db");
 
     match command {
-        Some("tui") => run_tui(&db_path, &exports_dir),
+        Some("tui") | Some("--tui") => run_tui(&db_path, &exports_dir),
         _ => run_refresh(&db_path, &exports_dir),
     }
 }

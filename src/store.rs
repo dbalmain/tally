@@ -211,6 +211,8 @@ impl TransactionStore {
             params.push(Value::Integer(offset as i64));
         }
 
+        log::debug!("query_transactions SQL: {} params: {:?}", sql, params);
+
         let mut stmt = self.conn.prepare(&sql)?;
         let transactions = stmt
             .query_map(rusqlite::params_from_iter(params), |row| {
@@ -944,6 +946,8 @@ impl TransactionStore {
             params.push(Value::Integer(limit as i64));
         }
 
+        log::debug!("get_uncategorized_transactions SQL: {} params: {:?}", sql, params);
+
         let mut stmt = self.conn.prepare(&sql)?;
         let transactions = stmt
             .query_map(rusqlite::params_from_iter(params), parse_transaction)?
@@ -983,6 +987,8 @@ impl TransactionStore {
             sql.push_str(" LIMIT ?");
             params.push(Value::Integer(limit as i64));
         }
+
+        log::debug!("get_pending_ai_reviews SQL: {} params: {:?}", sql, params);
 
         let mut stmt = self.conn.prepare(&sql)?;
         let results = stmt
@@ -1040,6 +1046,8 @@ impl TransactionStore {
             sql.push_str(" LIMIT ?");
             params.push(Value::Integer(limit as i64));
         }
+
+        log::debug!("get_pending_transfer_reviews SQL: {} params: {:?}", sql, params);
 
         let mut stmt = self.conn.prepare(&sql)?;
         let transfers = stmt
@@ -1121,6 +1129,8 @@ impl TransactionStore {
             sql.push_str(" LIMIT ?");
             params.push(Value::Integer(limit as i64));
         }
+
+        log::debug!("list_transfers_with_transactions SQL: {} params: {:?}", sql, params);
 
         let mut stmt = self.conn.prepare(&sql)?;
         let result = stmt
