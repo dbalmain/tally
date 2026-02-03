@@ -197,9 +197,15 @@ Filters are pushed to SQL for efficient querying. Syntax:
 - `amount:100` — Exact amount ($100.00)
 - `amount:>100` / `amount:<100` — Greater/less than
 - `amount:50..200` — Amount range
-- `bank:Chase` — Bank name prefix
-- `account:Checking` — Account name prefix
 - `category:Food` — Category contains
+- `category:Food|Transport` — Multiple categories (OR)
+
+**Account filter (Bank/Account format):**
+- `account:St` — Bank prefix "St" (matches "St George", "Street Financial")
+- `account:ING/` — All accounts in ING bank
+- `account:ING/Orange` — ING accounts starting with "Orange"
+- `account:/Savings` — Any bank, account prefix "Savings"
+- `account:"ING/Orange"|"St George/Sav"` — Multiple patterns (OR)
 
 **Text matching:**
 - `groceries` — Case-insensitive substring match
@@ -207,12 +213,12 @@ Filters are pushed to SQL for efficient querying. Syntax:
 - `/Coffee/` — Regex (case-sensitive)
 
 **Quoting (for values with spaces):**
-- `account:"Orange Everyday"`
-- `account:Orange\ Everyday`
+- `account:"ING/Orange Everyday"`
+- `account:ING/Orange\ Everyday`
 
 **Combined example:**
 ```
-date:2024-01 amount:>100 bank:Chase groceries
+date:2024-01 amount:>100 account:Chase/ groceries
 ```
 
 **Transition to fuzzy:** End with ` ~` to switch to fuzzy mode while keeping DB filters.

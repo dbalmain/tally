@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::db::init_db;
 use crate::import::{compute_hash, find_csv_files, find_import_script, hash_file, run_import_script};
 use crate::{
-    Account, Bank, Category, CategorySource, Error, RefreshReport, Result, Transaction,
-    TransactionEnrichment, TransactionFilter, TransactionWithEnrichment, Transfer,
+    Account, AccountPattern, Bank, Category, CategorySource, Error, RefreshReport, Result,
+    Transaction, TransactionEnrichment, TransactionFilter, TransactionWithEnrichment, Transfer,
     TransferSource, TransferWithTransactions,
 };
 
@@ -113,10 +113,10 @@ impl TransactionStore {
 
     /// Query transactions with optional filters.
     pub fn query_transactions(&self, filter: &TransactionFilter) -> Result<Vec<Transaction>> {
-        let needs_category_join = filter.category_contains.is_some();
+        let needs_category_join = !filter.category_patterns.is_empty();
 
         let mut sql = String::from(
-            "SELECT t.id, a.bank_id, t.account_id, t.date, t.description, 
+            "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
@@ -157,17 +157,16 @@ impl TransactionStore {
             sql.push_str(" AND t.amount_cents <= ?");
             params.push(Value::Integer(amount_max));
         }
-        if let Some(ref prefix) = filter.bank_name_prefix {
-            sql.push_str(" AND LOWER(b.name) LIKE ?");
-            params.push(Value::Text(format!("{}%", prefix.to_lowercase())));
+        if !filter.account_patterns.is_empty() {
+            let (clause, pattern_params) =
+                build_account_pattern_clause(&filter.account_patterns, "b.name", "a.name");
+            sql.push_str(&clause);
+            params.extend(pattern_params);
         }
-        if let Some(ref prefix) = filter.account_name_prefix {
-            sql.push_str(" AND LOWER(a.name) LIKE ?");
-            params.push(Value::Text(format!("{}%", prefix.to_lowercase())));
-        }
-        if let Some(ref cat) = filter.category_contains {
-            sql.push_str(" AND LOWER(c.path) LIKE ?");
-            params.push(Value::Text(format!("%{}%", cat.to_lowercase())));
+        if !filter.category_patterns.is_empty() {
+            let (clause, pattern_params) = build_category_pattern_clause(&filter.category_patterns, "c.path");
+            sql.push_str(&clause);
+            params.extend(pattern_params);
         }
         if let Some(ref desc) = filter.description_contains {
             sql.push_str(" AND t.description LIKE ?");
@@ -1061,6 +1060,70 @@ impl TransactionStore {
     }
 }
 
+/// Build SQL clause for account patterns (OR'd together).
+/// Returns (sql_clause, params) where clause starts with " AND ".
+fn build_account_pattern_clause(
+    patterns: &[AccountPattern],
+    bank_col: &str,
+    account_col: &str,
+) -> (String, Vec<Value>) {
+    if patterns.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    let mut or_parts = Vec::new();
+    let mut params = Vec::new();
+
+    for pattern in patterns {
+        let mut and_parts = Vec::new();
+
+        if !pattern.bank_prefix.is_empty() {
+            and_parts.push(format!("LOWER({}) LIKE ?", bank_col));
+            params.push(Value::Text(format!("{}%", pattern.bank_prefix.to_lowercase())));
+        }
+
+        if let Some(ref account_prefix) = pattern.account_prefix {
+            if !account_prefix.is_empty() {
+                and_parts.push(format!("LOWER({}) LIKE ?", account_col));
+                params.push(Value::Text(format!("{}%", account_prefix.to_lowercase())));
+            }
+        }
+
+        if and_parts.is_empty() {
+            // Pattern like "/" matches everything - skip
+            continue;
+        }
+
+        or_parts.push(format!("({})", and_parts.join(" AND ")));
+    }
+
+    if or_parts.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    let clause = format!(" AND ({})", or_parts.join(" OR "));
+    (clause, params)
+}
+
+/// Build SQL clause for category patterns (OR'd together, contains match).
+/// Returns (sql_clause, params) where clause starts with " AND ".
+fn build_category_pattern_clause(patterns: &[String], category_col: &str) -> (String, Vec<Value>) {
+    if patterns.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    let mut or_parts = Vec::new();
+    let mut params = Vec::new();
+
+    for pattern in patterns {
+        or_parts.push(format!("LOWER({}) LIKE ?", category_col));
+        params.push(Value::Text(format!("%{}%", pattern.to_lowercase())));
+    }
+
+    let clause = format!(" AND ({})", or_parts.join(" OR "));
+    (clause, params)
+}
+
 /// Append common transaction filter clauses to SQL query.
 /// Assumes the query already has: t (transactions), a (accounts), b (banks) aliases.
 /// For category filtering, also needs: c (categories) alias from a LEFT JOIN.
@@ -1093,13 +1156,11 @@ fn append_transaction_filters(
         sql.push_str(" AND t.amount_cents <= ?");
         params.push(Value::Integer(amount_max));
     }
-    if let Some(ref prefix) = filter.bank_name_prefix {
-        sql.push_str(" AND LOWER(b.name) LIKE ?");
-        params.push(Value::Text(format!("{}%", prefix.to_lowercase())));
-    }
-    if let Some(ref prefix) = filter.account_name_prefix {
-        sql.push_str(" AND LOWER(a.name) LIKE ?");
-        params.push(Value::Text(format!("{}%", prefix.to_lowercase())));
+    if !filter.account_patterns.is_empty() {
+        let (clause, pattern_params) =
+            build_account_pattern_clause(&filter.account_patterns, "b.name", "a.name");
+        sql.push_str(&clause);
+        params.extend(pattern_params);
     }
     if let Some(ref desc) = filter.description_contains {
         sql.push_str(" AND t.description LIKE ?");
@@ -1178,21 +1239,21 @@ fn build_transfer_filter_clause(
             Value::Integer(amount_max)
         );
     }
-    if let Some(ref prefix) = filter.bank_name_prefix {
-        let pattern = Value::Text(format!("{}%", prefix.to_lowercase()));
-        add_filter!(
-            format!("LOWER({}.name) LIKE ?", from_b),
-            format!("LOWER({}.name) LIKE ?", to_b),
-            pattern
-        );
-    }
-    if let Some(ref prefix) = filter.account_name_prefix {
-        let pattern = Value::Text(format!("{}%", prefix.to_lowercase()));
-        add_filter!(
-            format!("LOWER({}.name) LIKE ?", from_a),
-            format!("LOWER({}.name) LIKE ?", to_a),
-            pattern
-        );
+    // Account patterns: build OR clause for each side
+    if !filter.account_patterns.is_empty() {
+        let (from_clause, from_params) =
+            build_account_pattern_clause(&filter.account_patterns, &format!("{}.name", from_b), &format!("{}.name", from_a));
+        let (to_clause, to_params) =
+            build_account_pattern_clause(&filter.account_patterns, &format!("{}.name", to_b), &format!("{}.name", to_a));
+        // Strip leading " AND " from clauses for use in our OR structure
+        if !from_clause.is_empty() {
+            let from_inner = from_clause.strip_prefix(" AND ").unwrap_or(&from_clause);
+            let to_inner = to_clause.strip_prefix(" AND ").unwrap_or(&to_clause);
+            conditions_from.push(from_inner.to_string());
+            conditions_to.push(to_inner.to_string());
+            params.extend(from_params);
+            params.extend(to_params);
+        }
     }
     if let Some(ref desc) = filter.description_contains {
         let pattern = Value::Text(format!("%{}%", desc));
@@ -1450,14 +1511,14 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
     }
 
     #[test]
-    fn test_query_transactions_bank_name_prefix() {
+    fn test_query_transactions_account_pattern() {
         let temp = setup_test_exports();
         let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
         store.refresh().unwrap();
 
-        // "Test" prefix matches "TestBank"
+        // "Test" bank prefix matches "TestBank"
         let filter = TransactionFilter {
-            bank_name_prefix: Some("Test".to_string()),
+            account_patterns: vec![AccountPattern::parse("Test")],
             ..Default::default()
         };
         let txs = store.query_transactions(&filter).unwrap();
@@ -1465,7 +1526,7 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
 
         // Case insensitive
         let filter = TransactionFilter {
-            bank_name_prefix: Some("test".to_string()),
+            account_patterns: vec![AccountPattern::parse("test")],
             ..Default::default()
         };
         let txs = store.query_transactions(&filter).unwrap();
@@ -1473,11 +1534,30 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
 
         // "Bank" does not match (starts-with, not contains)
         let filter = TransactionFilter {
-            bank_name_prefix: Some("Bank".to_string()),
+            account_patterns: vec![AccountPattern::parse("Bank")],
             ..Default::default()
         };
         let txs = store.query_transactions(&filter).unwrap();
         assert!(txs.is_empty());
+
+        // Bank/Account pattern: "TestBank/Check" matches "TestBank/Checking"
+        let filter = TransactionFilter {
+            account_patterns: vec![AccountPattern::parse("TestBank/Check")],
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
+
+        // Multiple patterns with OR
+        let filter = TransactionFilter {
+            account_patterns: vec![
+                AccountPattern::parse("NonExistent"),
+                AccountPattern::parse("Test"),
+            ],
+            ..Default::default()
+        };
+        let txs = store.query_transactions(&filter).unwrap();
+        assert_eq!(txs.len(), 1);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use nucleo_matcher::{
     Matcher, Utf32Str,
 };
 
-use crate::TransactionFilter;
+use crate::{AccountPattern, TransactionFilter};
 
 /// Text matching mode for DB search
 #[derive(Debug, Clone, Default)]
@@ -33,16 +33,17 @@ impl DbTextMatch {
 }
 
 /// DB-backed search query with structured filters and text/regex matching.
-/// Parsed from user input like: `date:2024-01 amount:>100 bank:Chase groceries`
+/// Parsed from user input like: `date:2024-01 amount:>100 account:ING/Orange groceries`
 #[derive(Debug, Default, Clone)]
 pub struct DbSearchQuery {
     pub date_from: Option<NaiveDate>,
     pub date_to: Option<NaiveDate>,
     pub amount_min: Option<i64>,
     pub amount_max: Option<i64>,
-    pub bank: Option<String>,
-    pub account: Option<String>,
-    pub category: Option<String>,
+    /// Account patterns (supports "Bank/Account" format, pipe-separated for OR)
+    pub accounts: Vec<AccountPattern>,
+    /// Category patterns (pipe-separated for OR, contains match)
+    pub categories: Vec<String>,
     pub text_match: DbTextMatch,
 }
 
@@ -64,12 +65,10 @@ impl DbSearchQuery {
                 parse_date_range(rest, &mut query);
             } else if let Some(rest) = token.strip_prefix("amount:") {
                 parse_amount_range(rest, &mut query);
-            } else if let Some(rest) = token.strip_prefix("bank:") {
-                query.bank = Some(rest.to_string());
             } else if let Some(rest) = token.strip_prefix("account:") {
-                query.account = Some(rest.to_string());
+                query.accounts = rest.split('|').map(AccountPattern::parse).collect();
             } else if let Some(rest) = token.strip_prefix("category:") {
-                query.category = Some(rest.to_string());
+                query.categories = rest.split('|').map(|s| s.to_string()).collect();
             } else {
                 text_parts.push(token);
             }
@@ -86,9 +85,8 @@ impl DbSearchQuery {
             && self.date_to.is_none()
             && self.amount_min.is_none()
             && self.amount_max.is_none()
-            && self.bank.is_none()
-            && self.account.is_none()
-            && self.category.is_none()
+            && self.accounts.is_empty()
+            && self.categories.is_empty()
             && self.text_match.is_empty()
     }
 
@@ -99,9 +97,8 @@ impl DbSearchQuery {
             to_date: self.date_to,
             amount_min: self.amount_min,
             amount_max: self.amount_max,
-            bank_name_prefix: self.bank.clone(),
-            account_name_prefix: self.account.clone(),
-            category_contains: self.category.clone(),
+            account_patterns: self.accounts.clone(),
+            category_patterns: self.categories.clone(),
             description_contains: match &self.text_match {
                 DbTextMatch::Substring(s) => Some(s.clone()),
                 _ => None,
@@ -403,11 +400,13 @@ mod tests {
 
     #[test]
     fn test_parse_combined() {
-        let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 bank:Chase groceries");
+        let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 account:Chase/ groceries");
         assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
         assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()));
         assert_eq!(q.amount_min, Some(10000));
-        assert_eq!(q.bank, Some("Chase".to_string()));
+        assert_eq!(q.accounts.len(), 1);
+        assert_eq!(q.accounts[0].bank_prefix, "Chase");
+        assert_eq!(q.accounts[0].account_prefix, Some("".to_string()));
         assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "groceries"));
     }
 
@@ -454,32 +453,55 @@ mod tests {
 
     #[test]
     fn test_parse_account_quoted() {
-        let (q, _) = DbSearchQuery::parse(r#"account:"Orange Everyday""#);
-        assert_eq!(q.account, Some("Orange Everyday".to_string()));
+        let (q, _) = DbSearchQuery::parse(r#"account:"ING/Orange Everyday""#);
+        assert_eq!(q.accounts.len(), 1);
+        assert_eq!(q.accounts[0].bank_prefix, "ING");
+        assert_eq!(q.accounts[0].account_prefix, Some("Orange Everyday".to_string()));
     }
 
     #[test]
     fn test_parse_account_backslash() {
-        let (q, _) = DbSearchQuery::parse(r"account:Orange\ Everyday");
-        assert_eq!(q.account, Some("Orange Everyday".to_string()));
+        let (q, _) = DbSearchQuery::parse(r"account:ING/Orange\ Everyday");
+        assert_eq!(q.accounts.len(), 1);
+        assert_eq!(q.accounts[0].bank_prefix, "ING");
+        assert_eq!(q.accounts[0].account_prefix, Some("Orange Everyday".to_string()));
     }
 
     #[test]
-    fn test_parse_bank_quoted_with_text() {
-        let (q, _) = DbSearchQuery::parse(r#"bank:"My Bank" coffee"#);
-        assert_eq!(q.bank, Some("My Bank".to_string()));
+    fn test_parse_account_bank_only() {
+        let (q, _) = DbSearchQuery::parse("account:St coffee");
+        assert_eq!(q.accounts.len(), 1);
+        assert_eq!(q.accounts[0].bank_prefix, "St");
+        assert_eq!(q.accounts[0].account_prefix, None);
         assert!(matches!(q.text_match, DbTextMatch::Substring(ref s) if s == "coffee"));
     }
 
     #[test]
+    fn test_parse_account_multiple() {
+        let (q, _) = DbSearchQuery::parse(r#"account:"ING/Orange"|"St George/Savings""#);
+        assert_eq!(q.accounts.len(), 2);
+        assert_eq!(q.accounts[0].bank_prefix, "ING");
+        assert_eq!(q.accounts[0].account_prefix, Some("Orange".to_string()));
+        assert_eq!(q.accounts[1].bank_prefix, "St George");
+        assert_eq!(q.accounts[1].account_prefix, Some("Savings".to_string()));
+    }
+
+    #[test]
+    fn test_parse_category_multiple() {
+        let (q, _) = DbSearchQuery::parse("category:Food|Transport");
+        assert_eq!(q.categories, vec!["Food", "Transport"]);
+    }
+
+    #[test]
     fn test_to_filter() {
-        let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 bank:Chase groceries");
+        let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 account:Chase/ groceries");
         let filter = q.to_filter(Some(500));
 
         assert_eq!(filter.from_date, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
         assert_eq!(filter.to_date, Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()));
         assert_eq!(filter.amount_min, Some(10000));
-        assert_eq!(filter.bank_name_prefix, Some("Chase".to_string()));
+        assert_eq!(filter.account_patterns.len(), 1);
+        assert_eq!(filter.account_patterns[0].bank_prefix, "Chase");
         assert_eq!(filter.description_contains, Some("groceries".to_string()));
         assert_eq!(filter.limit, Some(500));
     }
