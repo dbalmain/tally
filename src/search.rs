@@ -1,7 +1,7 @@
 use chrono::{Datelike, NaiveDate};
 use nucleo_matcher::{
-    pattern::{CaseMatching, Normalization, Pattern},
     Matcher, Utf32Str,
+    pattern::{CaseMatching, Normalization, Pattern},
 };
 
 use crate::{AccountPattern, TransactionFilter};
@@ -74,7 +74,10 @@ impl DbSearchQuery {
 
         for token_info in tokenize_with_positions(input) {
             let token = token_info.token;
-            if let Some(rest) = token.strip_prefix("date:").or_else(|| token.strip_prefix("d:")) {
+            if let Some(rest) = token
+                .strip_prefix("date:")
+                .or_else(|| token.strip_prefix("d:"))
+            {
                 parse_date_range(rest, &mut query);
             } else if let Some(rest) = token.strip_prefix("amount:") {
                 parse_amount_range(rest, &mut query);
@@ -219,7 +222,8 @@ fn parse_db_text_match(text: &str, cursor_pos: Option<usize>) -> DbTextMatch {
 
     // Check for regex: /pattern/ or /pattern/i
     if let Some((pattern, flags)) = text.strip_prefix('/').and_then(|rest| {
-        rest.rfind('/').map(|end_slash| (&rest[..end_slash], &rest[end_slash + 1..]))
+        rest.rfind('/')
+            .map(|end_slash| (&rest[..end_slash], &rest[end_slash + 1..]))
     }) {
         let case_insensitive = flags.contains('i');
 
@@ -444,7 +448,9 @@ mod tests {
     #[test]
     fn test_parse_simple_fts() {
         let (q, transition) = DbSearchQuery::parse("coffee shop");
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee shop"));
+        assert!(
+            matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee shop")
+        );
         assert!(q.date_from.is_none());
         assert!(!transition);
     }
@@ -452,48 +458,82 @@ mod tests {
     #[test]
     fn test_parse_regex() {
         let (q, _) = DbSearchQuery::parse("/cof.*shop/i");
-        assert!(matches!(q.text_match, DbTextMatch::Regex { ref pattern, .. } if pattern == "(?i)cof.*shop"));
+        assert!(
+            matches!(q.text_match, DbTextMatch::Regex { ref pattern, .. } if pattern == "(?i)cof.*shop")
+        );
     }
 
     #[test]
     fn test_parse_regex_case_sensitive() {
         let (q, _) = DbSearchQuery::parse("/Coffee/");
-        assert!(matches!(q.text_match, DbTextMatch::Regex { ref pattern, .. } if pattern == "Coffee"));
+        assert!(
+            matches!(q.text_match, DbTextMatch::Regex { ref pattern, .. } if pattern == "Coffee")
+        );
     }
 
     #[test]
     fn test_parse_date_range() {
         let (q, _) = DbSearchQuery::parse("date:2024-01..2024-06");
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
-        assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 6, 30).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+        );
+        assert_eq!(
+            q.date_to,
+            Some(NaiveDate::from_ymd_opt(2024, 6, 30).unwrap())
+        );
     }
 
     #[test]
     fn test_parse_date_single_full() {
         let (q, _) = DbSearchQuery::parse("date:2024-03-15");
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()));
-        assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+        );
+        assert_eq!(
+            q.date_to,
+            Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+        );
     }
 
     #[test]
     fn test_parse_date_month() {
         let (q, _) = DbSearchQuery::parse("date:2025-09");
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2025, 9, 1).unwrap()));
-        assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2025, 9, 30).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2025, 9, 1).unwrap())
+        );
+        assert_eq!(
+            q.date_to,
+            Some(NaiveDate::from_ymd_opt(2025, 9, 30).unwrap())
+        );
     }
 
     #[test]
     fn test_parse_date_february_leap_year() {
         let (q, _) = DbSearchQuery::parse("date:2024-02");
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()));
-        assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 2, 29).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap())
+        );
+        assert_eq!(
+            q.date_to,
+            Some(NaiveDate::from_ymd_opt(2024, 2, 29).unwrap())
+        );
     }
 
     #[test]
     fn test_parse_date_year_only() {
         let (q, _) = DbSearchQuery::parse("date:2024");
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
-        assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+        );
+        assert_eq!(
+            q.date_to,
+            Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap())
+        );
     }
 
     #[test]
@@ -520,8 +560,14 @@ mod tests {
     #[test]
     fn test_parse_combined() {
         let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 account:Chase/ groceries");
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
-        assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+        );
+        assert_eq!(
+            q.date_to,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap())
+        );
         assert_eq!(q.amount_min, Some(10000));
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "Chase");
@@ -534,7 +580,10 @@ mod tests {
         let (q, transition) = DbSearchQuery::parse("date:2024 coffee ~");
         assert!(transition);
         assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+        );
     }
 
     #[test]
@@ -582,7 +631,10 @@ mod tests {
         let (q, _) = DbSearchQuery::parse(r#"account:"ING/Orange Everyday""#);
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "ING");
-        assert_eq!(q.accounts[0].account_prefix, Some("Orange Everyday".to_string()));
+        assert_eq!(
+            q.accounts[0].account_prefix,
+            Some("Orange Everyday".to_string())
+        );
     }
 
     #[test]
@@ -590,7 +642,10 @@ mod tests {
         let (q, _) = DbSearchQuery::parse(r"account:ING/Orange\ Everyday");
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "ING");
-        assert_eq!(q.accounts[0].account_prefix, Some("Orange Everyday".to_string()));
+        assert_eq!(
+            q.accounts[0].account_prefix,
+            Some("Orange Everyday".to_string())
+        );
     }
 
     #[test]
@@ -622,8 +677,14 @@ mod tests {
     fn test_parse_shortcuts() {
         // d: for date
         let (q, _) = DbSearchQuery::parse("d:2024-01");
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
-        assert_eq!(q.date_to, Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+        );
+        assert_eq!(
+            q.date_to,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap())
+        );
 
         // a: for account
         let (q, _) = DbSearchQuery::parse("a:ING/Orange");
@@ -637,7 +698,10 @@ mod tests {
 
         // Combined shortcuts
         let (q, _) = DbSearchQuery::parse("d:2024 a:Chase c:Food coffee");
-        assert_eq!(q.date_from, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+        );
         assert_eq!(q.accounts[0].bank_prefix, "Chase");
         assert_eq!(q.categories, vec!["Food"]);
         assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
@@ -648,8 +712,14 @@ mod tests {
         let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 account:Chase/ groceries");
         let filter = q.to_filter(Some(500));
 
-        assert_eq!(filter.from_date, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
-        assert_eq!(filter.to_date, Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()));
+        assert_eq!(
+            filter.from_date,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+        );
+        assert_eq!(
+            filter.to_date,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap())
+        );
         assert_eq!(filter.amount_min, Some(10000));
         assert_eq!(filter.account_patterns.len(), 1);
         assert_eq!(filter.account_patterns[0].bank_prefix, "Chase");
@@ -678,7 +748,10 @@ mod tests {
         assert_eq!(parse_fts_query("\"AAMI mar\"", None), "\"AAMI mar\"");
 
         // OR groups
-        assert_eq!(parse_fts_query("(AAMI Mar|AAMI Sep)", None), "(AAMI Mar OR AAMI Sep)");
+        assert_eq!(
+            parse_fts_query("(AAMI Mar|AAMI Sep)", None),
+            "(AAMI Mar OR AAMI Sep)"
+        );
 
         // Multiple OR groups
         assert_eq!(

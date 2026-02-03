@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
-    Frame,
 };
 
 use crate::{Transaction, TransactionWithEnrichment, TransferWithTransactions};
@@ -27,7 +27,14 @@ pub fn draw(f: &mut Frame, app: &App) {
     let chunks =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).split(f.area());
 
-    draw_header(f, app, chunks[0], search_in_header, has_db_search, has_fuzzy_search);
+    draw_header(
+        f,
+        app,
+        chunks[0],
+        search_in_header,
+        has_db_search,
+        has_fuzzy_search,
+    );
 
     match app.current_tab {
         Tab::Transactions => draw_transactions(f, app, chunks[1]),
@@ -57,7 +64,14 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_header(f: &mut Frame, app: &App, area: Rect, has_search: bool, has_db_search: bool, has_fuzzy_search: bool) {
+fn draw_header(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    has_search: bool,
+    has_db_search: bool,
+    has_fuzzy_search: bool,
+) {
     if has_search {
         let search_rows = (has_db_search as u16) + (has_fuzzy_search as u16);
         let mut constraints = vec![Constraint::Length(2)];
@@ -278,10 +292,16 @@ fn draw_todo(f: &mut Frame, app: &App, area: Rect, has_db_search: bool, has_fuzz
         Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(chunks[1]);
 
     match app.todo_subtab {
-        TodoSubTab::Uncategorized => {
-            let uncategorized: Vec<_> = app.filtered_uncategorized().collect();
-            draw_transaction_table(f, app, &uncategorized, app.selected_index, content_chunks[0]);
-            if let Some(tx) = app.get_filtered_uncategorized(app.selected_index) {
+        TodoSubTab::Uncategorised => {
+            let uncategorised: Vec<_> = app.filtered_uncategorised().collect();
+            draw_transaction_table(
+                f,
+                app,
+                &uncategorised,
+                app.selected_index,
+                content_chunks[0],
+            );
+            if let Some(tx) = app.get_filtered_uncategorised(app.selected_index) {
                 draw_transaction_details(f, app, tx, content_chunks[1]);
             }
         }
@@ -305,7 +325,7 @@ fn draw_todo_subtabs(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|t| {
             let count = match t {
-                TodoSubTab::Uncategorized => app.filtered_uncategorized_len(),
+                TodoSubTab::Uncategorised => app.filtered_uncategorised_len(),
                 TodoSubTab::AiReview => app.filtered_ai_reviews_len(),
                 TodoSubTab::TransferReview => app.filtered_transfer_reviews_len(),
             };
@@ -348,9 +368,8 @@ fn draw_transaction_table(
             let is_selected = i == selected;
             let is_pending = app.is_pending_transfer_tx(tx.id);
             let is_candidate = app.is_transfer_candidate(tx.id);
-            let is_disabled = app.input_mode == InputMode::TransferPending
-                && !is_candidate
-                && !is_pending;
+            let is_disabled =
+                app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
 
             let bg = if is_pending {
                 Color::Blue
@@ -569,11 +588,7 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [Constraint::Length(4), Constraint::Min(30)],
-    )
-    .column_spacing(1);
+    let table = Table::new(rows, [Constraint::Length(4), Constraint::Min(30)]).column_spacing(1);
 
     f.render_widget(table, area);
 }
@@ -977,12 +992,7 @@ fn draw_ai_review_details(
     f.render_widget(paragraph, area);
 }
 
-fn draw_pending_transfer_details(
-    f: &mut Frame,
-    app: &App,
-    transfer: &crate::Transfer,
-    area: Rect,
-) {
+fn draw_pending_transfer_details(f: &mut Frame, app: &App, transfer: &crate::Transfer, area: Rect) {
     let (from_tx, to_tx) = match (
         app.get_cached_transaction(transfer.from_transaction_id),
         app.get_cached_transaction(transfer.to_transaction_id),

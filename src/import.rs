@@ -4,7 +4,11 @@ use std::process::Command;
 
 use crate::{Error, RawTransaction, Result};
 
-pub(crate) fn find_import_script(exports_dir: &Path, bank: &str, account: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn find_import_script(
+    exports_dir: &Path,
+    bank: &str,
+    account: &str,
+) -> Option<std::path::PathBuf> {
     let account_script = exports_dir.join(bank).join(account).join("import");
     if account_script.exists() {
         return Some(account_script);
@@ -24,7 +28,7 @@ pub(crate) fn run_import_script(
 ) -> Result<Vec<RawTransaction>> {
     let abs_script = std::fs::canonicalize(script_path)?;
     let abs_csv = std::fs::canonicalize(csv_file)?;
-    
+
     let output = Command::new(&abs_script)
         .arg(&abs_csv)
         .current_dir(abs_csv.parent().unwrap_or(Path::new(".")))
@@ -44,7 +48,12 @@ pub(crate) fn run_import_script(
     Ok(transactions)
 }
 
-pub(crate) fn compute_hash(date: &str, description: &str, amount_cents: i64, balance_cents: i64) -> String {
+pub(crate) fn compute_hash(
+    date: &str,
+    description: &str,
+    amount_cents: i64,
+    balance_cents: i64,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(date.as_bytes());
     hasher.update(b"|");
@@ -61,7 +70,11 @@ pub(crate) fn find_csv_files(account_dir: &Path) -> Result<Vec<std::path::PathBu
     for entry in std::fs::read_dir(account_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csv")) {
+        if path.is_file()
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+        {
             files.push(path);
         }
     }

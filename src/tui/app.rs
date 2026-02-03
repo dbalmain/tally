@@ -18,7 +18,12 @@ pub enum Tab {
 
 impl Tab {
     pub fn all() -> &'static [Tab] {
-        &[Tab::Transactions, Tab::Transfers, Tab::Categories, Tab::Todo]
+        &[
+            Tab::Transactions,
+            Tab::Transfers,
+            Tab::Categories,
+            Tab::Todo,
+        ]
     }
 
     pub fn title(&self) -> &'static str {
@@ -33,7 +38,7 @@ impl Tab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoSubTab {
-    Uncategorized,
+    Uncategorised,
     AiReview,
     TransferReview,
 }
@@ -41,7 +46,7 @@ pub enum TodoSubTab {
 impl TodoSubTab {
     pub fn all() -> &'static [TodoSubTab] {
         &[
-            TodoSubTab::Uncategorized,
+            TodoSubTab::Uncategorised,
             TodoSubTab::AiReview,
             TodoSubTab::TransferReview,
         ]
@@ -49,7 +54,7 @@ impl TodoSubTab {
 
     pub fn title(&self) -> &'static str {
         match self {
-            TodoSubTab::Uncategorized => "Uncategorized",
+            TodoSubTab::Uncategorised => "Uncategorised",
             TodoSubTab::AiReview => "AI Review",
             TodoSubTab::TransferReview => "Transfer Review",
         }
@@ -81,7 +86,7 @@ pub struct App {
     pub pending_transfer_tx: Option<Transaction>,
     pub transfer_candidates: Vec<Transaction>,
     pub linked_transfers: Vec<TransferWithTransactions>,
-    pub uncategorized: Vec<Transaction>,
+    pub uncategorised: Vec<Transaction>,
     pub ai_reviews: Vec<TransactionWithEnrichment>,
     pub transfer_reviews: Vec<Transfer>,
     pub error_message: Option<String>,
@@ -96,7 +101,7 @@ pub struct App {
     pub fuzzy_matcher: FuzzyMatcher,
     filtered_transaction_idx: Vec<usize>,
     filtered_transfer_idx: Vec<usize>,
-    filtered_uncategorized_idx: Vec<usize>,
+    filtered_uncategorised_idx: Vec<usize>,
     filtered_ai_review_idx: Vec<usize>,
     filtered_transfer_review_idx: Vec<usize>,
     // Caches to avoid DB queries during render/filter
@@ -132,10 +137,10 @@ impl App {
             .filter_map(|&i| self.linked_transfers.get(i))
     }
 
-    pub fn filtered_uncategorized(&self) -> impl Iterator<Item = &Transaction> {
-        self.filtered_uncategorized_idx
+    pub fn filtered_uncategorised(&self) -> impl Iterator<Item = &Transaction> {
+        self.filtered_uncategorised_idx
             .iter()
-            .filter_map(|&i| self.uncategorized.get(i))
+            .filter_map(|&i| self.uncategorised.get(i))
     }
 
     pub fn filtered_ai_reviews(&self) -> impl Iterator<Item = &TransactionWithEnrichment> {
@@ -158,8 +163,8 @@ impl App {
         self.filtered_transfer_idx.len()
     }
 
-    pub fn filtered_uncategorized_len(&self) -> usize {
-        self.filtered_uncategorized_idx.len()
+    pub fn filtered_uncategorised_len(&self) -> usize {
+        self.filtered_uncategorised_idx.len()
     }
 
     pub fn filtered_ai_reviews_len(&self) -> usize {
@@ -182,13 +187,16 @@ impl App {
             .and_then(|&i| self.linked_transfers.get(i))
     }
 
-    pub fn get_filtered_uncategorized(&self, filtered_idx: usize) -> Option<&Transaction> {
-        self.filtered_uncategorized_idx
+    pub fn get_filtered_uncategorised(&self, filtered_idx: usize) -> Option<&Transaction> {
+        self.filtered_uncategorised_idx
             .get(filtered_idx)
-            .and_then(|&i| self.uncategorized.get(i))
+            .and_then(|&i| self.uncategorised.get(i))
     }
 
-    pub fn get_filtered_ai_review(&self, filtered_idx: usize) -> Option<&TransactionWithEnrichment> {
+    pub fn get_filtered_ai_review(
+        &self,
+        filtered_idx: usize,
+    ) -> Option<&TransactionWithEnrichment> {
         self.filtered_ai_review_idx
             .get(filtered_idx)
             .and_then(|&i| self.ai_reviews.get(i))
@@ -214,8 +222,8 @@ impl App {
             limit: Some(500),
             ..Default::default()
         };
-        let uncategorized = store
-            .get_uncategorized_transactions(&default_filter)
+        let uncategorised = store
+            .get_uncategorised_transactions(&default_filter)
             .unwrap_or_default();
         let ai_reviews = store
             .get_pending_ai_reviews(&default_filter)
@@ -242,17 +250,17 @@ impl App {
         let mut app = Self {
             filtered_transaction_idx: (0..transactions.len()).collect(),
             filtered_transfer_idx: (0..linked_transfers.len()).collect(),
-            filtered_uncategorized_idx: (0..uncategorized.len()).collect(),
+            filtered_uncategorised_idx: (0..uncategorised.len()).collect(),
             filtered_ai_review_idx: (0..ai_reviews.len()).collect(),
             filtered_transfer_review_idx: (0..transfer_reviews.len()).collect(),
             transactions,
             linked_transfers,
-            uncategorized,
+            uncategorised,
             ai_reviews,
             transfer_reviews,
             store,
             current_tab: Tab::Todo,
-            todo_subtab: TodoSubTab::Uncategorized,
+            todo_subtab: TodoSubTab::Uncategorised,
             selected_index: 0,
             input_mode: InputMode::Normal,
             category_input: String::new(),
@@ -290,7 +298,7 @@ impl App {
         for tx in &self.transactions {
             self.tx_by_id.insert(tx.id, tx.clone());
         }
-        for tx in &self.uncategorized {
+        for tx in &self.uncategorised {
             self.tx_by_id.entry(tx.id).or_insert_with(|| tx.clone());
         }
         for review in &self.ai_reviews {
@@ -381,7 +389,10 @@ impl App {
 
     pub fn next_tab(&mut self) {
         let tabs = Tab::all();
-        let current_idx = tabs.iter().position(|&t| t == self.current_tab).unwrap_or(0);
+        let current_idx = tabs
+            .iter()
+            .position(|&t| t == self.current_tab)
+            .unwrap_or(0);
         self.current_tab = tabs[(current_idx + 1) % tabs.len()];
         self.selected_index = 0;
         self.clear_transfer_mode();
@@ -389,7 +400,10 @@ impl App {
 
     pub fn previous_tab(&mut self) {
         let tabs = Tab::all();
-        let current_idx = tabs.iter().position(|&t| t == self.current_tab).unwrap_or(0);
+        let current_idx = tabs
+            .iter()
+            .position(|&t| t == self.current_tab)
+            .unwrap_or(0);
         self.current_tab = tabs[(current_idx + tabs.len() - 1) % tabs.len()];
         self.selected_index = 0;
         self.clear_transfer_mode();
@@ -426,7 +440,9 @@ impl App {
         if len > 0 {
             if self.input_mode == InputMode::TransferPending && !self.transfer_candidates.is_empty()
             {
-                let current_tx_id = self.get_current_transaction(self.selected_index).map(|t| t.id);
+                let current_tx_id = self
+                    .get_current_transaction(self.selected_index)
+                    .map(|t| t.id);
                 let current_pos = self
                     .transfer_candidates
                     .iter()
@@ -449,7 +465,9 @@ impl App {
         if len > 0 {
             if self.input_mode == InputMode::TransferPending && !self.transfer_candidates.is_empty()
             {
-                let current_tx_id = self.get_current_transaction(self.selected_index).map(|t| t.id);
+                let current_tx_id = self
+                    .get_current_transaction(self.selected_index)
+                    .map(|t| t.id);
                 let current_pos = self
                     .transfer_candidates
                     .iter()
@@ -473,7 +491,7 @@ impl App {
             Tab::Transfers => self.filtered_transfers_len(),
             Tab::Categories => self.categories.len(),
             Tab::Todo => match self.todo_subtab {
-                TodoSubTab::Uncategorized => self.filtered_uncategorized_len(),
+                TodoSubTab::Uncategorised => self.filtered_uncategorised_len(),
                 TodoSubTab::AiReview => self.filtered_ai_reviews_len(),
                 TodoSubTab::TransferReview => self.filtered_transfer_reviews_len(),
             },
@@ -486,7 +504,7 @@ impl App {
             Tab::Transfers => &[],
             Tab::Categories => &[],
             Tab::Todo => match self.todo_subtab {
-                TodoSubTab::Uncategorized => &self.filtered_uncategorized_idx,
+                TodoSubTab::Uncategorised => &self.filtered_uncategorised_idx,
                 TodoSubTab::AiReview => &[],
                 TodoSubTab::TransferReview => &[],
             },
@@ -499,7 +517,7 @@ impl App {
             Tab::Transfers => None,
             Tab::Categories => None,
             Tab::Todo => match self.todo_subtab {
-                TodoSubTab::Uncategorized => self.get_filtered_uncategorized(filtered_idx),
+                TodoSubTab::Uncategorised => self.get_filtered_uncategorised(filtered_idx),
                 TodoSubTab::AiReview => None,
                 TodoSubTab::TransferReview => None,
             },
@@ -513,14 +531,14 @@ impl App {
             Tab::Transfers => return None,
             Tab::Categories => return None,
             Tab::Todo => match self.todo_subtab {
-                TodoSubTab::Uncategorized => &self.uncategorized,
+                TodoSubTab::Uncategorised => &self.uncategorised,
                 TodoSubTab::AiReview => return None,
                 TodoSubTab::TransferReview => return None,
             },
         };
-        indices.iter().position(|&base_idx| {
-            base_list.get(base_idx).is_some_and(|tx| tx.id == tx_id)
-        })
+        indices
+            .iter()
+            .position(|&base_idx| base_list.get(base_idx).is_some_and(|tx| tx.id == tx_id))
     }
 
     pub fn selected_transaction(&self) -> Option<&Transaction> {
@@ -577,7 +595,9 @@ impl App {
         };
 
         let category_path = if !self.category_suggestions.is_empty() {
-            self.category_suggestions[self.category_selected].path.clone()
+            self.category_suggestions[self.category_selected]
+                .path
+                .clone()
         } else if !self.category_input.is_empty() {
             self.category_input.clone()
         } else {
@@ -586,13 +606,9 @@ impl App {
         };
 
         if let Ok(category_id) = self.store.get_or_create_category(&category_path) {
-            let _ = self.store.set_category(
-                tx.id,
-                category_id,
-                CategorySource::Manual,
-                true,
-                None,
-            );
+            let _ = self
+                .store
+                .set_category(tx.id, category_id, CategorySource::Manual, true, None);
             self.refresh_data();
         }
 
@@ -776,7 +792,11 @@ impl App {
     }
 
     pub fn confirm_merge(&mut self) {
-        let Some(ConfirmAction::MergeCategory { source_id, target_id }) = self.confirm_action.take() else {
+        let Some(ConfirmAction::MergeCategory {
+            source_id,
+            target_id,
+        }) = self.confirm_action.take()
+        else {
             self.cancel_input();
             return;
         };
@@ -814,7 +834,10 @@ impl App {
     }
 
     pub fn category_transaction_count(&self, category_id: i64) -> usize {
-        self.category_tx_count.get(&category_id).copied().unwrap_or(0)
+        self.category_tx_count
+            .get(&category_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn move_cursor_to_category(&mut self, path: &str) {
@@ -838,7 +861,8 @@ impl App {
 
         if transition_to_fuzzy {
             // Remove " ~" from input and transition to fuzzy mode
-            let trimmed = self.db_search_input.value()[..self.db_search_input.value().len() - 2].to_string();
+            let trimmed =
+                self.db_search_input.value()[..self.db_search_input.value().len() - 2].to_string();
             self.db_search_input = Input::new(trimmed.clone());
             self.db_search_query = DbSearchQuery::parse(&trimmed).0;
             self.reload_from_db();
@@ -916,13 +940,10 @@ impl App {
     /// Reload transactions from DB based on current db_search_query
     fn reload_from_db(&mut self) {
         let filter = self.db_search_query.to_filter(Some(500));
-        self.transactions = self
+        self.transactions = self.store.query_transactions(&filter).unwrap_or_default();
+        self.uncategorised = self
             .store
-            .query_transactions(&filter)
-            .unwrap_or_default();
-        self.uncategorized = self
-            .store
-            .get_uncategorized_transactions(&filter)
+            .get_uncategorised_transactions(&filter)
             .unwrap_or_default();
         self.ai_reviews = self
             .store
@@ -946,7 +967,7 @@ impl App {
             // No fuzzy filter - show all loaded data
             self.filtered_transaction_idx = (0..self.transactions.len()).collect();
             self.filtered_transfer_idx = (0..self.linked_transfers.len()).collect();
-            self.filtered_uncategorized_idx = (0..self.uncategorized.len()).collect();
+            self.filtered_uncategorised_idx = (0..self.uncategorised.len()).collect();
             self.filtered_ai_review_idx = (0..self.ai_reviews.len()).collect();
             self.filtered_transfer_review_idx = (0..self.transfer_reviews.len()).collect();
             return;
@@ -967,14 +988,17 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, twt)| {
-                self.fuzzy_matcher.fuzzy_matches(pattern, &twt.from_transaction.description)
-                    || self.fuzzy_matcher.fuzzy_matches(pattern, &twt.to_transaction.description)
+                self.fuzzy_matcher
+                    .fuzzy_matches(pattern, &twt.from_transaction.description)
+                    || self
+                        .fuzzy_matcher
+                        .fuzzy_matches(pattern, &twt.to_transaction.description)
             })
             .map(|(i, _)| i)
             .collect();
 
-        self.filtered_uncategorized_idx = self
-            .uncategorized
+        self.filtered_uncategorised_idx = self
+            .uncategorised
             .iter()
             .enumerate()
             .filter(|(_, tx)| self.fuzzy_matcher.fuzzy_matches(pattern, &tx.description))
@@ -985,7 +1009,10 @@ impl App {
             .ai_reviews
             .iter()
             .enumerate()
-            .filter(|(_, r)| self.fuzzy_matcher.fuzzy_matches(pattern, &r.transaction.description))
+            .filter(|(_, r)| {
+                self.fuzzy_matcher
+                    .fuzzy_matches(pattern, &r.transaction.description)
+            })
             .map(|(i, _)| i)
             .collect();
 

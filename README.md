@@ -111,7 +111,7 @@ with open(sys.argv[1]) as f:
 - **Transactions** — Browse all transactions
 - **Transfers** — View linked transfers between accounts
 - **Todo** — Items needing attention:
-  - *Uncategorized* — Transactions without categories
+  - *Uncategorised* — Transactions without categories
   - *AI Review* — AI-suggested categories to confirm
   - *Transfer Review* — Auto-detected transfers to confirm
 

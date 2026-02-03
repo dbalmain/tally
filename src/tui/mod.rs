@@ -4,11 +4,13 @@ mod ui;
 pub use app::App;
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use tui_input::InputRequest;
 
@@ -47,186 +49,186 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 continue;
             }
             match app.input_mode {
-                    InputMode::Normal => match key.code {
-                        KeyCode::Char('q') => return Ok(()),
-                        KeyCode::Char('j') | KeyCode::Down => app.next(),
-                        KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                app.previous_tab();
-                            } else {
-                                app.next_tab();
-                            }
-                        }
-                        KeyCode::BackTab => app.previous_tab(),
-                        KeyCode::Char('[') => app.previous_subtab(),
-                        KeyCode::Char(']') => app.next_subtab(),
-                        KeyCode::Char('/') => app.start_db_search(),
-                        KeyCode::Char('~') => app.start_fuzzy_search(),
-                        KeyCode::Char('c') => app.start_category_edit(),
-                        KeyCode::Char('e') => app.start_category_rename(),
-                        KeyCode::Char('t') => app.start_transfer_mark(),
-                        KeyCode::Char('d') => app.delete_transfer(),
-                        KeyCode::Enter => {
-                            app.confirm_ai_category();
-                            app.confirm_transfer_review();
-                        }
-                        _ => {}
-                    },
-                    InputMode::DbSearch => match key.code {
-                        KeyCode::Esc => app.clear_db_search(),
-                        KeyCode::Enter => app.confirm_db_search(),
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                app.previous_tab();
-                            } else {
-                                app.next_tab();
-                            }
-                        }
-                        KeyCode::BackTab => app.previous_tab(),
-                        KeyCode::Down => app.next(),
-                        KeyCode::Up => app.previous(),
-                        KeyCode::Char(c) => {
-                            app.handle_db_search_input(InputRequest::InsertChar(c));
-                        }
-                        KeyCode::Backspace => {
-                            app.handle_db_search_input(InputRequest::DeletePrevChar);
-                        }
-                        KeyCode::Delete => {
-                            app.handle_db_search_input(InputRequest::DeleteNextChar);
-                        }
-                        KeyCode::Left => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_db_search_input(InputRequest::GoToPrevWord);
-                            } else {
-                                app.handle_db_search_input(InputRequest::GoToPrevChar);
-                            }
-                        }
-                        KeyCode::Right => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_db_search_input(InputRequest::GoToNextWord);
-                            } else {
-                                app.handle_db_search_input(InputRequest::GoToNextChar);
-                            }
-                        }
-                        KeyCode::Home => {
-                            app.handle_db_search_input(InputRequest::GoToStart);
-                        }
-                        KeyCode::End => {
-                            app.handle_db_search_input(InputRequest::GoToEnd);
-                        }
-                        _ => {}
-                    },
-                    InputMode::FuzzySearch => match key.code {
-                        KeyCode::Esc => app.clear_fuzzy_search(),
-                        KeyCode::Enter => app.confirm_fuzzy_search(),
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                app.previous_tab();
-                            } else {
-                                app.next_tab();
-                            }
-                        }
-                        KeyCode::BackTab => app.previous_tab(),
-                        KeyCode::Down => app.next(),
-                        KeyCode::Up => app.previous(),
-                        KeyCode::Char(c) => {
-                            app.handle_fuzzy_search_input(InputRequest::InsertChar(c));
-                        }
-                        KeyCode::Backspace => {
-                            app.handle_fuzzy_search_input(InputRequest::DeletePrevChar);
-                        }
-                        KeyCode::Delete => {
-                            app.handle_fuzzy_search_input(InputRequest::DeleteNextChar);
-                        }
-                        KeyCode::Left => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_fuzzy_search_input(InputRequest::GoToPrevWord);
-                            } else {
-                                app.handle_fuzzy_search_input(InputRequest::GoToPrevChar);
-                            }
-                        }
-                        KeyCode::Right => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_fuzzy_search_input(InputRequest::GoToNextWord);
-                            } else {
-                                app.handle_fuzzy_search_input(InputRequest::GoToNextChar);
-                            }
-                        }
-                        KeyCode::Home => {
-                            app.handle_fuzzy_search_input(InputRequest::GoToStart);
-                        }
-                        KeyCode::End => {
-                            app.handle_fuzzy_search_input(InputRequest::GoToEnd);
-                        }
-                        _ => {}
-                    },
-                    InputMode::Category => match key.code {
-                        KeyCode::Esc => app.cancel_input(),
-                        KeyCode::Enter => app.confirm_category(),
-                        KeyCode::Backspace => app.backspace_category_input(),
-                        KeyCode::Down => app.category_next(),
-                        KeyCode::Up => app.category_previous(),
-                        KeyCode::Char(c) => app.update_category_input(c),
-                        _ => {}
-                    },
-                    InputMode::CategoryEdit => match key.code {
-                        KeyCode::Esc => app.cancel_input(),
-                        KeyCode::Enter => app.confirm_category_rename(),
-                        KeyCode::Char(c) => {
-                            app.handle_category_edit_input(InputRequest::InsertChar(c));
-                        }
-                        KeyCode::Backspace => {
-                            app.handle_category_edit_input(InputRequest::DeletePrevChar);
-                        }
-                        KeyCode::Delete => {
-                            app.handle_category_edit_input(InputRequest::DeleteNextChar);
-                        }
-                        KeyCode::Left => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_category_edit_input(InputRequest::GoToPrevWord);
-                            } else {
-                                app.handle_category_edit_input(InputRequest::GoToPrevChar);
-                            }
-                        }
-                        KeyCode::Right => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_category_edit_input(InputRequest::GoToNextWord);
-                            } else {
-                                app.handle_category_edit_input(InputRequest::GoToNextChar);
-                            }
-                        }
-                        KeyCode::Home => {
-                            app.handle_category_edit_input(InputRequest::GoToStart);
-                        }
-                        KeyCode::End => {
-                            app.handle_category_edit_input(InputRequest::GoToEnd);
-                        }
-                        _ => {}
-                    },
-                    InputMode::ConfirmMerge => match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                            app.confirm_merge();
-                        }
-                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            app.cancel_merge();
-                        }
-                        _ => {}
-                    },
-                    InputMode::TransferPending => match key.code {
-                        KeyCode::Esc => app.cancel_input(),
-                        KeyCode::Char('t') => app.start_transfer_mark(),
-                        KeyCode::Char('T') | KeyCode::Enter => app.complete_transfer(),
-                        KeyCode::Char('j') | KeyCode::Down => app.next(),
-                        KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                        _ => {}
-                    },
-                    InputMode::TransferNoMatch => {
-                        if key.code == KeyCode::Esc {
-                            app.cancel_input();
+                InputMode::Normal => match key.code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('j') | KeyCode::Down => app.next(),
+                    KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                    KeyCode::Tab => {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            app.previous_tab();
+                        } else {
+                            app.next_tab();
                         }
                     }
+                    KeyCode::BackTab => app.previous_tab(),
+                    KeyCode::Char('[') => app.previous_subtab(),
+                    KeyCode::Char(']') => app.next_subtab(),
+                    KeyCode::Char('/') => app.start_db_search(),
+                    KeyCode::Char('~') => app.start_fuzzy_search(),
+                    KeyCode::Char('c') => app.start_category_edit(),
+                    KeyCode::Char('e') => app.start_category_rename(),
+                    KeyCode::Char('t') => app.start_transfer_mark(),
+                    KeyCode::Char('d') => app.delete_transfer(),
+                    KeyCode::Enter => {
+                        app.confirm_ai_category();
+                        app.confirm_transfer_review();
+                    }
+                    _ => {}
+                },
+                InputMode::DbSearch => match key.code {
+                    KeyCode::Esc => app.clear_db_search(),
+                    KeyCode::Enter => app.confirm_db_search(),
+                    KeyCode::Tab => {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            app.previous_tab();
+                        } else {
+                            app.next_tab();
+                        }
+                    }
+                    KeyCode::BackTab => app.previous_tab(),
+                    KeyCode::Down => app.next(),
+                    KeyCode::Up => app.previous(),
+                    KeyCode::Char(c) => {
+                        app.handle_db_search_input(InputRequest::InsertChar(c));
+                    }
+                    KeyCode::Backspace => {
+                        app.handle_db_search_input(InputRequest::DeletePrevChar);
+                    }
+                    KeyCode::Delete => {
+                        app.handle_db_search_input(InputRequest::DeleteNextChar);
+                    }
+                    KeyCode::Left => {
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            app.handle_db_search_input(InputRequest::GoToPrevWord);
+                        } else {
+                            app.handle_db_search_input(InputRequest::GoToPrevChar);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            app.handle_db_search_input(InputRequest::GoToNextWord);
+                        } else {
+                            app.handle_db_search_input(InputRequest::GoToNextChar);
+                        }
+                    }
+                    KeyCode::Home => {
+                        app.handle_db_search_input(InputRequest::GoToStart);
+                    }
+                    KeyCode::End => {
+                        app.handle_db_search_input(InputRequest::GoToEnd);
+                    }
+                    _ => {}
+                },
+                InputMode::FuzzySearch => match key.code {
+                    KeyCode::Esc => app.clear_fuzzy_search(),
+                    KeyCode::Enter => app.confirm_fuzzy_search(),
+                    KeyCode::Tab => {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            app.previous_tab();
+                        } else {
+                            app.next_tab();
+                        }
+                    }
+                    KeyCode::BackTab => app.previous_tab(),
+                    KeyCode::Down => app.next(),
+                    KeyCode::Up => app.previous(),
+                    KeyCode::Char(c) => {
+                        app.handle_fuzzy_search_input(InputRequest::InsertChar(c));
+                    }
+                    KeyCode::Backspace => {
+                        app.handle_fuzzy_search_input(InputRequest::DeletePrevChar);
+                    }
+                    KeyCode::Delete => {
+                        app.handle_fuzzy_search_input(InputRequest::DeleteNextChar);
+                    }
+                    KeyCode::Left => {
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            app.handle_fuzzy_search_input(InputRequest::GoToPrevWord);
+                        } else {
+                            app.handle_fuzzy_search_input(InputRequest::GoToPrevChar);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            app.handle_fuzzy_search_input(InputRequest::GoToNextWord);
+                        } else {
+                            app.handle_fuzzy_search_input(InputRequest::GoToNextChar);
+                        }
+                    }
+                    KeyCode::Home => {
+                        app.handle_fuzzy_search_input(InputRequest::GoToStart);
+                    }
+                    KeyCode::End => {
+                        app.handle_fuzzy_search_input(InputRequest::GoToEnd);
+                    }
+                    _ => {}
+                },
+                InputMode::Category => match key.code {
+                    KeyCode::Esc => app.cancel_input(),
+                    KeyCode::Enter => app.confirm_category(),
+                    KeyCode::Backspace => app.backspace_category_input(),
+                    KeyCode::Down => app.category_next(),
+                    KeyCode::Up => app.category_previous(),
+                    KeyCode::Char(c) => app.update_category_input(c),
+                    _ => {}
+                },
+                InputMode::CategoryEdit => match key.code {
+                    KeyCode::Esc => app.cancel_input(),
+                    KeyCode::Enter => app.confirm_category_rename(),
+                    KeyCode::Char(c) => {
+                        app.handle_category_edit_input(InputRequest::InsertChar(c));
+                    }
+                    KeyCode::Backspace => {
+                        app.handle_category_edit_input(InputRequest::DeletePrevChar);
+                    }
+                    KeyCode::Delete => {
+                        app.handle_category_edit_input(InputRequest::DeleteNextChar);
+                    }
+                    KeyCode::Left => {
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            app.handle_category_edit_input(InputRequest::GoToPrevWord);
+                        } else {
+                            app.handle_category_edit_input(InputRequest::GoToPrevChar);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            app.handle_category_edit_input(InputRequest::GoToNextWord);
+                        } else {
+                            app.handle_category_edit_input(InputRequest::GoToNextChar);
+                        }
+                    }
+                    KeyCode::Home => {
+                        app.handle_category_edit_input(InputRequest::GoToStart);
+                    }
+                    KeyCode::End => {
+                        app.handle_category_edit_input(InputRequest::GoToEnd);
+                    }
+                    _ => {}
+                },
+                InputMode::ConfirmMerge => match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        app.confirm_merge();
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.cancel_merge();
+                    }
+                    _ => {}
+                },
+                InputMode::TransferPending => match key.code {
+                    KeyCode::Esc => app.cancel_input(),
+                    KeyCode::Char('t') => app.start_transfer_mark(),
+                    KeyCode::Char('T') | KeyCode::Enter => app.complete_transfer(),
+                    KeyCode::Char('j') | KeyCode::Down => app.next(),
+                    KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                    _ => {}
+                },
+                InputMode::TransferNoMatch => {
+                    if key.code == KeyCode::Esc {
+                        app.cancel_input();
+                    }
                 }
+            }
         }
     }
 }

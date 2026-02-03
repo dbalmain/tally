@@ -1,6 +1,6 @@
 use regex::Regex;
-use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
+use rusqlite::functions::FunctionFlags;
 
 use crate::Result;
 
@@ -136,7 +136,9 @@ fn register_regexp_function(conn: &Connection) -> Result<()> {
         // Use SQLite's auxiliary data to cache the compiled regex.
         // When the pattern (arg 0) is constant across rows, SQLite preserves the cache.
         let re = ctx.get_or_create_aux(0, |vr| -> std::result::Result<Regex, rusqlite::Error> {
-            let pattern = vr.as_str().map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+            let pattern = vr
+                .as_str()
+                .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
             Regex::new(pattern).map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
         })?;
         let text: String = ctx.get(1)?;

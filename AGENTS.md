@@ -231,7 +231,7 @@ In-memory fuzzy matching on loaded results using nucleo. Type any characters and
 ```rust
 // Querying
 store.query_transactions(&filter) -> Vec<Transaction>
-store.get_uncategorized_transactions(limit) -> Vec<Transaction>
+store.get_uncategorised_transactions(limit) -> Vec<Transaction>
 store.get_pending_ai_reviews(limit) -> Vec<TransactionWithEnrichment>
 store.get_pending_transfer_reviews(limit) -> Vec<Transfer>
 

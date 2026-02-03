@@ -22,8 +22,8 @@ fn main() {
 }
 
 fn run_refresh(db_path: &Path, exports_dir: &Path) {
-    let mut store = TransactionStore::open(db_path, exports_dir)
-        .expect("Failed to open transaction store");
+    let mut store =
+        TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
 
     println!("Refreshing transactions...");
     let report = store.refresh().expect("Failed to refresh");
@@ -47,8 +47,8 @@ fn run_refresh(db_path: &Path, exports_dir: &Path) {
 }
 
 fn run_tui(db_path: &Path, exports_dir: &Path) {
-    let mut store = TransactionStore::open(db_path, exports_dir)
-        .expect("Failed to open transaction store");
+    let mut store =
+        TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
 
     // Auto-refresh on TUI startup
     if let Err(e) = store.refresh() {

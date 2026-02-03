@@ -1,9 +1,11 @@
 use chrono::{NaiveDate, Utc};
-use rusqlite::{params, types::Value, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params, types::Value};
 use std::path::{Path, PathBuf};
 
 use crate::db::{build_searchable_text, init_db};
-use crate::import::{compute_hash, find_csv_files, find_import_script, hash_file, run_import_script};
+use crate::import::{
+    compute_hash, find_csv_files, find_import_script, hash_file, run_import_script,
+};
 use crate::{
     Account, AccountPattern, Bank, Category, CategorySource, Error, RefreshReport, Result,
     Transaction, TransactionEnrichment, TransactionFilter, TransactionWithEnrichment, Transfer,
@@ -191,7 +193,8 @@ impl TransactionStore {
             params.extend(pattern_params);
         }
         if !filter.category_patterns.is_empty() {
-            let (clause, pattern_params) = build_category_pattern_clause(&filter.category_patterns, "c.path");
+            let (clause, pattern_params) =
+                build_category_pattern_clause(&filter.category_patterns, "c.path");
             sql.push_str(&clause);
             params.extend(pattern_params);
         }
@@ -299,18 +302,14 @@ impl TransactionStore {
 
         match existing {
             Some((id, Some(_))) => {
-                self.conn.execute(
-                    "UPDATE banks SET deleted_at = NULL WHERE id = ?",
-                    [id],
-                )?;
+                self.conn
+                    .execute("UPDATE banks SET deleted_at = NULL WHERE id = ?", [id])?;
                 Ok(id)
             }
             Some((id, None)) => Ok(id),
             None => {
-                self.conn.execute(
-                    "INSERT INTO banks (name) VALUES (?)",
-                    [name],
-                )?;
+                self.conn
+                    .execute("INSERT INTO banks (name) VALUES (?)", [name])?;
                 report.banks_added += 1;
                 Ok(self.conn.last_insert_rowid())
             }
@@ -329,10 +328,8 @@ impl TransactionStore {
 
         match existing {
             Some((id, Some(_))) => {
-                self.conn.execute(
-                    "UPDATE accounts SET deleted_at = NULL WHERE id = ?",
-                    [id],
-                )?;
+                self.conn
+                    .execute("UPDATE accounts SET deleted_at = NULL WHERE id = ?", [id])?;
                 Ok(id)
             }
             Some((id, None)) => Ok(id),
@@ -386,7 +383,12 @@ impl TransactionStore {
             for raw_tx in transactions {
                 let date = parse_date(&raw_tx.date)?;
                 let hash = raw_tx.hash.clone().unwrap_or_else(|| {
-                    compute_hash(&raw_tx.date, &raw_tx.description, raw_tx.amount_cents, raw_tx.balance_cents)
+                    compute_hash(
+                        &raw_tx.date,
+                        &raw_tx.description,
+                        raw_tx.amount_cents,
+                        raw_tx.balance_cents,
+                    )
                 });
 
                 let inserted = self.insert_transaction(
@@ -423,7 +425,13 @@ impl TransactionStore {
         Ok(count > 0)
     }
 
-    fn mark_file_imported(&self, account_id: i64, path: &str, content_hash: &str, batch_id: i64) -> Result<()> {
+    fn mark_file_imported(
+        &self,
+        account_id: i64,
+        path: &str,
+        content_hash: &str,
+        batch_id: i64,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO imported_files (account_id, path, content_hash, imported_at, import_batch_id) 
              VALUES (?, ?, ?, ?, ?)",
@@ -481,11 +489,12 @@ impl TransactionStore {
         discovered: &[(String, Vec<String>)],
         report: &mut RefreshReport,
     ) -> Result<()> {
-        let discovered_names: Vec<&str> = discovered.iter().map(|(name, _)| name.as_str()).collect();
+        let discovered_names: Vec<&str> =
+            discovered.iter().map(|(name, _)| name.as_str()).collect();
 
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name FROM banks WHERE deleted_at IS NULL",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name FROM banks WHERE deleted_at IS NULL")?;
         let existing: Vec<(i64, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -580,12 +589,12 @@ impl TransactionStore {
 
     /// Get or create a category by path.
     pub fn get_or_create_category(&mut self, path: &str) -> Result<i64> {
-        let normalized = path.trim().trim_matches('/');
+        let normalised = path.trim().trim_matches('/');
         if let Some(id) = self
             .conn
             .query_row(
                 "SELECT id FROM categories WHERE path = ?",
-                [normalized],
+                [normalised],
                 |row| row.get(0),
             )
             .optional()?
@@ -595,7 +604,7 @@ impl TransactionStore {
 
         self.conn.execute(
             "INSERT INTO categories (path, created_at) VALUES (?, ?)",
-            params![normalized, Utc::now().to_rfc3339()],
+            params![normalised, Utc::now().to_rfc3339()],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -741,25 +750,25 @@ impl TransactionStore {
 
     /// Rename a category. Returns error if new name already exists.
     pub fn rename_category(&mut self, category_id: i64, new_path: &str) -> Result<()> {
-        let normalized = new_path.trim().trim_matches('/');
-        
+        let normalised = new_path.trim().trim_matches('/');
+
         // Check if target name already exists
         let existing: Option<i64> = self
             .conn
             .query_row(
                 "SELECT id FROM categories WHERE path = ? AND id != ?",
-                params![normalized, category_id],
+                params![normalised, category_id],
                 |row| row.get(0),
             )
             .optional()?;
-        
+
         if existing.is_some() {
-            return Err(Error::CategoryExists(normalized.to_string()));
+            return Err(Error::CategoryExists(normalised.to_string()));
         }
-        
+
         self.conn.execute(
             "UPDATE categories SET path = ? WHERE id = ?",
-            params![normalized, category_id],
+            params![normalised, category_id],
         )?;
         Ok(())
     }
@@ -773,21 +782,21 @@ impl TransactionStore {
             "UPDATE transaction_enrichments SET category_id = ?, updated_at = ? WHERE category_id = ?",
             params![target_id, now, source_id],
         )?;
-        
+
         // Delete the source category
         self.conn
             .execute("DELETE FROM categories WHERE id = ?", [source_id])?;
-        
+
         Ok(())
     }
 
     /// Get category by path.
     pub fn get_category_by_path(&self, path: &str) -> Result<Option<Category>> {
-        let normalized = path.trim().trim_matches('/');
+        let normalised = path.trim().trim_matches('/');
         self.conn
             .query_row(
                 "SELECT id, path, created_at FROM categories WHERE path = ?",
-                [normalized],
+                [normalised],
                 |row| {
                     Ok(Category {
                         id: row.get(0)?,
@@ -867,7 +876,7 @@ impl TransactionStore {
     /// Find potential matching transactions for a transfer.
     pub fn find_matching_transfer_candidates(&self, tx: &Transaction) -> Result<Vec<Transaction>> {
         let opposite_amount = -tx.amount_cents;
-        
+
         // First try other accounts
         let mut stmt = self.conn.prepare(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
@@ -917,7 +926,7 @@ impl TransactionStore {
     // ==================== Todo Queries ====================
 
     /// Get transactions that need categorization, with optional filters.
-    pub fn get_uncategorized_transactions(
+    pub fn get_uncategorised_transactions(
         &self,
         filter: &TransactionFilter,
     ) -> Result<Vec<Transaction>> {
@@ -946,7 +955,11 @@ impl TransactionStore {
             params.push(Value::Integer(limit as i64));
         }
 
-        log::debug!("get_uncategorized_transactions SQL: {} params: {:?}", sql, params);
+        log::debug!(
+            "get_uncategorised_transactions SQL: {} params: {:?}",
+            sql,
+            params
+        );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let transactions = stmt
@@ -1047,7 +1060,11 @@ impl TransactionStore {
             params.push(Value::Integer(limit as i64));
         }
 
-        log::debug!("get_pending_transfer_reviews SQL: {} params: {:?}", sql, params);
+        log::debug!(
+            "get_pending_transfer_reviews SQL: {} params: {:?}",
+            sql,
+            params
+        );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let transfers = stmt
@@ -1130,7 +1147,11 @@ impl TransactionStore {
             params.push(Value::Integer(limit as i64));
         }
 
-        log::debug!("list_transfers_with_transactions SQL: {} params: {:?}", sql, params);
+        log::debug!(
+            "list_transfers_with_transactions SQL: {} params: {:?}",
+            sql,
+            params
+        );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let result = stmt
@@ -1169,7 +1190,10 @@ fn build_account_pattern_clause(
 
         if !pattern.bank_prefix.is_empty() {
             and_parts.push(format!("LOWER({}) LIKE ?", bank_col));
-            params.push(Value::Text(format!("{}%", pattern.bank_prefix.to_lowercase())));
+            params.push(Value::Text(format!(
+                "{}%",
+                pattern.bank_prefix.to_lowercase()
+            )));
         }
 
         if let Some(ref account_prefix) = pattern.account_prefix {
@@ -1340,10 +1364,16 @@ fn build_transfer_filter_clause(
     }
     // Account patterns: build OR clause for each side
     if !filter.account_patterns.is_empty() {
-        let (from_clause, from_params) =
-            build_account_pattern_clause(&filter.account_patterns, &format!("{}.name", from_b), &format!("{}.name", from_a));
-        let (to_clause, to_params) =
-            build_account_pattern_clause(&filter.account_patterns, &format!("{}.name", to_b), &format!("{}.name", to_a));
+        let (from_clause, from_params) = build_account_pattern_clause(
+            &filter.account_patterns,
+            &format!("{}.name", from_b),
+            &format!("{}.name", from_a),
+        );
+        let (to_clause, to_params) = build_account_pattern_clause(
+            &filter.account_patterns,
+            &format!("{}.name", to_b),
+            &format!("{}.name", to_a),
+        );
         // Strip leading " AND " from clauses for use in our OR structure
         if !from_clause.is_empty() {
             let from_inner = from_clause.strip_prefix(" AND ").unwrap_or(&from_clause);
@@ -1378,24 +1408,29 @@ fn build_transfer_filter_clause(
 fn parse_datetime(s: &str) -> rusqlite::Result<chrono::DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            Box::new(e),
-        ))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 fn parse_transaction(row: &rusqlite::Row) -> rusqlite::Result<Transaction> {
     parse_transaction_at_offset(row, 0)
 }
 
-fn parse_transaction_at_offset(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<Transaction> {
+fn parse_transaction_at_offset(
+    row: &rusqlite::Row,
+    offset: usize,
+) -> rusqlite::Result<Transaction> {
     let metadata_str: String = row.get(offset + 8)?;
     let metadata: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(&metadata_str).unwrap_or_default();
     let date_str: String = row.get(offset + 3)?;
     let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(offset + 3, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(
+            offset + 3,
+            rusqlite::types::Type::Text,
+            Box::new(e),
+        )
     })?;
 
     Ok(Transaction {
@@ -1688,10 +1723,10 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
 
         let cat_id = store.get_or_create_category("Food/Groceries").unwrap();
-        
+
         // Rename should work
         store.rename_category(cat_id, "Food/Supermarket").unwrap();
-        
+
         let cat = store.get_category(cat_id).unwrap().unwrap();
         assert_eq!(cat.path, "Food/Supermarket");
     }
@@ -1703,7 +1738,7 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
 
         store.get_or_create_category("Food/Groceries").unwrap();
         let cat2_id = store.get_or_create_category("Food/Supermarket").unwrap();
-        
+
         // Renaming to existing name should fail
         let result = store.rename_category(cat2_id, "Food/Groceries");
         assert!(matches!(result, Err(Error::CategoryExists(_))));
@@ -1719,9 +1754,13 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         let target_id = store.get_or_create_category("NewCategory").unwrap();
 
         // Assign a transaction to source category
-        let txs = store.query_transactions(&TransactionFilter::default()).unwrap();
+        let txs = store
+            .query_transactions(&TransactionFilter::default())
+            .unwrap();
         let tx_id = txs[0].id;
-        store.set_category(tx_id, source_id, CategorySource::Manual, true, None).unwrap();
+        store
+            .set_category(tx_id, source_id, CategorySource::Manual, true, None)
+            .unwrap();
 
         // Merge source into target
         store.merge_categories(source_id, target_id).unwrap();
@@ -1741,13 +1780,17 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         store.refresh().unwrap();
 
         let cat_id = store.get_or_create_category("TestCategory").unwrap();
-        
+
         // Initially empty
         assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 0);
 
         // Assign transaction
-        let txs = store.query_transactions(&TransactionFilter::default()).unwrap();
-        store.set_category(txs[0].id, cat_id, CategorySource::Manual, true, None).unwrap();
+        let txs = store
+            .query_transactions(&TransactionFilter::default())
+            .unwrap();
+        store
+            .set_category(txs[0].id, cat_id, CategorySource::Manual, true, None)
+            .unwrap();
 
         assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 1);
     }

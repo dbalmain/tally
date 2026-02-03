@@ -1,6 +1,6 @@
 # Performance Refactoring Plan
 
-Prioritized improvements identified from code review. Work through these one at a time.
+Prioritised improvements identified from code review. Work through these one at a time.
 
 ## Medium Priority
 
@@ -90,7 +90,7 @@ CREATE INDEX idx_transactions_amount ON transactions(amount_cents);
 **Why:** Full-text search is faster than LIKE for large datasets.
 
 **Target:**
-- Store normalized lowercase descriptions
+- Store normalised lowercase descriptions
 - Use SQLite FTS5 virtual table for description matching
 
 **Files:** `src/db.rs`, `src/store.rs`
