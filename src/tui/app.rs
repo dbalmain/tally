@@ -8,7 +8,7 @@ use crate::{
     TransferWithTransactions,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Transactions,
     Transfers,
@@ -36,11 +36,54 @@ impl Tab {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TodoSubTab {
     Uncategorised,
     AiReview,
     TransferReview,
+}
+
+/// Key for per-tab search state storage.
+/// Todo subtabs each get their own state; other tabs use None.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TabKey {
+    Transactions,
+    Transfers,
+    Categories,
+    TodoUncategorised,
+    TodoAiReview,
+    TodoTransferReview,
+}
+
+impl TabKey {
+    pub fn from_tab(tab: Tab, subtab: TodoSubTab) -> Self {
+        match tab {
+            Tab::Transactions => TabKey::Transactions,
+            Tab::Transfers => TabKey::Transfers,
+            Tab::Categories => TabKey::Categories,
+            Tab::Todo => match subtab {
+                TodoSubTab::Uncategorised => TabKey::TodoUncategorised,
+                TodoSubTab::AiReview => TabKey::TodoAiReview,
+                TodoSubTab::TransferReview => TabKey::TodoTransferReview,
+            },
+        }
+    }
+}
+
+/// Per-tab search state (DB search + fuzzy search + selection).
+#[derive(Default)]
+pub struct TabSearchState {
+    pub db_search_input: Input,
+    pub db_search_query: DbSearchQuery,
+    pub db_search_active: bool,
+    pub fuzzy_search_input: Input,
+    pub fuzzy_pattern: String,
+    pub fuzzy_search_active: bool,
+    pub selected_index: usize,
+    /// Was actively editing DB search when we left this tab
+    pub editing_db_search: bool,
+    /// Was actively editing fuzzy search when we left this tab
+    pub editing_fuzzy_search: bool,
 }
 
 impl TodoSubTab {
@@ -92,12 +135,6 @@ pub struct App {
     pub error_message: Option<String>,
     pub banks: HashMap<i64, Bank>,
     pub accounts: HashMap<i64, Account>,
-    pub db_search_input: Input,
-    pub db_search_query: DbSearchQuery,
-    pub fuzzy_search_input: Input,
-    pub fuzzy_pattern: String,
-    pub db_search_active: bool,
-    pub fuzzy_search_active: bool,
     pub fuzzy_matcher: FuzzyMatcher,
     filtered_transaction_idx: Vec<usize>,
     filtered_transfer_idx: Vec<usize>,
@@ -117,6 +154,8 @@ pub struct App {
     // Confirmation popup state
     pub confirm_message: Option<String>,
     pub confirm_action: Option<ConfirmAction>,
+    // Per-tab search state
+    tab_search_state: HashMap<TabKey, TabSearchState>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,12 +310,6 @@ impl App {
             error_message: None,
             banks,
             accounts,
-            db_search_input: Input::default(),
-            db_search_query: DbSearchQuery::default(),
-            fuzzy_search_input: Input::default(),
-            fuzzy_pattern: String::new(),
-            db_search_active: false,
-            fuzzy_search_active: false,
             fuzzy_matcher: FuzzyMatcher::new(),
             tx_by_id: HashMap::new(),
             category_by_tx_id: HashMap::new(),
@@ -287,9 +320,23 @@ impl App {
             category_edit_input: Input::default(),
             confirm_message: None,
             confirm_action: None,
+            tab_search_state: HashMap::new(),
         };
         app.rebuild_caches();
         app
+    }
+
+    fn current_tab_key(&self) -> TabKey {
+        TabKey::from_tab(self.current_tab, self.todo_subtab)
+    }
+
+    fn current_search_state(&self) -> Option<&TabSearchState> {
+        self.tab_search_state.get(&self.current_tab_key())
+    }
+
+    fn current_search_state_mut(&mut self) -> &mut TabSearchState {
+        let key = self.current_tab_key();
+        self.tab_search_state.entry(key).or_default()
     }
 
     fn rebuild_caches(&mut self) {
@@ -388,24 +435,26 @@ impl App {
     }
 
     pub fn next_tab(&mut self) {
+        self.save_tab_state();
         let tabs = Tab::all();
         let current_idx = tabs
             .iter()
             .position(|&t| t == self.current_tab)
             .unwrap_or(0);
         self.current_tab = tabs[(current_idx + 1) % tabs.len()];
-        self.selected_index = 0;
+        self.restore_tab_state();
         self.clear_transfer_mode();
     }
 
     pub fn previous_tab(&mut self) {
+        self.save_tab_state();
         let tabs = Tab::all();
         let current_idx = tabs
             .iter()
             .position(|&t| t == self.current_tab)
             .unwrap_or(0);
         self.current_tab = tabs[(current_idx + tabs.len() - 1) % tabs.len()];
-        self.selected_index = 0;
+        self.restore_tab_state();
         self.clear_transfer_mode();
     }
 
@@ -413,26 +462,60 @@ impl App {
         if self.current_tab != Tab::Todo {
             return;
         }
+        self.save_tab_state();
         let subtabs = TodoSubTab::all();
         let current_idx = subtabs
             .iter()
             .position(|&t| t == self.todo_subtab)
             .unwrap_or(0);
         self.todo_subtab = subtabs[(current_idx + 1) % subtabs.len()];
-        self.selected_index = 0;
+        self.restore_tab_state();
     }
 
     pub fn previous_subtab(&mut self) {
         if self.current_tab != Tab::Todo {
             return;
         }
+        self.save_tab_state();
         let subtabs = TodoSubTab::all();
         let current_idx = subtabs
             .iter()
             .position(|&t| t == self.todo_subtab)
             .unwrap_or(0);
         self.todo_subtab = subtabs[(current_idx + subtabs.len() - 1) % subtabs.len()];
-        self.selected_index = 0;
+        self.restore_tab_state();
+    }
+
+    /// Save current state to the tab's search state before switching away
+    fn save_tab_state(&mut self) {
+        let key = self.current_tab_key();
+        let state = self.tab_search_state.entry(key).or_default();
+        state.selected_index = self.selected_index;
+        state.editing_db_search = self.input_mode == InputMode::DbSearch;
+        state.editing_fuzzy_search = self.input_mode == InputMode::FuzzySearch;
+    }
+
+    /// Restore state from the new tab's search state
+    fn restore_tab_state(&mut self) {
+        // Extract values before mutating self
+        let (selected_index, editing_fuzzy, editing_db) = self
+            .current_search_state()
+            .map(|s| (s.selected_index, s.editing_fuzzy_search, s.editing_db_search))
+            .unwrap_or((0, false, false));
+
+        self.selected_index = selected_index;
+
+        // Restore input mode based on what we were doing when we left this tab
+        if editing_fuzzy {
+            self.input_mode = InputMode::FuzzySearch;
+        } else if editing_db {
+            self.input_mode = InputMode::DbSearch;
+        } else {
+            self.input_mode = InputMode::Normal;
+        }
+
+        // Reload data for this tab based on its search state
+        self.reload_current_tab();
     }
 
     pub fn next(&mut self) {
@@ -705,7 +788,8 @@ impl App {
     }
 
     pub fn refresh_data(&mut self) {
-        self.reload_from_db();
+        // Reload the current tab's data using its search state
+        self.reload_current_tab();
     }
 
     // ==================== Category Editing (Categories Tab) ====================
@@ -848,38 +932,56 @@ impl App {
 
     // ==================== DB Search ====================
 
+    pub fn db_search_active(&self) -> bool {
+        self.current_search_state()
+            .map(|s| s.db_search_active)
+            .unwrap_or(false)
+    }
+
+    pub fn fuzzy_search_active(&self) -> bool {
+        self.current_search_state()
+            .map(|s| s.fuzzy_search_active)
+            .unwrap_or(false)
+    }
+
     pub fn start_db_search(&mut self) {
         self.input_mode = InputMode::DbSearch;
-        self.db_search_active = true;
+        self.current_search_state_mut().db_search_active = true;
     }
 
     pub fn handle_db_search_input(&mut self, req: tui_input::InputRequest) {
-        self.db_search_input.handle(req);
-        let cursor = self.db_search_input.cursor();
+        let state = self.current_search_state_mut();
+        state.db_search_input.handle(req);
+        let cursor = state.db_search_input.cursor();
+        let input_value = state.db_search_input.value().to_string();
         let (query, transition_to_fuzzy) =
-            DbSearchQuery::parse_with_cursor(self.db_search_input.value(), Some(cursor));
+            DbSearchQuery::parse_with_cursor(&input_value, Some(cursor));
 
         if transition_to_fuzzy {
             // Remove " ~" from input and transition to fuzzy mode
-            let trimmed =
-                self.db_search_input.value()[..self.db_search_input.value().len() - 2].to_string();
-            self.db_search_input = Input::new(trimmed.clone());
-            self.db_search_query = DbSearchQuery::parse(&trimmed).0;
-            self.reload_from_db();
+            let trimmed = input_value[..input_value.len() - 2].to_string();
+            let state = self.current_search_state_mut();
+            state.db_search_input = Input::new(trimmed.clone());
+            state.db_search_query = DbSearchQuery::parse(&trimmed).0;
+            self.reload_current_tab();
             self.start_fuzzy_search();
         } else {
-            self.db_search_query = query;
-            self.reload_from_db();
+            let state = self.current_search_state_mut();
+            state.db_search_query = query;
+            self.reload_current_tab();
         }
+        self.current_search_state_mut().selected_index = 0;
         self.selected_index = 0;
     }
 
     pub fn clear_db_search(&mut self) {
-        self.db_search_input.reset();
-        self.db_search_query = DbSearchQuery::default();
-        self.db_search_active = false;
-        self.reload_from_db();
+        let state = self.current_search_state_mut();
+        state.db_search_input.reset();
+        state.db_search_query = DbSearchQuery::default();
+        state.db_search_active = false;
+        state.selected_index = 0;
         self.selected_index = 0;
+        self.reload_current_tab();
         self.input_mode = InputMode::Normal;
     }
 
@@ -888,35 +990,44 @@ impl App {
     }
 
     pub fn db_search_value(&self) -> &str {
-        self.db_search_input.value()
+        self.current_search_state()
+            .map(|s| s.db_search_input.value())
+            .unwrap_or("")
     }
 
     pub fn db_search_cursor(&self) -> usize {
-        self.db_search_input.visual_cursor()
+        self.current_search_state()
+            .map(|s| s.db_search_input.visual_cursor())
+            .unwrap_or(0)
     }
 
     // ==================== Fuzzy Search ====================
 
     pub fn start_fuzzy_search(&mut self) {
         self.input_mode = InputMode::FuzzySearch;
-        self.fuzzy_search_active = true;
+        self.current_search_state_mut().fuzzy_search_active = true;
     }
 
     pub fn handle_fuzzy_search_input(&mut self, req: tui_input::InputRequest) {
-        self.fuzzy_search_input.handle(req);
-        self.fuzzy_pattern = self.fuzzy_search_input.value().to_string();
-        self.apply_fuzzy_filter();
+        let state = self.current_search_state_mut();
+        state.fuzzy_search_input.handle(req);
+        state.fuzzy_pattern = state.fuzzy_search_input.value().to_string();
+        state.selected_index = 0;
         self.selected_index = 0;
+        self.apply_fuzzy_filter();
     }
 
     pub fn clear_fuzzy_search(&mut self) {
-        self.fuzzy_search_input.reset();
-        self.fuzzy_pattern.clear();
-        self.fuzzy_search_active = false;
-        self.apply_fuzzy_filter();
+        let db_search_active = self.db_search_active();
+        let state = self.current_search_state_mut();
+        state.fuzzy_search_input.reset();
+        state.fuzzy_pattern.clear();
+        state.fuzzy_search_active = false;
+        state.selected_index = 0;
         self.selected_index = 0;
+        self.apply_fuzzy_filter();
         // Return to DB search mode if it's still active, else normal
-        if self.db_search_active {
+        if db_search_active {
             self.input_mode = InputMode::DbSearch;
         } else {
             self.input_mode = InputMode::Normal;
@@ -928,112 +1039,166 @@ impl App {
     }
 
     pub fn fuzzy_search_value(&self) -> &str {
-        self.fuzzy_search_input.value()
+        self.current_search_state()
+            .map(|s| s.fuzzy_search_input.value())
+            .unwrap_or("")
     }
 
     pub fn fuzzy_search_cursor(&self) -> usize {
-        self.fuzzy_search_input.visual_cursor()
+        self.current_search_state()
+            .map(|s| s.fuzzy_search_input.visual_cursor())
+            .unwrap_or(0)
     }
 
     // ==================== Filtering Logic ====================
 
-    /// Reload transactions from DB based on current db_search_query
-    fn reload_from_db(&mut self) {
-        let filter = self.db_search_query.to_filter(Some(500));
-        self.transactions = self.store.query_transactions(&filter).unwrap_or_default();
-        self.uncategorised = self
-            .store
-            .get_uncategorised_transactions(&filter)
-            .unwrap_or_default();
-        self.ai_reviews = self
-            .store
-            .get_pending_ai_reviews(&filter)
-            .unwrap_or_default();
-        self.linked_transfers = self
-            .store
-            .list_transfers_with_transactions(true, &filter)
-            .unwrap_or_default();
-        self.transfer_reviews = self
-            .store
-            .get_pending_transfer_reviews(&filter)
-            .unwrap_or_default();
+    /// Reload only the current tab's data from DB based on its search query
+    fn reload_current_tab(&mut self) {
+        let filter = self
+            .current_search_state()
+            .map(|s| s.db_search_query.to_filter(Some(500)))
+            .unwrap_or_else(|| TransactionFilter {
+                limit: Some(500),
+                ..Default::default()
+            });
+
+        match self.current_tab {
+            Tab::Transactions => {
+                self.transactions = self.store.query_transactions(&filter).unwrap_or_default();
+            }
+            Tab::Transfers => {
+                self.linked_transfers = self
+                    .store
+                    .list_transfers_with_transactions(true, &filter)
+                    .unwrap_or_default();
+            }
+            Tab::Categories => {
+                // Categories don't use transaction filters
+            }
+            Tab::Todo => match self.todo_subtab {
+                TodoSubTab::Uncategorised => {
+                    self.uncategorised = self
+                        .store
+                        .get_uncategorised_transactions(&filter)
+                        .unwrap_or_default();
+                }
+                TodoSubTab::AiReview => {
+                    self.ai_reviews = self
+                        .store
+                        .get_pending_ai_reviews(&filter)
+                        .unwrap_or_default();
+                }
+                TodoSubTab::TransferReview => {
+                    self.transfer_reviews = self
+                        .store
+                        .get_pending_transfer_reviews(&filter)
+                        .unwrap_or_default();
+                }
+            },
+        }
         self.rebuild_caches();
         self.apply_fuzzy_filter();
     }
 
-    /// Apply fuzzy filter on top of loaded data
+    /// Apply fuzzy filter on top of loaded data for current tab only
     fn apply_fuzzy_filter(&mut self) {
-        if self.fuzzy_pattern.is_empty() {
-            // No fuzzy filter - show all loaded data
-            self.filtered_transaction_idx = (0..self.transactions.len()).collect();
-            self.filtered_transfer_idx = (0..self.linked_transfers.len()).collect();
-            self.filtered_uncategorised_idx = (0..self.uncategorised.len()).collect();
-            self.filtered_ai_review_idx = (0..self.ai_reviews.len()).collect();
-            self.filtered_transfer_review_idx = (0..self.transfer_reviews.len()).collect();
-            return;
-        }
+        let pattern = self
+            .current_search_state()
+            .map(|s| s.fuzzy_pattern.clone())
+            .unwrap_or_default();
 
-        let pattern = &self.fuzzy_pattern;
-
-        self.filtered_transaction_idx = self
-            .transactions
-            .iter()
-            .enumerate()
-            .filter(|(_, tx)| self.fuzzy_matcher.fuzzy_matches(pattern, &tx.description))
-            .map(|(i, _)| i)
-            .collect();
-
-        self.filtered_transfer_idx = self
-            .linked_transfers
-            .iter()
-            .enumerate()
-            .filter(|(_, twt)| {
-                self.fuzzy_matcher
-                    .fuzzy_matches(pattern, &twt.from_transaction.description)
-                    || self
-                        .fuzzy_matcher
-                        .fuzzy_matches(pattern, &twt.to_transaction.description)
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        self.filtered_uncategorised_idx = self
-            .uncategorised
-            .iter()
-            .enumerate()
-            .filter(|(_, tx)| self.fuzzy_matcher.fuzzy_matches(pattern, &tx.description))
-            .map(|(i, _)| i)
-            .collect();
-
-        self.filtered_ai_review_idx = self
-            .ai_reviews
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| {
-                self.fuzzy_matcher
-                    .fuzzy_matches(pattern, &r.transaction.description)
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        self.filtered_transfer_review_idx = self
-            .transfer_reviews
-            .iter()
-            .enumerate()
-            .filter(|(_, tr)| {
-                match (
-                    self.tx_by_id.get(&tr.from_transaction_id),
-                    self.tx_by_id.get(&tr.to_transaction_id),
-                ) {
-                    (Some(from), Some(to)) => {
-                        self.fuzzy_matcher.fuzzy_matches(pattern, &from.description)
-                            || self.fuzzy_matcher.fuzzy_matches(pattern, &to.description)
-                    }
-                    _ => true,
+        match self.current_tab {
+            Tab::Transactions => {
+                self.filtered_transaction_idx = if pattern.is_empty() {
+                    (0..self.transactions.len()).collect()
+                } else {
+                    self.transactions
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, tx)| self.fuzzy_matcher.fuzzy_matches(&pattern, &tx.description))
+                        .map(|(i, _)| i)
+                        .collect()
+                };
+            }
+            Tab::Transfers => {
+                self.filtered_transfer_idx = if pattern.is_empty() {
+                    (0..self.linked_transfers.len()).collect()
+                } else {
+                    self.linked_transfers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, twt)| {
+                            self.fuzzy_matcher
+                                .fuzzy_matches(&pattern, &twt.from_transaction.description)
+                                || self
+                                    .fuzzy_matcher
+                                    .fuzzy_matches(&pattern, &twt.to_transaction.description)
+                        })
+                        .map(|(i, _)| i)
+                        .collect()
+                };
+            }
+            Tab::Categories => {
+                // Categories don't use fuzzy filtering (for now)
+            }
+            Tab::Todo => match self.todo_subtab {
+                TodoSubTab::Uncategorised => {
+                    self.filtered_uncategorised_idx = if pattern.is_empty() {
+                        (0..self.uncategorised.len()).collect()
+                    } else {
+                        self.uncategorised
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, tx)| {
+                                self.fuzzy_matcher.fuzzy_matches(&pattern, &tx.description)
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    };
                 }
-            })
-            .map(|(i, _)| i)
-            .collect();
+                TodoSubTab::AiReview => {
+                    self.filtered_ai_review_idx = if pattern.is_empty() {
+                        (0..self.ai_reviews.len()).collect()
+                    } else {
+                        self.ai_reviews
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, r)| {
+                                self.fuzzy_matcher
+                                    .fuzzy_matches(&pattern, &r.transaction.description)
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    };
+                }
+                TodoSubTab::TransferReview => {
+                    self.filtered_transfer_review_idx = if pattern.is_empty() {
+                        (0..self.transfer_reviews.len()).collect()
+                    } else {
+                        self.transfer_reviews
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, tr)| {
+                                match (
+                                    self.tx_by_id.get(&tr.from_transaction_id),
+                                    self.tx_by_id.get(&tr.to_transaction_id),
+                                ) {
+                                    (Some(from), Some(to)) => {
+                                        self.fuzzy_matcher
+                                            .fuzzy_matches(&pattern, &from.description)
+                                            || self
+                                                .fuzzy_matcher
+                                                .fuzzy_matches(&pattern, &to.description)
+                                    }
+                                    _ => true,
+                                }
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    };
+                }
+            },
+        }
     }
 
     pub fn is_transfer_candidate(&self, tx_id: i64) -> bool {

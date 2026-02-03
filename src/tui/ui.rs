@@ -13,8 +13,8 @@ use super::app::{App, InputMode, Tab, TodoSubTab};
 const DETAILS_HEIGHT: u16 = 8;
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let has_db_search = app.db_search_active || app.input_mode == InputMode::DbSearch;
-    let has_fuzzy_search = app.fuzzy_search_active || app.input_mode == InputMode::FuzzySearch;
+    let has_db_search = app.db_search_active() || app.input_mode == InputMode::DbSearch;
+    let has_fuzzy_search = app.fuzzy_search_active() || app.input_mode == InputMode::FuzzySearch;
     let has_any_search = has_db_search || has_fuzzy_search;
 
     // Calculate how many search rows we need
