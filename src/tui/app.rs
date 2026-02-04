@@ -956,6 +956,9 @@ impl App {
         // Expand shortcuts like d: -> date:, a: -> account:, etc.
         self.expand_db_search_shortcuts();
 
+        // Jump to existing filter if typing a duplicate filter keyword
+        self.deduplicate_db_search_filter();
+
         let state = self.current_search_state_mut();
         let cursor = state.db_search_input.cursor();
         let input_value = state.db_search_input.value().to_string();
@@ -1018,6 +1021,112 @@ impl App {
                     // Replace input and position cursor at end of expansion
                     // Input::new puts cursor at end, so move back by the tail length
                     let tail_len = value.len() - cursor;
+                    state.db_search_input = Input::new(new_value);
+                    for _ in 0..tail_len {
+                        state.db_search_input.handle(InputRequest::GoToPrevChar);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Deduplicate filter keywords: if a filter like `date:` is typed when one
+    /// already exists, delete the new one and jump cursor to end of existing filter.
+    /// Any value typed after the duplicate keyword is appended to the existing filter.
+    ///
+    /// Example: `date:2024 date:2025` → `date:20242025` with cursor at end
+    fn deduplicate_db_search_filter(&mut self) {
+        const FILTER_KEYWORDS: &[&str] = &["date:", "account:", "amount:", "category:"];
+
+        let state = self.current_search_state_mut();
+        let cursor = state.db_search_input.cursor();
+        let value = state.db_search_input.value().to_string();
+
+        // For each filter keyword, check if it appears twice and cursor is in the second one
+        for keyword in FILTER_KEYWORDS {
+            // Find all occurrences of this keyword
+            let occurrences: Vec<usize> = value
+                .match_indices(keyword)
+                .filter(|(pos, _)| {
+                    // Must be at word boundary (start of input or preceded by space)
+                    *pos == 0
+                        || value
+                            .chars()
+                            .nth(*pos - 1)
+                            .map(|c| c.is_whitespace())
+                            .unwrap_or(false)
+                })
+                .map(|(pos, _)| pos)
+                .collect();
+
+            if occurrences.len() < 2 {
+                continue;
+            }
+
+            // Check if cursor is within or just after the second (or later) occurrence
+            let first_pos = occurrences[0];
+            for &dup_pos in &occurrences[1..] {
+                let dup_end = dup_pos + keyword.len();
+                // Cursor must be at or after the duplicate keyword
+                if cursor >= dup_pos {
+                    // Find the end of the first filter's value (next space or end of input)
+                    let first_value_start = first_pos + keyword.len();
+                    let first_value_end = value[first_value_start..]
+                        .find(|c: char| c.is_whitespace())
+                        .map(|i| first_value_start + i)
+                        .unwrap_or(value.len());
+
+                    // Find the end of the duplicate filter's value
+                    let dup_value_start = dup_end;
+                    let dup_value_end = value[dup_value_start..]
+                        .find(|c: char| c.is_whitespace())
+                        .map(|i| dup_value_start + i)
+                        .unwrap_or(value.len());
+
+                    // Only proceed if cursor is within the duplicate filter token
+                    if cursor > dup_value_end {
+                        continue;
+                    }
+
+                    // Extract value typed after duplicate keyword (portion before cursor)
+                    let extra_value = if cursor > dup_value_start {
+                        &value[dup_value_start..cursor]
+                    } else {
+                        ""
+                    };
+
+                    // Build new value:
+                    // 1. Everything up to end of first filter's value
+                    // 2. Append extra value from duplicate
+                    // 3. Add middle content (between first filter and duplicate)
+                    // 4. Add everything after the duplicate token
+                    let after_dup = if dup_value_end < value.len() {
+                        &value[dup_value_end..]
+                    } else {
+                        ""
+                    };
+
+                    // Insert extra value at end of first filter's value
+                    let mut new_value = String::with_capacity(value.len());
+                    new_value.push_str(&value[..first_value_end]);
+                    new_value.push_str(extra_value);
+                    // Add back the rest (between first filter end and duplicate start)
+                    if first_value_end < dup_pos {
+                        let middle = value[first_value_end..dup_pos].trim();
+                        if !middle.is_empty() {
+                            new_value.push(' ');
+                            new_value.push_str(middle);
+                        }
+                    }
+                    new_value.push_str(after_dup);
+
+                    // Position cursor at end of first filter's value + extra
+                    let new_cursor = first_value_end + extra_value.len();
+
+                    // Replace input
+                    let tail_len = new_value.len() - new_cursor;
+                    let state = self.current_search_state_mut();
                     state.db_search_input = Input::new(new_value);
                     for _ in 0..tail_len {
                         state.db_search_input.handle(InputRequest::GoToPrevChar);

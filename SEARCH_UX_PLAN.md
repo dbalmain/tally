@@ -28,12 +28,12 @@ Improve search UX with per-tab state, FTS5 passthrough, smart filter handling, a
   - ~~`c:` → `category:`~~
 - ~~Cursor moves to end of expanded text~~
 
-### Step 4: Filter deduplication/jump
-- When typing a filter that already exists (e.g., second `date:`):
-  - Delete the newly typed filter text
-  - Move cursor to end of existing filter
-  - Append any characters typed after the duplicate filter keyword
-- Example: existing `date:2024`, user types `date:2025` → becomes `date:20242025` with cursor at end
+### ~~Step 4: Filter deduplication/jump~~ ✓
+- ~~When typing a filter that already exists (e.g., second `date:`):~~
+  - ~~Delete the newly typed filter text~~
+  - ~~Move cursor to end of existing filter~~
+  - ~~Append any characters typed after the duplicate filter keyword~~
+- ~~Example: existing `date:2024`, user types `date:2025` → becomes `date:20242025` with cursor at end~~
 
 ### Step 5: Visual dimming
 - Dim non-active query sections based on cursor position
