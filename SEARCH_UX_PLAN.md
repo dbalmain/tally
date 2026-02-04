@@ -20,13 +20,13 @@ Improve search UX with per-tab state, FTS5 passthrough, smart filter handling, a
 - ~~Auto-balance unclosed parentheses to prevent query errors~~
 - ~~Treat `)` as word boundary for prefix matching~~
 
-### Step 3: Shortcut expansion
-- Expand shortcuts immediately in input text (visible to user):
-  - `d:` → `date:`
-  - `a:` → `account:`
-  - `am:` → `amount:`
-  - `c:` → `category:`
-- Cursor moves to end of expanded text
+### ~~Step 3: Shortcut expansion~~ ✓
+- ~~Expand shortcuts immediately in input text (visible to user):~~
+  - ~~`d:` → `date:`~~
+  - ~~`a:` → `account:`~~
+  - ~~`am:` → `amount:`~~
+  - ~~`c:` → `category:`~~
+- ~~Cursor moves to end of expanded text~~
 
 ### Step 4: Filter deduplication/jump
 - When typing a filter that already exists (e.g., second `date:`):

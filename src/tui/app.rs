@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tui_input::Input;
+use tui_input::{Input, InputRequest};
 
 use crate::{
     Account, Bank, Category, CategorySource, DbSearchQuery, FuzzyMatcher, Transaction,
@@ -952,6 +952,11 @@ impl App {
     pub fn handle_db_search_input(&mut self, req: tui_input::InputRequest) {
         let state = self.current_search_state_mut();
         state.db_search_input.handle(req);
+
+        // Expand shortcuts like d: -> date:, a: -> account:, etc.
+        self.expand_db_search_shortcuts();
+
+        let state = self.current_search_state_mut();
         let cursor = state.db_search_input.cursor();
         let input_value = state.db_search_input.value().to_string();
         let (query, transition_to_fuzzy) =
@@ -972,6 +977,55 @@ impl App {
         }
         self.current_search_state_mut().selected_index = 0;
         self.selected_index = 0;
+    }
+
+    /// Expand filter shortcuts at cursor position:
+    /// - `d:` → `date:`
+    /// - `a:` → `account:`
+    /// - `am:` → `amount:`
+    /// - `c:` → `category:`
+    fn expand_db_search_shortcuts(&mut self) {
+        const SHORTCUTS: &[(&str, &str)] = &[
+            ("am:", "amount:"),
+            ("d:", "date:"),
+            ("a:", "account:"),
+            ("c:", "category:"),
+        ];
+
+        let state = self.current_search_state_mut();
+        let cursor = state.db_search_input.cursor();
+        let value = state.db_search_input.value();
+
+        // Check if any shortcut ends at cursor position
+        for (shortcut, expansion) in SHORTCUTS {
+            if cursor >= shortcut.len() {
+                let start = cursor - shortcut.len();
+                // Only expand at word boundary (start of input or preceded by space)
+                let at_word_start = start == 0
+                    || value
+                        .chars()
+                        .nth(start - 1)
+                        .map(|c| c.is_whitespace())
+                        .unwrap_or(false);
+
+                if at_word_start && value[start..cursor] == **shortcut {
+                    // Build new value with expansion
+                    let mut new_value = String::with_capacity(value.len() + expansion.len());
+                    new_value.push_str(&value[..start]);
+                    new_value.push_str(expansion);
+                    new_value.push_str(&value[cursor..]);
+
+                    // Replace input and position cursor at end of expansion
+                    // Input::new puts cursor at end, so move back by the tail length
+                    let tail_len = value.len() - cursor;
+                    state.db_search_input = Input::new(new_value);
+                    for _ in 0..tail_len {
+                        state.db_search_input.handle(InputRequest::GoToPrevChar);
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     pub fn clear_db_search(&mut self) {
