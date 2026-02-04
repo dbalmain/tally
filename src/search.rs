@@ -60,7 +60,7 @@ impl DbSearchQuery {
     }
 
     /// Parse with cursor position for implicit prefix matching.
-    /// When cursor is at end of a term, adds * at that position for prefix matching.
+    /// When cursor is within a text term, adds * at that position for prefix matching.
     pub fn parse_with_cursor(input: &str, cursor: Option<usize>) -> (Self, bool) {
         let (input, transition_to_fuzzy) = if let Some(stripped) = input.strip_suffix(" ~") {
             (stripped, true)
@@ -70,7 +70,8 @@ impl DbSearchQuery {
 
         let mut query = DbSearchQuery::default();
         let mut text_parts: Vec<String> = Vec::new();
-        let mut text_token_ends: Vec<usize> = Vec::new(); // original positions where text tokens end
+        // Track (start, end) positions of text tokens in original input
+        let mut text_token_ranges: Vec<(usize, usize)> = Vec::new();
 
         for token_info in tokenize_with_positions(input) {
             let token = token_info.token;
@@ -93,22 +94,29 @@ impl DbSearchQuery {
                 query.categories = rest.split('|').map(|s| s.to_string()).collect();
             } else {
                 text_parts.push(token);
-                text_token_ends.push(token_info.end_pos);
+                text_token_ranges.push((token_info.start_pos, token_info.end_pos));
             }
         }
 
         let text = text_parts.join(" ");
 
-        // Find if cursor is at end of any text token, map to position in joined text
+        // Find if cursor is within any text token, map to position in joined text
         let cursor_in_text = cursor.and_then(|c| {
-            text_token_ends.iter().position(|&end| end == c).map(|idx| {
-                // Calculate position in joined text: sum of token lengths + spaces before
-                text_parts[..=idx]
-                    .iter()
-                    .map(|s| s.chars().count())
-                    .sum::<usize>()
-                    + idx // add idx spaces between tokens
-            })
+            text_token_ranges
+                .iter()
+                .enumerate()
+                .find(|(_, (start, end))| c >= *start && c <= *end)
+                .map(|(idx, (start, _))| {
+                    // Calculate position in joined text:
+                    // sum of previous token lengths + spaces + offset within current token
+                    let prev_len: usize = text_parts[..idx]
+                        .iter()
+                        .map(|s| s.chars().count())
+                        .sum();
+                    let spaces = idx; // spaces between tokens
+                    let offset_in_token = c - start;
+                    prev_len + spaces + offset_in_token
+                })
         });
 
         query.text_match = parse_db_text_match(&text, cursor_in_text);
@@ -149,18 +157,19 @@ impl DbSearchQuery {
     }
 }
 
-/// Token with its end position (character index) in the original input.
-/// End position is where the cursor would be if placed right after this token.
-struct TokenWithEnd {
+/// Token with its start and end positions (character indices) in the original input.
+struct TokenWithPos {
     token: String,
+    start_pos: usize,
     end_pos: usize,
 }
 
 /// Tokenize input handling quoted strings and backslash escapes.
-/// Returns tokens with their end positions for cursor tracking.
-fn tokenize_with_positions(input: &str) -> Vec<TokenWithEnd> {
+/// Returns tokens with their positions for cursor tracking.
+fn tokenize_with_positions(input: &str) -> Vec<TokenWithPos> {
     let mut tokens = Vec::new();
     let mut current = String::new();
+    let mut current_start = 0;
     let mut current_end = 0;
     let mut chars = input.chars().peekable();
     let mut in_quotes = false;
@@ -171,6 +180,9 @@ fn tokenize_with_positions(input: &str) -> Vec<TokenWithEnd> {
             '\\' if !in_quotes => {
                 // Backslash escape: consume next char literally
                 if let Some(next) = chars.next() {
+                    if current.is_empty() {
+                        current_start = pos;
+                    }
                     current.push(next);
                     pos += 2;
                     current_end = pos;
@@ -189,14 +201,19 @@ fn tokenize_with_positions(input: &str) -> Vec<TokenWithEnd> {
             ' ' | '\t' if !in_quotes => {
                 // End of token
                 if !current.is_empty() {
-                    tokens.push(TokenWithEnd {
+                    tokens.push(TokenWithPos {
                         token: std::mem::take(&mut current),
+                        start_pos: current_start,
                         end_pos: current_end,
                     });
                 }
                 pos += 1;
+                current_start = pos;
             }
             _ => {
+                if current.is_empty() {
+                    current_start = pos;
+                }
                 current.push(c);
                 pos += 1;
                 current_end = pos;
@@ -206,8 +223,9 @@ fn tokenize_with_positions(input: &str) -> Vec<TokenWithEnd> {
 
     // Don't forget the last token
     if !current.is_empty() {
-        tokens.push(TokenWithEnd {
+        tokens.push(TokenWithPos {
             token: current,
+            start_pos: current_start,
             end_pos: current_end,
         });
     }
@@ -249,21 +267,20 @@ fn parse_db_text_match(text: &str, cursor_pos: Option<usize>) -> DbTextMatch {
 
 /// Parse user FTS input into FTS5 query syntax.
 ///
-/// Syntax:
+/// Passthrough to FTS5 with minimal modification:
 /// - `term1 term2` → AND (implicit, FTS5 default)
 /// - `term*` → prefix match
 /// - `"phrase"` → exact phrase
-/// - `(A B|C D)` → (A B) OR (C D)
+/// - `foo OR bar` → native FTS5 OR syntax
+/// - `(group1) OR (group2)` → grouping with OR
 ///
-/// Translation:
-/// - `|` inside parentheses becomes ` OR `
-/// - Unquoted terms are passed through
-/// - Quoted phrases are passed through
-/// - If `cursor_pos` is Some and points to end of a term, inserts `*` there
+/// Modifications:
+/// - If `cursor_pos` is Some and points to end of a term, inserts `*` for live prefix matching
+/// - Auto-balances unclosed parentheses to prevent query errors
 fn parse_fts_query(input: &str, cursor_pos: Option<usize>) -> String {
     let mut result = String::new();
     let mut in_quotes = false;
-    let mut in_parens = false;
+    let mut open_parens = 0;
 
     for (i, c) in input.chars().enumerate() {
         match c {
@@ -272,16 +289,14 @@ fn parse_fts_query(input: &str, cursor_pos: Option<usize>) -> String {
                 result.push(c);
             }
             '(' if !in_quotes => {
-                in_parens = true;
+                open_parens += 1;
                 result.push(c);
             }
             ')' if !in_quotes => {
-                in_parens = false;
+                if open_parens > 0 {
+                    open_parens -= 1;
+                }
                 result.push(c);
-            }
-            '|' if !in_quotes && in_parens => {
-                // Translate | to OR inside parentheses
-                result.push_str(" OR ");
             }
             _ => {
                 result.push(c);
@@ -293,12 +308,18 @@ fn parse_fts_query(input: &str, cursor_pos: Option<usize>) -> String {
             if i + 1 == cursor && !in_quotes {
                 // Cursor is right after this character
                 let next_char = input.chars().nth(i + 1);
-                let at_word_boundary = next_char.map_or(true, |nc| nc.is_whitespace());
+                let at_word_boundary =
+                    next_char.map_or(true, |nc| nc.is_whitespace() || nc == ')');
                 if at_word_boundary && c.is_alphanumeric() {
                     result.push('*');
                 }
             }
         }
+    }
+
+    // Auto-balance unclosed parentheses
+    for _ in 0..open_parens {
+        result.push(')');
     }
 
     result
@@ -747,23 +768,34 @@ mod tests {
         // Phrase match
         assert_eq!(parse_fts_query("\"AAMI mar\"", None), "\"AAMI mar\"");
 
-        // OR groups
+        // Native FTS5 OR syntax (passthrough)
+        assert_eq!(parse_fts_query("foo OR bar", None), "foo OR bar");
         assert_eq!(
-            parse_fts_query("(AAMI Mar|AAMI Sep)", None),
-            "(AAMI Mar OR AAMI Sep)"
+            parse_fts_query("(foo bar) OR (baz qux)", None),
+            "(foo bar) OR (baz qux)"
         );
 
-        // Multiple OR groups
-        assert_eq!(
-            parse_fts_query("(foo|bar) baz (qux|quux)", None),
-            "(foo OR bar) baz (qux OR quux)"
-        );
-
-        // Pipe outside parens is preserved
+        // Pipe is passed through (not translated)
+        assert_eq!(parse_fts_query("(foo|bar)", None), "(foo|bar)");
         assert_eq!(parse_fts_query("foo|bar", None), "foo|bar");
 
         // Quoted phrase with pipe preserved
         assert_eq!(parse_fts_query("\"foo|bar\"", None), "\"foo|bar\"");
+    }
+
+    #[test]
+    fn test_parse_fts_query_auto_balance_parens() {
+        // Unclosed paren gets auto-closed
+        assert_eq!(parse_fts_query("(foo", None), "(foo)");
+        assert_eq!(parse_fts_query("(foo bar", None), "(foo bar)");
+        assert_eq!(parse_fts_query("((nested", None), "((nested))");
+
+        // Already balanced - no change
+        assert_eq!(parse_fts_query("(foo)", None), "(foo)");
+        assert_eq!(parse_fts_query("(a) (b)", None), "(a) (b)");
+
+        // Parens in quotes don't count
+        assert_eq!(parse_fts_query("\"(quoted\"", None), "\"(quoted\"");
     }
 
     #[test]
@@ -778,10 +810,17 @@ mod tests {
         // No prefix after explicit *, quote, or paren
         assert_eq!(parse_fts_query("coffee*", Some(7)), "coffee*");
         assert_eq!(parse_fts_query("\"coffee\"", Some(8)), "\"coffee\"");
-        assert_eq!(parse_fts_query("(foo|bar)", Some(9)), "(foo OR bar)");
 
         // Cursor not at word boundary -> no prefix
         assert_eq!(parse_fts_query("coffee", Some(3)), "coffee");
+
+        // Close-paren is treated as word boundary for prefix matching
+        // Cursor at position 4 is after "Tree", before ")"
+        assert_eq!(parse_fts_query("(Tree)", Some(5)), "(Tree*)");
+        assert_eq!(parse_fts_query("(foo bar)", Some(8)), "(foo bar*)");
+
+        // Cursor inside unclosed paren group - still gets prefix and auto-close
+        assert_eq!(parse_fts_query("(Tree", Some(5)), "(Tree*)");
     }
 
     #[test]
@@ -813,5 +852,14 @@ mod tests {
         // With filter, cursor at end of first text term
         let (q, _) = DbSearchQuery::parse_with_cursor("d:2024 aam oct", Some(10));
         assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "aam* oct"));
+
+        // Cursor within token before close-paren: (Treehous_) where _ is cursor at pos 9
+        // (=0, T=1, r=2, e=3, e=4, h=5, o=6, u=7, s=8, )=9
+        let (q, _) = DbSearchQuery::parse_with_cursor("(Treehous)", Some(9));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "(Treehous*)"));
+
+        // Cursor within token in middle of word
+        let (q, _) = DbSearchQuery::parse_with_cursor("(Tree)", Some(3));
+        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "(Tree)"));
     }
 }

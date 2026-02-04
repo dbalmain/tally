@@ -6,17 +6,19 @@ Improve search UX with per-tab state, FTS5 passthrough, smart filter handling, a
 
 ## Priority Order
 
-### Step 1: Per-tab search state
-- Each tab (and Todo subtab) maintains its own DB search and fuzzy search state
-- Switching tabs preserves search state for that tab
-- Only query/filter the currently visible tab's data
-- Reduces unnecessary DB queries
+### ~~Step 1: Per-tab search state~~ ✓
+- ~~Each tab (and Todo subtab) maintains its own DB search and fuzzy search state~~
+- ~~Switching tabs preserves search state for that tab~~
+- ~~Only query/filter the currently visible tab's data~~
+- ~~Reduces unnecessary DB queries~~
 
-### Step 2: FTS5 passthrough
-- Pass FTS query directly to SQLite FTS5 (users learn FTS5 syntax)
-- Only modification: add `*` at cursor position for live prefix matching
-- Remove custom `|` to `OR` translation - users use native FTS5 `OR`
-- Simplifies code, gives power users full FTS5 capabilities
+### ~~Step 2: FTS5 passthrough~~ ✓
+- ~~Pass FTS query directly to SQLite FTS5 (users learn FTS5 syntax)~~
+- ~~Only modification: add `*` at cursor position for live prefix matching~~
+- ~~Remove custom `|` to `OR` translation - users use native FTS5 `OR`~~
+- ~~Simplifies code, gives power users full FTS5 capabilities~~
+- ~~Auto-balance unclosed parentheses to prevent query errors~~
+- ~~Treat `)` as word boundary for prefix matching~~
 
 ### Step 3: Shortcut expansion
 - Expand shortcuts immediately in input text (visible to user):

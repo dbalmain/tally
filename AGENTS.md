@@ -207,8 +207,16 @@ Filters are pushed to SQL for efficient querying. Syntax:
 - `account:/Savings` — Any bank, account prefix "Savings"
 - `account:"ING/Orange"|"St George/Sav"` — Multiple patterns (OR)
 
-**Text matching:**
-- `groceries` — Case-insensitive substring match
+**Text search (FTS5 passthrough):**
+- `groceries` — FTS5 full-text search (matches word stems)
+- `coffee shop` — Implicit AND (both terms must match)
+- `coffee OR tea` — Native FTS5 OR syntax
+- `(coffee OR tea) breakfast` — Grouping with OR
+- `"coffee shop"` — Exact phrase match
+- `coff*` — Explicit prefix match
+- Live typing adds implicit `*` at cursor for prefix matching
+
+**Regex matching:**
 - `/coffee.*/i` — Regex (case-insensitive with `i` flag)
 - `/Coffee/` — Regex (case-sensitive)
 
