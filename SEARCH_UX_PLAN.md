@@ -64,11 +64,11 @@ Improve search UX with per-tab state, FTS5 passthrough, smart filter handling, a
 - ~~Ensures FTS query is always together at end~~
 - ~~Visual matches semantic parsing~~
 
-### Step 8: Fuzzy popup for account/category
-- Auto-trigger popup when typing `account:` or `category:` value
-- Fuzzy-match against available accounts/categories
-- On selection, insert value with backslash-escaped spaces (unless user started with `"`)
-- For `|` OR syntax: select once, manually add `|` for additional values
+### ~~Step 8: Fuzzy popup for account/category~~ ✓
+- ~~Auto-trigger popup when typing `account:` or `category:` value~~
+- ~~Fuzzy-match against available accounts/categories~~
+- ~~On selection, insert value with backslash-escaped spaces (unless user started with `"`)~~
+- ~~For `|` OR syntax: select once, manually add `|` for additional values~~
 
 ## Files to Modify
 

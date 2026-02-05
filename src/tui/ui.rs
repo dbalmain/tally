@@ -59,6 +59,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_no_match_popup(f, app);
     }
 
+    if app.filter_autocomplete.is_some() && app.input_mode == InputMode::DbSearch {
+        draw_filter_autocomplete_popup(f, app);
+    }
+
     if let Some(ref msg) = app.error_message {
         draw_error_popup(f, msg);
     }
@@ -1009,6 +1013,61 @@ fn draw_category_popup(f: &mut Frame, app: &App) {
 
     let suggestions_widget = Paragraph::new(suggestions);
     f.render_widget(suggestions_widget, chunks[1]);
+}
+
+fn draw_filter_autocomplete_popup(f: &mut Frame, app: &App) {
+    let Some(ref ac_state) = app.filter_autocomplete else {
+        return;
+    };
+
+    if ac_state.suggestions.is_empty() {
+        return;
+    }
+
+    // Position popup below the search bar, aligned with where the value starts
+    // Search bar position varies by tab:
+    // - Non-Todo tabs: search bar at y=2, popup at y=3
+    // - Todo tab: subtabs have height 2 (y=2-3), search bar at y=4, popup at y=5
+    let search_bar_y = if app.current_tab == Tab::Todo { 4 } else { 2 };
+    let y = search_bar_y + 1;
+
+    let max_items = 8.min(ac_state.suggestions.len());
+    let popup_height = max_items as u16;
+    let popup_width = 40.min(f.area().width.saturating_sub(4));
+
+    // Align with the start of the filter value (after the ":")
+    let x = (1 + ac_state.value_start as u16).min(f.area().width.saturating_sub(popup_width));
+
+    let area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, area);
+
+    // No border, just a background
+    let block = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(block, area);
+
+    // Calculate scroll offset for suggestions
+    let visible_height = area.height as usize;
+    let offset = calculate_scroll_offset(ac_state.selected, ac_state.suggestions.len(), visible_height);
+
+    let suggestions: Vec<Line> = ac_state
+        .suggestions
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible_height)
+        .map(|(i, suggestion)| {
+            let style = if i == ac_state.selected {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::styled(suggestion.as_str(), style)
+        })
+        .collect();
+
+    let suggestions_widget = Paragraph::new(suggestions);
+    f.render_widget(suggestions_widget, area);
 }
 
 fn draw_no_match_popup(f: &mut Frame, app: &App) {

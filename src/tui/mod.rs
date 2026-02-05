@@ -75,50 +75,80 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     }
                     _ => {}
                 },
-                InputMode::DbSearch => match key.code {
-                    KeyCode::Esc => app.clear_db_search(),
-                    KeyCode::Enter => app.confirm_db_search(),
-                    KeyCode::Tab => {
-                        if key.modifiers.contains(KeyModifiers::SHIFT) {
-                            app.previous_tab();
-                        } else {
-                            app.next_tab();
+                InputMode::DbSearch => {
+                    // Handle autocomplete popup navigation when active
+                    if app.filter_autocomplete_active() {
+                        match key.code {
+                            KeyCode::Down => {
+                                app.filter_autocomplete_next();
+                                continue;
+                            }
+                            KeyCode::Up => {
+                                app.filter_autocomplete_prev();
+                                continue;
+                            }
+                            KeyCode::Tab | KeyCode::Enter => {
+                                if app.filter_autocomplete_select() {
+                                    continue;
+                                }
+                                // If no selection made, fall through to normal behavior
+                            }
+                            KeyCode::Esc => {
+                                app.filter_autocomplete_close();
+                                continue;
+                            }
+                            _ => {
+                                // Other keys close popup and proceed normally
+                                // (the popup will re-open if still in a filter value)
+                            }
                         }
                     }
-                    KeyCode::BackTab => app.previous_tab(),
-                    KeyCode::Down => app.next(),
-                    KeyCode::Up => app.previous(),
-                    KeyCode::Char(c) => {
-                        app.handle_db_search_input(InputRequest::InsertChar(c));
-                    }
-                    KeyCode::Backspace => {
-                        app.handle_db_search_input(InputRequest::DeletePrevChar);
-                    }
-                    KeyCode::Delete => {
-                        app.handle_db_search_input(InputRequest::DeleteNextChar);
-                    }
-                    KeyCode::Left => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            app.handle_db_search_input(InputRequest::GoToPrevWord);
-                        } else {
-                            app.handle_db_search_input(InputRequest::GoToPrevChar);
+
+                    match key.code {
+                        KeyCode::Esc => app.clear_db_search(),
+                        KeyCode::Enter => app.confirm_db_search(),
+                        KeyCode::Tab => {
+                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                app.previous_tab();
+                            } else {
+                                app.next_tab();
+                            }
                         }
-                    }
-                    KeyCode::Right => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            app.handle_db_search_input(InputRequest::GoToNextWord);
-                        } else {
-                            app.handle_db_search_input(InputRequest::GoToNextChar);
+                        KeyCode::BackTab => app.previous_tab(),
+                        KeyCode::Down => app.next(),
+                        KeyCode::Up => app.previous(),
+                        KeyCode::Char(c) => {
+                            app.handle_db_search_input(InputRequest::InsertChar(c));
                         }
+                        KeyCode::Backspace => {
+                            app.handle_db_search_input(InputRequest::DeletePrevChar);
+                        }
+                        KeyCode::Delete => {
+                            app.handle_db_search_input(InputRequest::DeleteNextChar);
+                        }
+                        KeyCode::Left => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.handle_db_search_input(InputRequest::GoToPrevWord);
+                            } else {
+                                app.handle_db_search_input(InputRequest::GoToPrevChar);
+                            }
+                        }
+                        KeyCode::Right => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.handle_db_search_input(InputRequest::GoToNextWord);
+                            } else {
+                                app.handle_db_search_input(InputRequest::GoToNextChar);
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.handle_db_search_input(InputRequest::GoToStart);
+                        }
+                        KeyCode::End => {
+                            app.handle_db_search_input(InputRequest::GoToEnd);
+                        }
+                        _ => {}
                     }
-                    KeyCode::Home => {
-                        app.handle_db_search_input(InputRequest::GoToStart);
-                    }
-                    KeyCode::End => {
-                        app.handle_db_search_input(InputRequest::GoToEnd);
-                    }
-                    _ => {}
-                },
+                }
                 InputMode::FuzzySearch => match key.code {
                     KeyCode::Esc => app.clear_fuzzy_search(),
                     KeyCode::Enter => app.confirm_fuzzy_search(),

@@ -116,6 +116,97 @@ pub enum InputMode {
     TransferNoMatch,
 }
 
+/// Type of filter being autocompleted
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterAutocompleteType {
+    Account,
+    Category,
+}
+
+/// State for filter value autocomplete popup
+#[derive(Debug, Clone)]
+pub struct FilterAutocompleteState {
+    pub filter_type: FilterAutocompleteType,
+    pub suggestions: Vec<String>,
+    pub selected: usize,
+    /// Byte position in input where the filter value starts (after `account:` or `category:`)
+    pub value_start: usize,
+    /// Byte position where the filter value ends (current end of typed value)
+    pub value_end: usize,
+    /// Whether user started the value with a quote (determines escaping behavior)
+    pub quoted: bool,
+}
+
+/// Split a string by unescaped `|` characters.
+fn split_by_unescaped_pipe(s: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // Escaped character - include both the backslash and the next char
+            current.push(c);
+            if let Some(next) = chars.next() {
+                current.push(next);
+            }
+        } else if c == '|' {
+            // Unescaped pipe - end of segment
+            segments.push(current);
+            current = String::new();
+        } else {
+            current.push(c);
+        }
+    }
+    segments.push(current);
+    segments
+}
+
+/// Unescape a filter value (convert `\ ` to ` ` and `\|` to `|`).
+fn unescape_filter_value(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // Take the next character literally
+            if let Some(next) = chars.next() {
+                result.push(next);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Find the position of the first unescaped `|` in a string.
+fn find_first_unescaped_pipe(s: &str) -> Option<usize> {
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            chars.next(); // Skip escaped character
+        } else if c == '|' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the position of the last unescaped `|` in a string.
+fn find_last_unescaped_pipe(s: &str) -> Option<usize> {
+    let mut last_pipe = None;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            chars.next(); // Skip escaped character
+        } else if c == '|' {
+            last_pipe = Some(i);
+        }
+    }
+    last_pipe
+}
+
 /// Token type for filter reordering logic
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReorderTokenType {
@@ -172,6 +263,8 @@ pub struct App {
     pub confirm_action: Option<ConfirmAction>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
+    // Filter autocomplete state (for account:/category: filters)
+    pub filter_autocomplete: Option<FilterAutocompleteState>,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +430,7 @@ impl App {
             confirm_message: None,
             confirm_action: None,
             tab_search_state: HashMap::new(),
+            filter_autocomplete: None,
         };
         app.rebuild_caches();
         app
@@ -992,6 +1086,7 @@ impl App {
             }
             self.current_search_state_mut().selected_index = 0;
             self.selected_index = 0;
+            self.update_filter_autocomplete();
             return;
         }
 
@@ -1031,6 +1126,7 @@ impl App {
         }
         self.current_search_state_mut().selected_index = 0;
         self.selected_index = 0;
+        self.update_filter_autocomplete();
     }
 
     /// Expand filter shortcuts at cursor position:
@@ -1656,6 +1752,347 @@ impl App {
         self.current_search_state()
             .map(|s| s.db_search_input.visual_cursor())
             .unwrap_or(0)
+    }
+
+    // ==================== Filter Autocomplete ====================
+
+    /// Check if we're typing a filter value and should show autocomplete popup.
+    /// Call this after each input change to update autocomplete state.
+    pub fn update_filter_autocomplete(&mut self) {
+        let value = self.db_search_value().to_string();
+        let cursor = self.db_search_cursor();
+
+        // Find if cursor is inside an account: or category: filter value
+        if let Some((filter_type, value_start, value_end, quoted, already_selected)) =
+            self.find_filter_at_cursor(&value, cursor)
+        {
+            let typed_value = &value[value_start..value_end];
+            let suggestions =
+                self.build_filter_suggestions(filter_type, typed_value, &already_selected);
+
+            if suggestions.is_empty() {
+                self.filter_autocomplete = None;
+            } else {
+                // Preserve selection if we already had autocomplete state
+                let selected = self
+                    .filter_autocomplete
+                    .as_ref()
+                    .map(|s| s.selected.min(suggestions.len().saturating_sub(1)))
+                    .unwrap_or(0);
+
+                self.filter_autocomplete = Some(FilterAutocompleteState {
+                    filter_type,
+                    suggestions,
+                    selected,
+                    value_start,
+                    value_end,
+                    quoted,
+                });
+            }
+        } else {
+            self.filter_autocomplete = None;
+        }
+    }
+
+    /// Find if cursor is inside an account: or category: filter value.
+    /// Returns (filter_type, value_start, value_end, is_quoted, already_selected) if found.
+    /// For OR syntax (|), returns the segment after the last | before cursor.
+    /// `already_selected` contains values from other segments (to exclude from suggestions).
+    fn find_filter_at_cursor(
+        &self,
+        input: &str,
+        cursor: usize,
+    ) -> Option<(FilterAutocompleteType, usize, usize, bool, Vec<String>)> {
+        const FILTER_PREFIXES: &[(&str, FilterAutocompleteType)] = &[
+            ("account:", FilterAutocompleteType::Account),
+            ("a:", FilterAutocompleteType::Account),
+            ("category:", FilterAutocompleteType::Category),
+            ("c:", FilterAutocompleteType::Category),
+        ];
+
+        // Find all filter occurrences
+        for (prefix, filter_type) in FILTER_PREFIXES {
+            for (pos, _) in input.match_indices(prefix) {
+                // Must be at word boundary
+                let at_word_start = pos == 0
+                    || input
+                        .chars()
+                        .nth(pos - 1)
+                        .map(|c| c.is_whitespace())
+                        .unwrap_or(false);
+
+                if !at_word_start {
+                    continue;
+                }
+
+                let filter_value_start = pos + prefix.len();
+
+                // Determine if value is quoted
+                let is_quoted = input[filter_value_start..].starts_with('"');
+                let content_start = if is_quoted {
+                    filter_value_start + 1
+                } else {
+                    filter_value_start
+                };
+
+                // Find end of entire filter value (all segments including |)
+                // Must handle escaped characters (\ followed by any char)
+                let filter_value_end = if is_quoted {
+                    // Look for closing quote
+                    input[content_start..]
+                        .find('"')
+                        .map(|i| content_start + i)
+                        .unwrap_or(input.len())
+                } else {
+                    // End at unescaped whitespace
+                    let mut end = input.len();
+                    let mut chars = input[filter_value_start..].char_indices().peekable();
+                    while let Some((i, c)) = chars.next() {
+                        if c == '\\' {
+                            // Skip the next character (it's escaped)
+                            chars.next();
+                        } else if c.is_whitespace() {
+                            end = filter_value_start + i;
+                            break;
+                        }
+                    }
+                    end
+                };
+
+                // Check if cursor is within this filter value range
+                if cursor >= filter_value_start && cursor <= filter_value_end {
+                    // Find the segment the cursor is in (delimited by unescaped |)
+                    // Look for last unescaped | before cursor within the filter value
+                    let value_portion = &input[content_start..cursor.min(filter_value_end)];
+                    let segment_start =
+                        if let Some(pipe_pos) = find_last_unescaped_pipe(value_portion) {
+                            // Cursor is after a |, segment starts after the |
+                            content_start + pipe_pos + 1
+                        } else {
+                            content_start
+                        };
+
+                    // Find end of this segment (next unescaped | or end of filter value)
+                    let remaining = &input[segment_start..filter_value_end];
+                    let segment_end = find_first_unescaped_pipe(remaining)
+                        .map(|i| segment_start + i)
+                        .unwrap_or(filter_value_end);
+
+                    // Extract already-selected values from other segments
+                    // Need to split by unescaped | only
+                    let full_value = &input[content_start..filter_value_end];
+                    let current_segment = &input[segment_start..segment_end];
+                    let segments = split_by_unescaped_pipe(full_value);
+                    let already_selected: Vec<String> = segments
+                        .into_iter()
+                        .filter(|s| s != current_segment && !s.is_empty())
+                        .map(|s| unescape_filter_value(&s))
+                        .collect();
+
+                    return Some((
+                        *filter_type,
+                        segment_start,
+                        segment_end,
+                        is_quoted,
+                        already_selected,
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Build fuzzy-matched suggestions for the given filter type and typed value.
+    fn build_filter_suggestions(
+        &mut self,
+        filter_type: FilterAutocompleteType,
+        typed_value: &str,
+        already_selected: &[String],
+    ) -> Vec<String> {
+        match filter_type {
+            FilterAutocompleteType::Account => {
+                self.build_account_suggestions(typed_value, already_selected)
+            }
+            FilterAutocompleteType::Category => {
+                self.build_category_suggestions(typed_value, already_selected)
+            }
+        }
+    }
+
+    /// Build suggestions for account filter (Bank/Account format).
+    fn build_account_suggestions(
+        &mut self,
+        typed_value: &str,
+        already_selected: &[String],
+    ) -> Vec<String> {
+        let mut suggestions = Vec::new();
+
+        // Build all Bank/Account combinations
+        for account in self.accounts.values() {
+            if let Some(bank) = self.banks.get(&account.bank_id) {
+                let full_name = format!("{}/{}", bank.name, account.name);
+                suggestions.push(full_name);
+            }
+        }
+
+        // Also add bank-only suggestions (Bank/)
+        for bank in self.banks.values() {
+            suggestions.push(format!("{}/", bank.name));
+        }
+
+        // Filter out already-selected values
+        suggestions.retain(|s| !already_selected.contains(s));
+
+        // Filter by fuzzy matching
+        if typed_value.is_empty() {
+            suggestions.sort();
+            suggestions
+        } else {
+            let mut scored: Vec<_> = suggestions
+                .into_iter()
+                .filter_map(|s| {
+                    // Simple case-insensitive substring match for now
+                    let s_lower = s.to_lowercase();
+                    let typed_lower = typed_value.to_lowercase();
+                    if s_lower.contains(&typed_lower)
+                        || self.fuzzy_matcher.fuzzy_matches(typed_value, &s)
+                    {
+                        // Score by position of match (earlier = better)
+                        let score = s_lower.find(&typed_lower).unwrap_or(1000);
+                        Some((s, score))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            scored.sort_by_key(|(_, score)| *score);
+            scored.into_iter().map(|(s, _)| s).take(10).collect()
+        }
+    }
+
+    /// Build suggestions for category filter.
+    fn build_category_suggestions(
+        &mut self,
+        typed_value: &str,
+        already_selected: &[String],
+    ) -> Vec<String> {
+        let suggestions: Vec<String> = self
+            .categories
+            .iter()
+            .map(|c| c.path.clone())
+            .filter(|s| !already_selected.contains(s))
+            .collect();
+
+        if typed_value.is_empty() {
+            suggestions
+        } else {
+            let mut scored: Vec<_> = suggestions
+                .into_iter()
+                .filter_map(|s| {
+                    let s_lower = s.to_lowercase();
+                    let typed_lower = typed_value.to_lowercase();
+                    if s_lower.contains(&typed_lower)
+                        || self.fuzzy_matcher.fuzzy_matches(typed_value, &s)
+                    {
+                        let score = s_lower.find(&typed_lower).unwrap_or(1000);
+                        Some((s, score))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            scored.sort_by_key(|(_, score)| *score);
+            scored.into_iter().map(|(s, _)| s).take(10).collect()
+        }
+    }
+
+    /// Move to next suggestion in autocomplete popup.
+    pub fn filter_autocomplete_next(&mut self) {
+        if let Some(ref mut state) = self.filter_autocomplete {
+            if !state.suggestions.is_empty() {
+                state.selected = (state.selected + 1) % state.suggestions.len();
+            }
+        }
+    }
+
+    /// Move to previous suggestion in autocomplete popup.
+    pub fn filter_autocomplete_prev(&mut self) {
+        if let Some(ref mut state) = self.filter_autocomplete {
+            if !state.suggestions.is_empty() {
+                state.selected =
+                    (state.selected + state.suggestions.len() - 1) % state.suggestions.len();
+            }
+        }
+    }
+
+    /// Select current suggestion and insert into search input.
+    /// Returns true if a selection was made.
+    pub fn filter_autocomplete_select(&mut self) -> bool {
+        let Some(ac_state) = self.filter_autocomplete.take() else {
+            return false;
+        };
+
+        let Some(selected_value) = ac_state.suggestions.get(ac_state.selected).cloned() else {
+            return false;
+        };
+
+        // Escape the value appropriately
+        let escaped = if ac_state.quoted {
+            // Inside quotes, no escaping needed (but we keep the quote structure)
+            selected_value
+        } else if selected_value.contains(' ') || selected_value.contains('|') {
+            // Escape spaces with backslash
+            selected_value.replace(' ', "\\ ").replace('|', "\\|")
+        } else {
+            selected_value
+        };
+
+        // Replace the typed value with the selected value
+        let state = self.current_search_state_mut();
+        let old_value = state.db_search_input.value().to_string();
+
+        let mut new_value = String::with_capacity(old_value.len() + escaped.len());
+        new_value.push_str(&old_value[..ac_state.value_start]);
+        new_value.push_str(&escaped);
+        if ac_state.quoted {
+            // Add closing quote if it wasn't there
+            if ac_state.value_end >= old_value.len()
+                || !old_value[ac_state.value_end..].starts_with('"')
+            {
+                new_value.push('"');
+            }
+        }
+        // Don't add trailing space - user may want to type | for OR syntax
+        new_value.push_str(&old_value[ac_state.value_end..]);
+
+        // Position cursor after the inserted value
+        let new_cursor = ac_state.value_start + escaped.len() + if ac_state.quoted { 1 } else { 0 };
+        let tail_len = new_value.len().saturating_sub(new_cursor);
+
+        state.db_search_input = Input::new(new_value);
+        for _ in 0..tail_len {
+            state.db_search_input.handle(InputRequest::GoToPrevChar);
+        }
+
+        // Re-parse query and reload
+        let cursor = state.db_search_input.cursor();
+        let input_value = state.db_search_input.value().to_string();
+        let (query, _) = DbSearchQuery::parse_with_cursor(&input_value, Some(cursor));
+        state.db_search_query = query;
+        self.reload_current_tab();
+        self.selected_index = 0;
+
+        true
+    }
+
+    /// Close autocomplete popup without selecting.
+    pub fn filter_autocomplete_close(&mut self) {
+        self.filter_autocomplete = None;
+    }
+
+    /// Check if filter autocomplete popup is active.
+    pub fn filter_autocomplete_active(&self) -> bool {
+        self.filter_autocomplete.is_some()
     }
 
     // ==================== Fuzzy Search ====================
