@@ -52,11 +52,11 @@ Improve search UX with per-tab state, FTS5 passthrough, smart filter handling, a
 - ~~Deleting either `/` delimiter: deletes entire regex including flags~~
 - ~~Empty regex (`//` or `//i`) is ignored (not treated as regex match)~~
 
-### Step 6: Visual dimming
-- Dim non-active query sections based on cursor position
-- Active section (where cursor is) shown solid
-- Filters vs FTS text visually distinguished
-- Helps users understand query structure
+### ~~Step 6: Visual dimming~~ ✓
+- ~~Dim non-active query sections based on cursor position~~
+- ~~Active section (where cursor is) shown solid~~
+- ~~Filters vs FTS text visually distinguished~~
+- ~~Helps users understand query structure~~
 
 ### ~~Step 7: Auto-reordering filters~~ ✓
 - ~~When a filter is typed after FTS terms, move it before FTS portion~~
