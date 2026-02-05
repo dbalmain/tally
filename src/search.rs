@@ -6,35 +6,22 @@ use nucleo_matcher::{
 
 use crate::{AccountPattern, TransactionFilter};
 
-/// Text matching mode for DB search
+/// Regex match for DB search
 #[derive(Debug, Clone, Default)]
-pub enum DbTextMatch {
-    #[default]
-    None,
-    /// FTS5 full-text search query
-    Fts {
-        /// The FTS5 query string (translated from user input)
-        query: String,
-        /// The original user input
-        original: String,
-    },
-    /// Regex match using SQLite REGEXP UDF
-    Regex {
-        /// The regex pattern string (with (?i) prefix if case-insensitive)
-        pattern: String,
-        /// The original input (e.g., "/pattern/i")
-        original: String,
-    },
+pub struct DbRegexMatch {
+    /// The regex pattern string (with (?i) prefix if case-insensitive)
+    pub pattern: String,
+    /// The original input (e.g., "/pattern/i")
+    pub original: String,
 }
 
-impl DbTextMatch {
-    pub fn is_empty(&self) -> bool {
-        match self {
-            DbTextMatch::None => true,
-            DbTextMatch::Fts { original, .. } => original.is_empty(),
-            DbTextMatch::Regex { original, .. } => original.is_empty(),
-        }
-    }
+/// FTS match for DB search
+#[derive(Debug, Clone, Default)]
+pub struct DbFtsMatch {
+    /// The FTS5 query string (translated from user input)
+    pub query: String,
+    /// The original user input
+    pub original: String,
 }
 
 /// DB-backed search query with structured filters and text/regex matching.
@@ -49,7 +36,10 @@ pub struct DbSearchQuery {
     pub accounts: Vec<AccountPattern>,
     /// Category patterns (pipe-separated for OR, contains match)
     pub categories: Vec<String>,
-    pub text_match: DbTextMatch,
+    /// Regex match (optional, can coexist with FTS)
+    pub regex_match: Option<DbRegexMatch>,
+    /// FTS match (optional, can coexist with regex)
+    pub fts_match: Option<DbFtsMatch>,
 }
 
 impl DbSearchQuery {
@@ -70,6 +60,7 @@ impl DbSearchQuery {
 
         let mut query = DbSearchQuery::default();
         let mut text_parts: Vec<String> = Vec::new();
+        let mut regex_token: Option<String> = None;
         // Track (start, end) positions of text tokens in original input
         let mut text_token_ranges: Vec<(usize, usize)> = Vec::new();
 
@@ -92,34 +83,49 @@ impl DbSearchQuery {
                 .or_else(|| token.strip_prefix("c:"))
             {
                 query.categories = rest.split('|').map(|s| s.to_string()).collect();
+            } else if token.starts_with('/') && regex_token.is_none() {
+                // Regex token: /pattern/ or /pattern/i
+                regex_token = Some(token);
             } else {
                 text_parts.push(token);
                 text_token_ranges.push((token_info.start_pos, token_info.end_pos));
             }
         }
 
+        // Parse regex if present
+        if let Some(ref regex_str) = regex_token {
+            query.regex_match = parse_regex_match(regex_str);
+        }
+
+        // Parse FTS from remaining text parts
         let text = text_parts.join(" ");
+        if !text.is_empty() {
+            // Find if cursor is within any text token, map to position in joined text
+            let cursor_in_text = cursor.and_then(|c| {
+                text_token_ranges
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (start, end))| c >= *start && c <= *end)
+                    .map(|(idx, (start, _))| {
+                        // Calculate position in joined text:
+                        // sum of previous token lengths + spaces + offset within current token
+                        let prev_len: usize = text_parts[..idx]
+                            .iter()
+                            .map(|s| s.chars().count())
+                            .sum();
+                        let spaces = idx; // spaces between tokens
+                        let offset_in_token = c - start;
+                        prev_len + spaces + offset_in_token
+                    })
+            });
 
-        // Find if cursor is within any text token, map to position in joined text
-        let cursor_in_text = cursor.and_then(|c| {
-            text_token_ranges
-                .iter()
-                .enumerate()
-                .find(|(_, (start, end))| c >= *start && c <= *end)
-                .map(|(idx, (start, _))| {
-                    // Calculate position in joined text:
-                    // sum of previous token lengths + spaces + offset within current token
-                    let prev_len: usize = text_parts[..idx]
-                        .iter()
-                        .map(|s| s.chars().count())
-                        .sum();
-                    let spaces = idx; // spaces between tokens
-                    let offset_in_token = c - start;
-                    prev_len + spaces + offset_in_token
-                })
-        });
+            let fts_query = parse_fts_query(&text, cursor_in_text);
+            query.fts_match = Some(DbFtsMatch {
+                query: fts_query,
+                original: text,
+            });
+        }
 
-        query.text_match = parse_db_text_match(&text, cursor_in_text);
         (query, transition_to_fuzzy)
     }
 
@@ -131,7 +137,8 @@ impl DbSearchQuery {
             && self.amount_max.is_none()
             && self.accounts.is_empty()
             && self.categories.is_empty()
-            && self.text_match.is_empty()
+            && self.regex_match.is_none()
+            && self.fts_match.is_none()
     }
 
     /// Convert to a TransactionFilter for database queries.
@@ -143,14 +150,8 @@ impl DbSearchQuery {
             amount_max: self.amount_max,
             account_patterns: self.accounts.clone(),
             category_patterns: self.categories.clone(),
-            fts_query: match &self.text_match {
-                DbTextMatch::Fts { query, .. } => Some(query.clone()),
-                _ => None,
-            },
-            description_regex: match &self.text_match {
-                DbTextMatch::Regex { pattern, .. } => Some(pattern.clone()),
-                _ => None,
-            },
+            fts_query: self.fts_match.as_ref().map(|f| f.query.clone()),
+            description_regex: self.regex_match.as_ref().map(|r| r.pattern.clone()),
             limit,
             ..Default::default()
         }
@@ -164,8 +165,11 @@ struct TokenWithPos {
     end_pos: usize,
 }
 
-/// Tokenize input handling quoted strings and backslash escapes.
+/// Tokenize input handling quoted strings, backslash escapes, and regex literals.
 /// Returns tokens with their positions for cursor tracking.
+///
+/// Regex tokens start with `/` at a word boundary and consume until closing `/` (with optional flags),
+/// allowing unescaped spaces within the regex. Use `\/` to include a literal `/` in the pattern.
 fn tokenize_with_positions(input: &str) -> Vec<TokenWithPos> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -173,10 +177,72 @@ fn tokenize_with_positions(input: &str) -> Vec<TokenWithPos> {
     let mut current_end = 0;
     let mut chars = input.chars().peekable();
     let mut in_quotes = false;
+    let mut in_regex = false;
+    let mut regex_closed = false; // After closing /, consuming flags
     let mut pos = 0;
 
     while let Some(c) = chars.next() {
         match c {
+            '/' if !in_quotes && !in_regex && current.is_empty() => {
+                // Start of regex token (at word boundary since current is empty)
+                current_start = pos;
+                current.push(c);
+                pos += 1;
+                current_end = pos;
+                in_regex = true;
+                regex_closed = false;
+            }
+            '\\' if in_regex && !regex_closed => {
+                // Backslash inside regex - consume it and the next char literally
+                current.push(c);
+                pos += 1;
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                    pos += 1;
+                }
+                current_end = pos;
+            }
+            '/' if in_regex && !regex_closed => {
+                // Closing slash of regex (not escaped, handled above)
+                current.push(c);
+                pos += 1;
+                current_end = pos;
+                regex_closed = true;
+            }
+            c if in_regex && regex_closed => {
+                // After closing /, only consume valid flag chars (i, g, m, s, etc.)
+                if c.is_ascii_alphabetic() {
+                    current.push(c);
+                    pos += 1;
+                    current_end = pos;
+                } else {
+                    // End of regex token, push it and handle this char
+                    tokens.push(TokenWithPos {
+                        token: std::mem::take(&mut current),
+                        start_pos: current_start,
+                        end_pos: current_end,
+                    });
+                    in_regex = false;
+                    regex_closed = false;
+
+                    // Handle the current char (space ends, otherwise start new token)
+                    if c == ' ' || c == '\t' {
+                        pos += 1;
+                        current_start = pos;
+                    } else {
+                        current_start = pos;
+                        current.push(c);
+                        pos += 1;
+                        current_end = pos;
+                    }
+                }
+            }
+            _ if in_regex => {
+                // Inside regex (before closing /), consume everything including spaces
+                current.push(c);
+                pos += 1;
+                current_end = pos;
+            }
             '\\' if !in_quotes => {
                 // Backslash escape: consume next char literally
                 if let Some(next) = chars.next() {
@@ -233,36 +299,34 @@ fn tokenize_with_positions(input: &str) -> Vec<TokenWithPos> {
     tokens
 }
 
-fn parse_db_text_match(text: &str, cursor_pos: Option<usize>) -> DbTextMatch {
-    if text.is_empty() {
-        return DbTextMatch::None;
-    }
-
+/// Parse a regex token like /pattern/ or /pattern/i into DbRegexMatch.
+/// Returns None for empty patterns (e.g., `//` or `//i`).
+fn parse_regex_match(text: &str) -> Option<DbRegexMatch> {
     // Check for regex: /pattern/ or /pattern/i
-    if let Some((pattern, flags)) = text.strip_prefix('/').and_then(|rest| {
-        rest.rfind('/')
-            .map(|end_slash| (&rest[..end_slash], &rest[end_slash + 1..]))
-    }) {
-        let case_insensitive = flags.contains('i');
+    text.strip_prefix('/').and_then(|rest| {
+        rest.rfind('/').and_then(|end_slash| {
+            let pattern = &rest[..end_slash];
 
-        let regex_pattern = if case_insensitive {
-            format!("(?i){}", pattern)
-        } else {
-            pattern.to_string()
-        };
+            // Ignore empty patterns
+            if pattern.is_empty() {
+                return None;
+            }
 
-        return DbTextMatch::Regex {
-            pattern: regex_pattern,
-            original: text.to_string(),
-        };
-    }
+            let flags = &rest[end_slash + 1..];
+            let case_insensitive = flags.contains('i');
 
-    // Default: FTS query
-    let query = parse_fts_query(text, cursor_pos);
-    DbTextMatch::Fts {
-        query,
-        original: text.to_string(),
-    }
+            let regex_pattern = if case_insensitive {
+                format!("(?i){}", pattern)
+            } else {
+                pattern.to_string()
+            };
+
+            Some(DbRegexMatch {
+                pattern: regex_pattern,
+                original: text.to_string(),
+            })
+        })
+    })
 }
 
 /// Parse user FTS input into FTS5 query syntax.
@@ -469,9 +533,7 @@ mod tests {
     #[test]
     fn test_parse_simple_fts() {
         let (q, transition) = DbSearchQuery::parse("coffee shop");
-        assert!(
-            matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee shop")
-        );
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee shop");
         assert!(q.date_from.is_none());
         assert!(!transition);
     }
@@ -479,17 +541,81 @@ mod tests {
     #[test]
     fn test_parse_regex() {
         let (q, _) = DbSearchQuery::parse("/cof.*shop/i");
-        assert!(
-            matches!(q.text_match, DbTextMatch::Regex { ref pattern, .. } if pattern == "(?i)cof.*shop")
-        );
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, "(?i)cof.*shop");
+        assert!(q.fts_match.is_none());
     }
 
     #[test]
     fn test_parse_regex_case_sensitive() {
         let (q, _) = DbSearchQuery::parse("/Coffee/");
-        assert!(
-            matches!(q.text_match, DbTextMatch::Regex { ref pattern, .. } if pattern == "Coffee")
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, "Coffee");
+        assert!(q.fts_match.is_none());
+    }
+
+    #[test]
+    fn test_parse_regex_with_fts() {
+        // Regex and FTS can coexist
+        let (q, _) = DbSearchQuery::parse("/pattern/i groceries");
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, "(?i)pattern");
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "groceries");
+
+        // Filter converts both
+        let filter = q.to_filter(None);
+        assert_eq!(filter.description_regex, Some("(?i)pattern".to_string()));
+        assert_eq!(filter.fts_query, Some("groceries".to_string()));
+    }
+
+    #[test]
+    fn test_parse_regex_with_spaces() {
+        // Regex can contain unescaped spaces
+        let (q, _) = DbSearchQuery::parse("/coffee shop/i");
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, "(?i)coffee shop");
+        assert!(q.fts_match.is_none());
+
+        // Regex with spaces followed by FTS
+        let (q, _) = DbSearchQuery::parse("/coffee shop/i groceries");
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, "(?i)coffee shop");
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "groceries");
+
+        // Regex with spaces followed by filter
+        let (q, _) = DbSearchQuery::parse("/coffee shop/ date:2024");
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, "coffee shop");
+        assert_eq!(
+            q.date_from,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
         );
+    }
+
+    #[test]
+    fn test_parse_empty_regex_ignored() {
+        // Empty regex is ignored
+        let (q, _) = DbSearchQuery::parse("//");
+        assert!(q.regex_match.is_none());
+
+        // Empty regex with flag is ignored
+        let (q, _) = DbSearchQuery::parse("//i");
+        assert!(q.regex_match.is_none());
+
+        // Empty regex with FTS still parses FTS
+        let (q, _) = DbSearchQuery::parse("// groceries");
+        assert!(q.regex_match.is_none());
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "groceries");
+    }
+
+    #[test]
+    fn test_parse_regex_escaped_slash() {
+        // Escaped slash inside regex
+        let (q, _) = DbSearchQuery::parse(r"/foo\/bar/");
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, r"foo\/bar");
+
+        // Escaped slash with spaces
+        let (q, _) = DbSearchQuery::parse(r"/path\/to\/file/i");
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, r"(?i)path\/to\/file");
+
+        // Escaped slash followed by FTS
+        let (q, _) = DbSearchQuery::parse(r"/a\/b/ coffee");
+        assert_eq!(q.regex_match.as_ref().unwrap().pattern, r"a\/b");
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
     }
 
     #[test]
@@ -593,14 +719,14 @@ mod tests {
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "Chase");
         assert_eq!(q.accounts[0].account_prefix, Some("".to_string()));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "groceries"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "groceries");
     }
 
     #[test]
     fn test_parse_transition_to_fuzzy() {
         let (q, transition) = DbSearchQuery::parse("date:2024 coffee ~");
         assert!(transition);
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
@@ -675,7 +801,7 @@ mod tests {
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "St");
         assert_eq!(q.accounts[0].account_prefix, None);
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
     }
 
     #[test]
@@ -725,7 +851,7 @@ mod tests {
         );
         assert_eq!(q.accounts[0].bank_prefix, "Chase");
         assert_eq!(q.categories, vec!["Food"]);
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
     }
 
     #[test]
@@ -827,39 +953,39 @@ mod tests {
     fn test_parse_with_cursor_implicit_prefix() {
         // Cursor at end of term -> adds prefix
         let (q, _) = DbSearchQuery::parse_with_cursor("coffee", Some(6));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee*"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee*");
 
         // Cursor at end of first term in multi-word -> adds prefix there
         let (q, _) = DbSearchQuery::parse_with_cursor("aam oct", Some(3));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "aam* oct"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "aam* oct");
 
         // Cursor in middle of term -> no prefix
         let (q, _) = DbSearchQuery::parse_with_cursor("coffee", Some(3));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
 
         // Cursor after space (not at end of term) -> no prefix
         let (q, _) = DbSearchQuery::parse_with_cursor("coffee ", Some(7));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
 
         // No cursor -> no prefix (programmatic use)
         let (q, _) = DbSearchQuery::parse("coffee");
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
 
         // With filter, cursor at end of text term
         let (q, _) = DbSearchQuery::parse_with_cursor("d:2024 coffee", Some(13));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "coffee*"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee*");
 
         // With filter, cursor at end of first text term
         let (q, _) = DbSearchQuery::parse_with_cursor("d:2024 aam oct", Some(10));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "aam* oct"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "aam* oct");
 
         // Cursor within token before close-paren: (Treehous_) where _ is cursor at pos 9
         // (=0, T=1, r=2, e=3, e=4, h=5, o=6, u=7, s=8, )=9
         let (q, _) = DbSearchQuery::parse_with_cursor("(Treehous)", Some(9));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "(Treehous*)"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "(Treehous*)");
 
         // Cursor within token in middle of word
         let (q, _) = DbSearchQuery::parse_with_cursor("(Tree)", Some(3));
-        assert!(matches!(q.text_match, DbTextMatch::Fts { ref query, .. } if query == "(Tree)"));
+        assert_eq!(q.fts_match.as_ref().unwrap().query, "(Tree)");
     }
 }

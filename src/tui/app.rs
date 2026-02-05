@@ -950,6 +950,32 @@ impl App {
     }
 
     pub fn handle_db_search_input(&mut self, req: tui_input::InputRequest) {
+        // Handle special regex behavior before standard input processing
+        if self.handle_db_search_regex_input(&req) {
+            // Regex handling consumed the input, re-parse and reload
+            let state = self.current_search_state_mut();
+            let cursor = state.db_search_input.cursor();
+            let input_value = state.db_search_input.value().to_string();
+            let (query, transition_to_fuzzy) =
+                DbSearchQuery::parse_with_cursor(&input_value, Some(cursor));
+
+            if transition_to_fuzzy {
+                let trimmed = input_value[..input_value.len() - 2].to_string();
+                let state = self.current_search_state_mut();
+                state.db_search_input = Input::new(trimmed.clone());
+                state.db_search_query = DbSearchQuery::parse(&trimmed).0;
+                self.reload_current_tab();
+                self.start_fuzzy_search();
+            } else {
+                let state = self.current_search_state_mut();
+                state.db_search_query = query;
+                self.reload_current_tab();
+            }
+            self.current_search_state_mut().selected_index = 0;
+            self.selected_index = 0;
+            return;
+        }
+
         let state = self.current_search_state_mut();
         state.db_search_input.handle(req);
 
@@ -958,6 +984,9 @@ impl App {
 
         // Jump to existing filter if typing a duplicate filter keyword
         self.deduplicate_db_search_filter();
+
+        // Jump to existing regex if typing a second /
+        self.deduplicate_db_search_regex();
 
         let state = self.current_search_state_mut();
         let cursor = state.db_search_input.cursor();
@@ -1135,6 +1164,217 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Handle regex deduplication: only one regex allowed in query.
+    /// When typing `/` and a regex already exists, delete the new `/` and jump cursor
+    /// to end of existing regex content (before closing `/` or flags).
+    fn deduplicate_db_search_regex(&mut self) {
+        let state = self.current_search_state_mut();
+        let cursor = state.db_search_input.cursor();
+        let value = state.db_search_input.value().to_string();
+
+        // Find existing regex using proper parsing (handles escaped slashes, etc.)
+        let Some((_regex_start, closing_slash, regex_end)) = self.find_regex_in_value(&value)
+        else {
+            return;
+        };
+
+        // Find `/` at word boundary OUTSIDE the existing regex
+        let dup_slash = value
+            .char_indices()
+            .find(|(pos, c)| {
+                *c == '/'
+                    && *pos >= regex_end // Must be after the existing regex
+                    && (*pos == 0
+                        || value
+                            .chars()
+                            .nth(*pos - 1)
+                            .map(|prev| prev.is_whitespace())
+                            .unwrap_or(false))
+            })
+            .map(|(pos, _)| pos);
+
+        let Some(dup_slash) = dup_slash else {
+            return;
+        };
+
+        // Cursor must be at or just after this duplicate slash
+        if cursor < dup_slash || cursor > dup_slash + 1 {
+            return;
+        }
+
+        // Build new value: remove the duplicate slash
+        let mut new_value = String::with_capacity(value.len() - 1);
+        new_value.push_str(&value[..dup_slash]);
+        if dup_slash + 1 < value.len() {
+            new_value.push_str(&value[dup_slash + 1..]);
+        }
+
+        // Position cursor at end of first regex content (before closing /)
+        let new_cursor = closing_slash.min(new_value.len());
+        let tail_len = new_value.len() - new_cursor;
+
+        let state = self.current_search_state_mut();
+        state.db_search_input = Input::new(new_value);
+        for _ in 0..tail_len {
+            state.db_search_input.handle(InputRequest::GoToPrevChar);
+        }
+    }
+
+    /// Handle special regex input behavior:
+    /// - Typing `/` when no regex exists: insert `//` and place cursor between
+    /// - Typing `/` when cursor is inside regex (before closing `/`): move cursor past closing `/`
+    /// - Deleting either `/` delimiter: delete entire regex including flags
+    ///
+    /// Returns true if the input was handled (caller should skip normal processing).
+    fn handle_db_search_regex_input(&mut self, req: &InputRequest) -> bool {
+        let state = self.current_search_state_mut();
+        let cursor = state.db_search_input.cursor();
+        let value = state.db_search_input.value().to_string();
+
+        // Find existing regex: /.../ or /.../flags
+        let regex_info = self.find_regex_in_value(&value);
+
+        // Check if previous char is backslash (for escaping / inside regex)
+        let prev_is_backslash = cursor > 0
+            && value
+                .chars()
+                .nth(cursor - 1)
+                .map(|c| c == '\\')
+                .unwrap_or(false);
+
+        match req {
+            InputRequest::InsertChar('/') => {
+                if let Some((regex_start, closing_slash, _regex_end)) = regex_info {
+                    // Regex exists - check if cursor is inside (between opening and closing /)
+                    if cursor > regex_start && cursor <= closing_slash {
+                        // If previous char is \, insert literal / (escaped slash in regex)
+                        if prev_is_backslash {
+                            return false; // Let normal input handling insert the /
+                        }
+                        // Move cursor past closing slash (but before flags)
+                        let new_cursor = closing_slash + 1;
+                        let tail_len = value.len() - new_cursor;
+                        let state = self.current_search_state_mut();
+                        state.db_search_input = Input::new(value);
+                        for _ in 0..tail_len {
+                            state.db_search_input.handle(InputRequest::GoToPrevChar);
+                        }
+                        return true;
+                    }
+                    // Cursor is outside regex - let deduplication handle it
+                    false
+                } else {
+                    // No regex exists - insert // and place cursor between
+                    let mut new_value = String::with_capacity(value.len() + 2);
+                    new_value.push_str(&value[..cursor]);
+                    new_value.push_str("//");
+                    new_value.push_str(&value[cursor..]);
+
+                    // Cursor goes between the slashes (one from end of inserted //)
+                    let new_cursor = cursor + 1;
+                    let tail_len = new_value.len() - new_cursor;
+                    let state = self.current_search_state_mut();
+                    state.db_search_input = Input::new(new_value);
+                    for _ in 0..tail_len {
+                        state.db_search_input.handle(InputRequest::GoToPrevChar);
+                    }
+                    true
+                }
+            }
+            InputRequest::DeletePrevChar => {
+                if let Some((regex_start, closing_slash, regex_end)) = regex_info {
+                    // Check if we're about to delete a / delimiter
+                    if cursor == regex_start + 1 || cursor == closing_slash + 1 {
+                        // Deleting opening or closing / - remove entire regex
+                        let mut new_value = String::with_capacity(value.len());
+                        new_value.push_str(&value[..regex_start]);
+                        // Skip space before regex if present
+                        let after = &value[regex_end..];
+                        let after = after.strip_prefix(' ').unwrap_or(after);
+                        if !new_value.is_empty() && !after.is_empty() {
+                            new_value.push(' ');
+                        }
+                        new_value.push_str(after);
+
+                        let new_cursor = regex_start.min(new_value.len());
+                        let tail_len = new_value.len() - new_cursor;
+                        let state = self.current_search_state_mut();
+                        state.db_search_input = Input::new(new_value);
+                        for _ in 0..tail_len {
+                            state.db_search_input.handle(InputRequest::GoToPrevChar);
+                        }
+                        return true;
+                    }
+                }
+                false
+            }
+            InputRequest::DeleteNextChar => {
+                if let Some((regex_start, closing_slash, regex_end)) = regex_info {
+                    // Check if we're about to delete a / delimiter
+                    if cursor == regex_start || cursor == closing_slash {
+                        // Deleting opening or closing / - remove entire regex
+                        let mut new_value = String::with_capacity(value.len());
+                        new_value.push_str(&value[..regex_start]);
+                        let after = &value[regex_end..];
+                        let after = after.strip_prefix(' ').unwrap_or(after);
+                        if !new_value.is_empty() && !after.is_empty() {
+                            new_value.push(' ');
+                        }
+                        new_value.push_str(after);
+
+                        let new_cursor = regex_start.min(new_value.len());
+                        let tail_len = new_value.len() - new_cursor;
+                        let state = self.current_search_state_mut();
+                        state.db_search_input = Input::new(new_value);
+                        for _ in 0..tail_len {
+                            state.db_search_input.handle(InputRequest::GoToPrevChar);
+                        }
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Find regex in value, returning (start, closing_slash_pos, end) if found.
+    /// End includes any flags after the closing slash.
+    fn find_regex_in_value(&self, value: &str) -> Option<(usize, usize, usize)> {
+        // Find opening / at word boundary
+        let mut chars = value.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c == '/' {
+                let at_word_boundary =
+                    i == 0 || value.chars().nth(i - 1).map(|c| c.is_whitespace()).unwrap_or(false);
+                if at_word_boundary {
+                    // Look for closing /
+                    let start = i;
+                    while let Some((j, c2)) = chars.next() {
+                        if c2 == '\\' {
+                            // Skip escaped character
+                            chars.next();
+                        } else if c2 == '/' {
+                            // Found closing /, now consume flags
+                            let mut end = j + 1;
+                            for (k, c3) in value[end..].char_indices() {
+                                if c3.is_ascii_alphabetic() {
+                                    end = j + 1 + k + 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            return Some((start, j, end));
+                        }
+                    }
+                    // No closing / found - unclosed regex
+                    return Some((start, value.len(), value.len()));
+                }
+            }
+        }
+        None
     }
 
     pub fn clear_db_search(&mut self) {
