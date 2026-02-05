@@ -58,11 +58,11 @@ Improve search UX with per-tab state, FTS5 passthrough, smart filter handling, a
 - Filters vs FTS text visually distinguished
 - Helps users understand query structure
 
-### Step 7: Auto-reordering filters
-- When a filter is typed after FTS terms, move it before FTS portion
-- Move cursor along with the filter
-- Ensures FTS query is always together at end
-- Visual matches semantic parsing
+### ~~Step 7: Auto-reordering filters~~ ✓
+- ~~When a filter is typed after FTS terms, move it before FTS portion~~
+- ~~Move cursor along with the filter~~
+- ~~Ensures FTS query is always together at end~~
+- ~~Visual matches semantic parsing~~
 
 ### Step 8: Fuzzy popup for account/category
 - Auto-trigger popup when typing `account:` or `category:` value

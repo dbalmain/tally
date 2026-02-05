@@ -116,6 +116,22 @@ pub enum InputMode {
     TransferNoMatch,
 }
 
+/// Token type for filter reordering logic
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReorderTokenType {
+    Filter,
+    Regex,
+    Fts,
+}
+
+/// Token info for filter reordering
+#[derive(Debug, Clone)]
+struct ReorderToken {
+    start: usize,
+    end: usize,
+    token_type: ReorderTokenType,
+}
+
 pub struct App {
     pub store: TransactionStore,
     pub current_tab: Tab,
@@ -952,7 +968,10 @@ impl App {
     pub fn handle_db_search_input(&mut self, req: tui_input::InputRequest) {
         // Handle special regex behavior before standard input processing
         if self.handle_db_search_regex_input(&req) {
-            // Regex handling consumed the input, re-parse and reload
+            // Regex handling consumed the input - also apply reordering
+            self.reorder_filters_before_fts();
+
+            // Re-parse and reload
             let state = self.current_search_state_mut();
             let cursor = state.db_search_input.cursor();
             let input_value = state.db_search_input.value().to_string();
@@ -987,6 +1006,9 @@ impl App {
 
         // Jump to existing regex if typing a second /
         self.deduplicate_db_search_regex();
+
+        // Move filters before FTS text (filters must come before free text)
+        self.reorder_filters_before_fts();
 
         let state = self.current_search_state_mut();
         let cursor = state.db_search_input.cursor();
@@ -1219,6 +1241,238 @@ impl App {
         state.db_search_input = Input::new(new_value);
         for _ in 0..tail_len {
             state.db_search_input.handle(InputRequest::GoToPrevChar);
+        }
+    }
+
+    /// Reorder filters and regex to appear before FTS text.
+    /// When a filter or regex is typed after free text, move it before the FTS portion.
+    ///
+    /// Examples:
+    /// - `groceries date:2024` → `date:2024 groceries`
+    /// - `coffee /pattern/` → `/pattern/ coffee`
+    fn reorder_filters_before_fts(&mut self) {
+        let state = self.current_search_state_mut();
+        let cursor = state.db_search_input.cursor();
+        let value = state.db_search_input.value().to_string();
+
+        // Parse tokens to identify structure
+        let tokens = Self::tokenize_for_reorder(&value);
+        if tokens.is_empty() {
+            return;
+        }
+
+        // Find the first FTS token (not a filter, not a regex)
+        let first_fts_idx = tokens.iter().position(|t| t.token_type == ReorderTokenType::Fts);
+
+        // Find if there's a filter or regex AFTER the first FTS token
+        let token_after_fts = first_fts_idx.and_then(|fts_idx| {
+            tokens[fts_idx + 1..]
+                .iter()
+                .enumerate()
+                .find(|(_, t)| {
+                    t.token_type == ReorderTokenType::Filter
+                        || t.token_type == ReorderTokenType::Regex
+                })
+                .map(|(i, t)| (fts_idx + 1 + i, t.clone()))
+        });
+
+        let Some((_token_idx, move_token)) = token_after_fts else {
+            return;
+        };
+
+        // Check if cursor is within or just after the token we want to move
+        // Only reorder if cursor is in the token being typed
+        if cursor < move_token.start || cursor > move_token.end {
+            return;
+        }
+
+        // Build new value with token moved before FTS
+        let first_fts_idx = first_fts_idx.unwrap();
+
+        // Calculate where to insert the token (just before first FTS token)
+        let insert_pos = tokens[first_fts_idx].start;
+
+        // Build new value:
+        // 1. Everything before insert position
+        // 2. The token + space
+        // 3. Everything from insert position to token start (minus trailing space before token)
+        // 4. Everything after token end
+        let before_insert = &value[..insert_pos];
+        let token_text = &value[move_token.start..move_token.end];
+
+        // Handle spacing: remove space before the token if present
+        let between_start = insert_pos;
+        let between_end = move_token.start;
+        let between = value[between_start..between_end].trim_end();
+
+        let after_token = &value[move_token.end..];
+        let after_token = after_token.trim_start();
+
+        let mut new_value = String::with_capacity(value.len());
+        new_value.push_str(before_insert);
+        new_value.push_str(token_text);
+        if !between.is_empty() || !after_token.is_empty() {
+            new_value.push(' ');
+        }
+        new_value.push_str(between);
+        if !between.is_empty() && !after_token.is_empty() {
+            new_value.push(' ');
+        }
+        new_value.push_str(after_token);
+
+        // Calculate new cursor position:
+        // Cursor was at `cursor` within the token. The token moved from move_token.start
+        // to insert_pos. Adjust cursor by the delta.
+        let cursor_offset_in_token = cursor - move_token.start;
+        let new_cursor = insert_pos + cursor_offset_in_token;
+
+        let tail_len = new_value.len().saturating_sub(new_cursor);
+        let state = self.current_search_state_mut();
+        state.db_search_input = Input::new(new_value);
+        for _ in 0..tail_len {
+            state.db_search_input.handle(InputRequest::GoToPrevChar);
+        }
+    }
+
+    /// Tokenize input for reorder logic, identifying token types and positions.
+    fn tokenize_for_reorder(input: &str) -> Vec<ReorderToken> {
+        let mut tokens = Vec::new();
+        let mut current_start = None;
+        let mut in_quotes = false;
+        let mut in_regex = false;
+        let mut regex_closed = false;
+        let mut pos = 0;
+        let mut chars = input.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            match c {
+                '/' if !in_quotes && !in_regex && current_start.is_none() => {
+                    // Start of regex
+                    current_start = Some(pos);
+                    pos += 1;
+                    in_regex = true;
+                    regex_closed = false;
+                }
+                '\\' if in_regex && !regex_closed => {
+                    // Escaped char in regex
+                    pos += 1;
+                    if chars.next().is_some() {
+                        pos += 1;
+                    }
+                }
+                '/' if in_regex && !regex_closed => {
+                    // Closing slash
+                    pos += 1;
+                    regex_closed = true;
+                }
+                c if in_regex && regex_closed => {
+                    // Consume flags
+                    if c.is_ascii_alphabetic() {
+                        pos += 1;
+                    } else {
+                        // End of regex token
+                        if let Some(start) = current_start.take() {
+                            tokens.push(ReorderToken {
+                                start,
+                                end: pos,
+                                token_type: ReorderTokenType::Regex,
+                            });
+                        }
+                        in_regex = false;
+                        regex_closed = false;
+                        // Handle current char
+                        if c == ' ' || c == '\t' {
+                            pos += 1;
+                        } else {
+                            current_start = Some(pos);
+                            pos += 1;
+                        }
+                    }
+                }
+                _ if in_regex => {
+                    // Inside regex
+                    pos += 1;
+                }
+                '\\' if !in_quotes => {
+                    // Escaped char outside regex
+                    if current_start.is_none() {
+                        current_start = Some(pos);
+                    }
+                    pos += 1;
+                    if chars.next().is_some() {
+                        pos += 1;
+                    }
+                }
+                '"' => {
+                    in_quotes = !in_quotes;
+                    if current_start.is_none() && in_quotes {
+                        current_start = Some(pos);
+                    }
+                    pos += 1;
+                }
+                ' ' | '\t' if !in_quotes => {
+                    // End of token
+                    if let Some(start) = current_start.take() {
+                        let token_text = &input[start..pos];
+                        let token_type = Self::classify_token(token_text);
+                        tokens.push(ReorderToken {
+                            start,
+                            end: pos,
+                            token_type,
+                        });
+                    }
+                    pos += 1;
+                }
+                _ => {
+                    if current_start.is_none() {
+                        current_start = Some(pos);
+                    }
+                    pos += 1;
+                }
+            }
+        }
+
+        // Handle final token
+        if in_regex {
+            if let Some(start) = current_start {
+                tokens.push(ReorderToken {
+                    start,
+                    end: pos,
+                    token_type: ReorderTokenType::Regex,
+                });
+            }
+        } else if let Some(start) = current_start {
+            let token_text = &input[start..pos];
+            let token_type = Self::classify_token(token_text);
+            tokens.push(ReorderToken {
+                start,
+                end: pos,
+                token_type,
+            });
+        }
+
+        tokens
+    }
+
+    /// Classify a token as Filter, Regex, or FTS based on its content
+    fn classify_token(token: &str) -> ReorderTokenType {
+        const FILTER_PREFIXES: &[&str] = &[
+            "date:",
+            "d:",
+            "account:",
+            "a:",
+            "amount:",
+            "am:",
+            "category:",
+            "c:",
+        ];
+
+        if token.starts_with('/') {
+            ReorderTokenType::Regex
+        } else if FILTER_PREFIXES.iter().any(|p| token.starts_with(p)) {
+            ReorderTokenType::Filter
+        } else {
+            ReorderTokenType::Fts
         }
     }
 
@@ -1646,5 +1900,106 @@ impl App {
                 self.selected_index -= 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenize_for_reorder_simple() {
+        let tokens = App::tokenize_for_reorder("groceries date:2024");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
+        assert_eq!(tokens[0].start, 0);
+        assert_eq!(tokens[0].end, 9);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Filter);
+        assert_eq!(tokens[1].start, 10);
+        assert_eq!(tokens[1].end, 19);
+    }
+
+    #[test]
+    fn test_tokenize_for_reorder_filter_first() {
+        let tokens = App::tokenize_for_reorder("date:2024 groceries");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Filter);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Fts);
+    }
+
+    #[test]
+    fn test_tokenize_for_reorder_with_regex() {
+        let tokens = App::tokenize_for_reorder("/pattern/i date:2024 coffee");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Regex);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Filter);
+        assert_eq!(tokens[2].token_type, ReorderTokenType::Fts);
+    }
+
+    #[test]
+    fn test_tokenize_for_reorder_filter_shortcuts() {
+        let tokens = App::tokenize_for_reorder("coffee d:2024");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Filter);
+
+        let tokens = App::tokenize_for_reorder("a:ING food");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Filter);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Fts);
+    }
+
+    #[test]
+    fn test_tokenize_for_reorder_quoted_filter() {
+        let tokens = App::tokenize_for_reorder(r#"coffee account:"ING/Orange Everyday""#);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Filter);
+    }
+
+    #[test]
+    fn test_tokenize_for_reorder_multiple_fts() {
+        let tokens = App::tokenize_for_reorder("coffee shop date:2024");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Fts);
+        assert_eq!(tokens[2].token_type, ReorderTokenType::Filter);
+    }
+
+    #[test]
+    fn test_classify_token() {
+        assert_eq!(App::classify_token("groceries"), ReorderTokenType::Fts);
+        assert_eq!(App::classify_token("date:2024"), ReorderTokenType::Filter);
+        assert_eq!(App::classify_token("d:2024"), ReorderTokenType::Filter);
+        assert_eq!(App::classify_token("account:ING"), ReorderTokenType::Filter);
+        assert_eq!(App::classify_token("a:ING"), ReorderTokenType::Filter);
+        assert_eq!(App::classify_token("amount:>100"), ReorderTokenType::Filter);
+        assert_eq!(App::classify_token("am:>100"), ReorderTokenType::Filter);
+        assert_eq!(App::classify_token("category:Food"), ReorderTokenType::Filter);
+        assert_eq!(App::classify_token("c:Food"), ReorderTokenType::Filter);
+        assert_eq!(App::classify_token("/pattern/i"), ReorderTokenType::Regex);
+    }
+
+    #[test]
+    fn test_tokenize_for_reorder_regex_after_fts() {
+        // Regex after FTS text should be detected for reordering
+        let tokens = App::tokenize_for_reorder("coffee /pattern/i");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
+        assert_eq!(tokens[0].start, 0);
+        assert_eq!(tokens[0].end, 6);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Regex);
+        assert_eq!(tokens[1].start, 7);
+        assert_eq!(tokens[1].end, 17);
+    }
+
+    #[test]
+    fn test_tokenize_for_reorder_mixed() {
+        // Filter, FTS, then regex - regex should be detected after FTS
+        let tokens = App::tokenize_for_reorder("date:2024 coffee /pat/");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].token_type, ReorderTokenType::Filter);
+        assert_eq!(tokens[1].token_type, ReorderTokenType::Fts);
+        assert_eq!(tokens[2].token_type, ReorderTokenType::Regex);
     }
 }
