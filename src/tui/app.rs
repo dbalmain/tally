@@ -207,6 +207,22 @@ fn find_last_unescaped_pipe(s: &str) -> Option<usize> {
     last_pipe
 }
 
+/// Find the end of a filter value starting at `start` within `s`.
+/// Accounts for escaped characters (e.g., `\ ` for space, `\|` for pipe).
+/// Returns the position of the first unescaped whitespace, or `s.len()` if none.
+fn find_filter_value_end(s: &str, start: usize) -> usize {
+    let mut chars = s[start..].char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            // Skip the next character (it's escaped)
+            chars.next();
+        } else if c.is_whitespace() {
+            return start + i;
+        }
+    }
+    s.len()
+}
+
 /// Token type for filter reordering logic
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReorderTokenType {
@@ -1217,19 +1233,13 @@ impl App {
                 let dup_end = dup_pos + keyword.len();
                 // Cursor must be at or after the duplicate keyword
                 if cursor >= dup_pos {
-                    // Find the end of the first filter's value (next space or end of input)
+                    // Find the end of the first filter's value (accounting for escaped spaces)
                     let first_value_start = first_pos + keyword.len();
-                    let first_value_end = value[first_value_start..]
-                        .find(|c: char| c.is_whitespace())
-                        .map(|i| first_value_start + i)
-                        .unwrap_or(value.len());
+                    let first_value_end = find_filter_value_end(&value, first_value_start);
 
                     // Find the end of the duplicate filter's value
                     let dup_value_start = dup_end;
-                    let dup_value_end = value[dup_value_start..]
-                        .find(|c: char| c.is_whitespace())
-                        .map(|i| dup_value_start + i)
-                        .unwrap_or(value.len());
+                    let dup_value_end = find_filter_value_end(&value, dup_value_start);
 
                     // Only proceed if cursor is within the duplicate filter token
                     if cursor > dup_value_end {
@@ -1845,18 +1855,7 @@ impl App {
                         .unwrap_or(input.len())
                 } else {
                     // End at unescaped whitespace
-                    let mut end = input.len();
-                    let mut chars = input[filter_value_start..].char_indices().peekable();
-                    while let Some((i, c)) = chars.next() {
-                        if c == '\\' {
-                            // Skip the next character (it's escaped)
-                            chars.next();
-                        } else if c.is_whitespace() {
-                            end = filter_value_start + i;
-                            break;
-                        }
-                    }
-                    end
+                    find_filter_value_end(input, filter_value_start)
                 };
 
                 // Check if cursor is within this filter value range
