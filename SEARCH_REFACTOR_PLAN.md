@@ -513,9 +513,10 @@ src/tui/
 - [x] Implement `CategoryFilter` with `|` OR support and completions
 
 ### Phase 5: Parser
-- [ ] Create `parse(config, input, cursor)` in `search/parse.rs`
-- [ ] Dispatch filter tokens to matching Filter trait impl
-- [ ] Compute `CursorContext` from cursor position
+- [x] Create `parse(config, input, cursor)` in `search/parse.rs`
+- [x] Dispatch filter tokens to matching Filter trait impl
+- [x] Compute `CursorContext` from cursor position
+- [x] SearchConfig holds available filters per context
 
 ### Phase 6: SQL building
 - [ ] Implement `ParsedQuery::to_sql()`
