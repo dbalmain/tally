@@ -501,9 +501,10 @@ src/tui/
 - [x] Move legacy search code to `search/legacy.rs` with re-exports
 
 ### Phase 3: Tokenizer
-- [ ] Create new tokenizer in `search/tokenize.rs`
-- [ ] Simple rules: filters (name:value), regex (/pattern/flags), FTS (rest)
-- [ ] Track spans for each token
+- [x] Create new tokenizer in `search/tokenize.rs`
+- [x] Simple rules: filters (name:value), regex (/pattern/flags), FTS (rest)
+- [x] Track spans for each token
+- [x] RawToken enum: Filter, Regex, Fts, Whitespace with span tracking
 
 ### Phase 4: Filter implementations
 - [ ] Implement `DateFilter` with `..` range syntax

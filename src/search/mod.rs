@@ -27,10 +27,12 @@ mod context;
 mod filter;
 mod legacy;
 mod query;
+mod tokenize;
 
 pub use context::CursorContext;
 pub use filter::{Filter, FilterResult};
 pub use query::{ParsedQuery, QueryPart, Span};
+pub use tokenize::{tokenize, RawToken};
 
 // Re-export legacy types for backwards compatibility during migration
 pub use legacy::{DbFtsMatch, DbRegexMatch, DbSearchQuery, FuzzyMatcher};
