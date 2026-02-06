@@ -25,12 +25,14 @@
 
 mod context;
 mod filter;
+pub mod filters;
 mod legacy;
 mod query;
 mod tokenize;
 
 pub use context::CursorContext;
 pub use filter::{Filter, FilterResult};
+pub use filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
 pub use query::{ParsedQuery, QueryPart, Span};
 pub use tokenize::{tokenize, RawToken};
 

@@ -507,10 +507,10 @@ src/tui/
 - [x] RawToken enum: Filter, Regex, Fts, Whitespace with span tracking
 
 ### Phase 4: Filter implementations
-- [ ] Implement `DateFilter` with `..` range syntax
-- [ ] Implement `AmountFilter` with `..` range syntax
-- [ ] Implement `AccountFilter` with `|` OR support and completions
-- [ ] Implement `CategoryFilter` with `|` OR support and completions
+- [x] Implement `DateFilter` with `..` range syntax
+- [x] Implement `AmountFilter` with `..` range syntax
+- [x] Implement `AccountFilter` with `|` OR support and completions
+- [x] Implement `CategoryFilter` with `|` OR support and completions
 
 ### Phase 5: Parser
 - [ ] Create `parse(config, input, cursor)` in `search/parse.rs`
