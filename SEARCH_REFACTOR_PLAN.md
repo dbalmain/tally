@@ -519,9 +519,10 @@ src/tui/
 - [x] SearchConfig holds available filters per context
 
 ### Phase 6: SQL building
-- [ ] Implement `ParsedQuery::to_sql()`
-- [ ] Handle FTS join separately
-- [ ] Test against existing queries
+- [x] Implement `ParsedQuery::to_sql()` returning (where_clause, params)
+- [x] Handle FTS via `fts_query()` method for separate JOIN
+- [x] Regex patterns use REGEXP function
+- [x] Test against existing queries
 
 ### Phase 7: SearchBar component
 - [ ] Create `SearchBar` in `src/tui/search_bar.rs`
