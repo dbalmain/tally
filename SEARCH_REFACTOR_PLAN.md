@@ -361,9 +361,11 @@ Visual feedback for filter validity:
 |-------|------------|
 | Valid, not selected | Dimmed |
 | Invalid, not selected | Red |
+| Empty/incomplete, non selected | Red |
 | Valid, selected/editing | Full highlighted color, cursor visible |
 | Invalid, selected/editing | Dimmed but highlighted color |
-| Empty/incomplete | Dimmed |
+| Empty/incomplete, non selected | Dimmed but highlighted color |
+
 
 ## Completion Popup Placement
 
@@ -382,7 +384,6 @@ The filter returns both suggestions and the anchor offset, so the search bar doe
 ```rust
 pub struct ParsedQuery {
     pub parts: Vec<QueryPart>,
-    pub transition_to_fuzzy: bool,
 }
 
 pub enum QueryPart {
@@ -525,10 +526,10 @@ src/tui/
 - [x] Test against existing queries
 
 ### Phase 7: SearchBar component
-- [ ] Create `SearchBar` in `src/tui/search_bar.rs`
-- [ ] Context-aware key handling (`:`, `|`, `/`)
-- [ ] Completion popup with anchor positioning
-- [ ] Validity-based styling
+- [x] Create `SearchBar` in `src/tui/search_bar.rs`
+- [x] Context-aware key handling (`:`, `|`, `/`)
+- [x] Completion popup with anchor positioning
+- [x] Validity-based styling
 
 ### Phase 8: Integration
 - [ ] Replace `TabSearchState` with `SearchBar`

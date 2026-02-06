@@ -2,7 +2,10 @@
 
 use rusqlite::types::Value;
 
+use crate::{AccountPattern, TransactionFilter};
+
 use super::filter::FilterResult;
+use super::filters::{parse_amount, parse_date_spec};
 
 /// A span of characters in the original input string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,8 +92,6 @@ impl QueryPart {
 pub struct ParsedQuery {
     /// The parsed parts of the query.
     pub parts: Vec<QueryPart>,
-    /// Whether the query ends with ` ~` to transition to fuzzy mode.
-    pub transition_to_fuzzy: bool,
 }
 
 impl ParsedQuery {
@@ -98,7 +99,6 @@ impl ParsedQuery {
     pub fn empty() -> Self {
         Self {
             parts: Vec::new(),
-            transition_to_fuzzy: false,
         }
     }
 
@@ -153,6 +153,109 @@ impl ParsedQuery {
             QueryPart::Fts { query, .. } if !query.is_empty() => Some(query.as_str()),
             _ => None,
         })
+    }
+
+    /// Convert to a TransactionFilter for use with existing store methods.
+    ///
+    /// This is a temporary bridge during the search refactor. It re-parses
+    /// filter values to populate the structured TransactionFilter fields.
+    pub fn to_transaction_filter(&self, limit: Option<usize>) -> TransactionFilter {
+        let mut filter = TransactionFilter {
+            limit,
+            ..Default::default()
+        };
+
+        for part in &self.parts {
+            match part {
+                QueryPart::Filter {
+                    name,
+                    value,
+                    result,
+                    ..
+                } => {
+                    if !matches!(result, FilterResult::Valid { .. }) {
+                        continue;
+                    }
+                    match *name {
+                        "date" => Self::extract_date(value, &mut filter),
+                        "amount" => Self::extract_amount(value, &mut filter),
+                        "account" => {
+                            for segment in value.split('|') {
+                                if !segment.is_empty() {
+                                    filter.account_patterns.push(AccountPattern::parse(segment));
+                                }
+                            }
+                        }
+                        "category" => {
+                            for segment in value.split('|') {
+                                if !segment.is_empty() {
+                                    filter.category_patterns.push(segment.to_string());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                QueryPart::Regex {
+                    pattern,
+                    valid: true,
+                    ..
+                } => {
+                    filter.description_regex = Some(pattern.clone());
+                }
+                QueryPart::Fts { query, .. } if !query.is_empty() => {
+                    filter.fts_query = Some(query.clone());
+                }
+                _ => {}
+            }
+        }
+
+        filter
+    }
+
+    fn extract_date(value: &str, filter: &mut TransactionFilter) {
+        if let Some((from, to)) = value.split_once("..") {
+            if !from.is_empty() {
+                if let Some((start, _)) = parse_date_spec(from) {
+                    filter.from_date = Some(start);
+                }
+            }
+            if !to.is_empty() {
+                if let Some((_, end)) = parse_date_spec(to) {
+                    filter.to_date = Some(end);
+                }
+            }
+        } else if let Some((start, end)) = parse_date_spec(value) {
+            filter.from_date = Some(start);
+            filter.to_date = Some(end);
+        }
+    }
+
+    fn extract_amount(value: &str, filter: &mut TransactionFilter) {
+        if let Some(rest) = value.strip_prefix('>') {
+            if let Some(cents) = parse_amount(rest) {
+                filter.amount_min = Some(cents + 1);
+            }
+        } else if let Some(rest) = value.strip_prefix('<') {
+            if let Some(cents) = parse_amount(rest) {
+                filter.amount_max = Some(cents - 1);
+            }
+        } else if let Some((from, to)) = value.split_once("..") {
+            if !from.is_empty() {
+                if let Some(cents) = parse_amount(from) {
+                    filter.amount_min = Some(cents);
+                }
+            }
+            if !to.is_empty() {
+                if let Some(cents) = parse_amount(to) {
+                    filter.amount_max = Some(cents);
+                }
+            }
+        } else if let Some(cents) = parse_amount(value) {
+            // Exact match
+            filter.amount_min = Some(cents);
+            filter.amount_max = Some(cents);
+        }
     }
 }
 
@@ -209,7 +312,6 @@ mod tests {
                     Value::Text("2024-12-31".to_string()),
                 ],
             )],
-            transition_to_fuzzy: false,
         };
 
         let (sql, params) = query.to_sql();
@@ -227,7 +329,6 @@ mod tests {
                 },
                 make_filter("amount", "ABS(amount_cents) > ?", vec![Value::Integer(10000)]),
             ],
-            transition_to_fuzzy: false,
         };
 
         let (sql, params) = query.to_sql();
@@ -239,7 +340,6 @@ mod tests {
     fn test_to_sql_regex() {
         let query = ParsedQuery {
             parts: vec![make_regex("(?i)coffee.*")],
-            transition_to_fuzzy: false,
         };
 
         let (sql, params) = query.to_sql();
@@ -257,7 +357,6 @@ mod tests {
                 },
                 make_fts("groceries*"),
             ],
-            transition_to_fuzzy: false,
         };
 
         assert_eq!(query.fts_query(), Some("groceries*"));
@@ -267,7 +366,6 @@ mod tests {
     fn test_fts_query_none() {
         let query = ParsedQuery {
             parts: vec![make_filter("date", "date >= ?", vec![])],
-            transition_to_fuzzy: false,
         };
 
         assert_eq!(query.fts_query(), None);

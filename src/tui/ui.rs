@@ -59,7 +59,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_no_match_popup(f, app);
     }
 
-    if app.filter_autocomplete.is_some() && app.input_mode == InputMode::DbSearch {
+    if app.filter_autocomplete_active() && app.input_mode == InputMode::DbSearch {
         draw_filter_autocomplete_popup(f, app);
     }
 
@@ -1016,7 +1016,10 @@ fn draw_category_popup(f: &mut Frame, app: &App) {
 }
 
 fn draw_filter_autocomplete_popup(f: &mut Frame, app: &App) {
-    let Some(ref ac_state) = app.filter_autocomplete else {
+    let Some(search_state) = app.current_search_state() else {
+        return;
+    };
+    let Some(ac_state) = search_state.search_bar.autocomplete() else {
         return;
     };
 
@@ -1035,8 +1038,8 @@ fn draw_filter_autocomplete_popup(f: &mut Frame, app: &App) {
     let popup_height = max_items as u16;
     let popup_width = 40.min(f.area().width.saturating_sub(4));
 
-    // Align with the start of the filter value (after the ":")
-    let x = (1 + ac_state.value_start as u16).min(f.area().width.saturating_sub(popup_width));
+    // Align with the anchor offset (after the ":")
+    let x = (1 + ac_state.anchor_offset as u16).min(f.area().width.saturating_sub(popup_width));
 
     let area = Rect::new(x, y, popup_width, popup_height);
 

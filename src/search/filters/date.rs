@@ -89,7 +89,7 @@ impl DateFilter {
 
 /// Parse a date spec (year, month, or full date) into a range.
 /// Returns (start_date, end_date) inclusive.
-fn parse_date_spec(s: &str) -> Option<(NaiveDate, NaiveDate)> {
+pub(crate) fn parse_date_spec(s: &str) -> Option<(NaiveDate, NaiveDate)> {
     let parts: Vec<&str> = s.split('-').collect();
 
     match parts.len() {

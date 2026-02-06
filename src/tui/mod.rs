@@ -1,7 +1,9 @@
 mod app;
+pub mod search_bar;
 mod ui;
 
 pub use app::App;
+pub use search_bar::SearchBar;
 
 use crossterm::{
     event::{

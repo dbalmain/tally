@@ -44,20 +44,13 @@ pub struct DbSearchQuery {
 
 impl DbSearchQuery {
     /// Parse a search query string with support for filters and text matching.
-    /// Returns the query and whether it ends with ` ~` (transition to fuzzy mode).
-    pub fn parse(input: &str) -> (Self, bool) {
+    pub fn parse(input: &str) -> Self {
         Self::parse_with_cursor(input, None)
     }
 
     /// Parse with cursor position for implicit prefix matching.
     /// When cursor is within a text term, adds * at that position for prefix matching.
-    pub fn parse_with_cursor(input: &str, cursor: Option<usize>) -> (Self, bool) {
-        let (input, transition_to_fuzzy) = if let Some(stripped) = input.strip_suffix(" ~") {
-            (stripped, true)
-        } else {
-            (input, false)
-        };
-
+    pub fn parse_with_cursor(input: &str, cursor: Option<usize>) -> Self {
         let mut query = DbSearchQuery::default();
         let mut text_parts: Vec<String> = Vec::new();
         let mut regex_token: Option<String> = None;
@@ -126,7 +119,7 @@ impl DbSearchQuery {
             });
         }
 
-        (query, transition_to_fuzzy)
+        query
     }
 
     /// Check if all query fields are empty.
@@ -532,22 +525,21 @@ mod tests {
 
     #[test]
     fn test_parse_simple_fts() {
-        let (q, transition) = DbSearchQuery::parse("coffee shop");
+        let q = DbSearchQuery::parse("coffee shop");
         assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee shop");
         assert!(q.date_from.is_none());
-        assert!(!transition);
     }
 
     #[test]
     fn test_parse_regex() {
-        let (q, _) = DbSearchQuery::parse("/cof.*shop/i");
+        let q = DbSearchQuery::parse("/cof.*shop/i");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, "(?i)cof.*shop");
         assert!(q.fts_match.is_none());
     }
 
     #[test]
     fn test_parse_regex_case_sensitive() {
-        let (q, _) = DbSearchQuery::parse("/Coffee/");
+        let q = DbSearchQuery::parse("/Coffee/");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, "Coffee");
         assert!(q.fts_match.is_none());
     }
@@ -555,7 +547,7 @@ mod tests {
     #[test]
     fn test_parse_regex_with_fts() {
         // Regex and FTS can coexist
-        let (q, _) = DbSearchQuery::parse("/pattern/i groceries");
+        let q = DbSearchQuery::parse("/pattern/i groceries");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, "(?i)pattern");
         assert_eq!(q.fts_match.as_ref().unwrap().query, "groceries");
 
@@ -568,17 +560,17 @@ mod tests {
     #[test]
     fn test_parse_regex_with_spaces() {
         // Regex can contain unescaped spaces
-        let (q, _) = DbSearchQuery::parse("/coffee shop/i");
+        let q = DbSearchQuery::parse("/coffee shop/i");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, "(?i)coffee shop");
         assert!(q.fts_match.is_none());
 
         // Regex with spaces followed by FTS
-        let (q, _) = DbSearchQuery::parse("/coffee shop/i groceries");
+        let q = DbSearchQuery::parse("/coffee shop/i groceries");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, "(?i)coffee shop");
         assert_eq!(q.fts_match.as_ref().unwrap().query, "groceries");
 
         // Regex with spaces followed by filter
-        let (q, _) = DbSearchQuery::parse("/coffee shop/ date:2024");
+        let q = DbSearchQuery::parse("/coffee shop/ date:2024");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, "coffee shop");
         assert_eq!(
             q.date_from,
@@ -589,15 +581,15 @@ mod tests {
     #[test]
     fn test_parse_empty_regex_ignored() {
         // Empty regex is ignored
-        let (q, _) = DbSearchQuery::parse("//");
+        let q = DbSearchQuery::parse("//");
         assert!(q.regex_match.is_none());
 
         // Empty regex with flag is ignored
-        let (q, _) = DbSearchQuery::parse("//i");
+        let q = DbSearchQuery::parse("//i");
         assert!(q.regex_match.is_none());
 
         // Empty regex with FTS still parses FTS
-        let (q, _) = DbSearchQuery::parse("// groceries");
+        let q = DbSearchQuery::parse("// groceries");
         assert!(q.regex_match.is_none());
         assert_eq!(q.fts_match.as_ref().unwrap().query, "groceries");
     }
@@ -605,22 +597,22 @@ mod tests {
     #[test]
     fn test_parse_regex_escaped_slash() {
         // Escaped slash inside regex
-        let (q, _) = DbSearchQuery::parse(r"/foo\/bar/");
+        let q = DbSearchQuery::parse(r"/foo\/bar/");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, r"foo\/bar");
 
         // Escaped slash with spaces
-        let (q, _) = DbSearchQuery::parse(r"/path\/to\/file/i");
+        let q = DbSearchQuery::parse(r"/path\/to\/file/i");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, r"(?i)path\/to\/file");
 
         // Escaped slash followed by FTS
-        let (q, _) = DbSearchQuery::parse(r"/a\/b/ coffee");
+        let q = DbSearchQuery::parse(r"/a\/b/ coffee");
         assert_eq!(q.regex_match.as_ref().unwrap().pattern, r"a\/b");
         assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
     }
 
     #[test]
     fn test_parse_date_range() {
-        let (q, _) = DbSearchQuery::parse("date:2024-01..2024-06");
+        let q = DbSearchQuery::parse("date:2024-01..2024-06");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
@@ -633,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_parse_date_single_full() {
-        let (q, _) = DbSearchQuery::parse("date:2024-03-15");
+        let q = DbSearchQuery::parse("date:2024-03-15");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
@@ -646,7 +638,7 @@ mod tests {
 
     #[test]
     fn test_parse_date_month() {
-        let (q, _) = DbSearchQuery::parse("date:2025-09");
+        let q = DbSearchQuery::parse("date:2025-09");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2025, 9, 1).unwrap())
@@ -659,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_parse_date_february_leap_year() {
-        let (q, _) = DbSearchQuery::parse("date:2024-02");
+        let q = DbSearchQuery::parse("date:2024-02");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap())
@@ -672,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_parse_date_year_only() {
-        let (q, _) = DbSearchQuery::parse("date:2024");
+        let q = DbSearchQuery::parse("date:2024");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
@@ -685,28 +677,28 @@ mod tests {
 
     #[test]
     fn test_parse_amount_range() {
-        let (q, _) = DbSearchQuery::parse("amount:50..200");
+        let q = DbSearchQuery::parse("amount:50..200");
         assert_eq!(q.amount_min, Some(5000));
         assert_eq!(q.amount_max, Some(20000));
     }
 
     #[test]
     fn test_parse_amount_greater() {
-        let (q, _) = DbSearchQuery::parse("amount:>100");
+        let q = DbSearchQuery::parse("amount:>100");
         assert_eq!(q.amount_min, Some(10000));
         assert!(q.amount_max.is_none());
     }
 
     #[test]
     fn test_parse_negative_amount() {
-        let (q, _) = DbSearchQuery::parse("amount:-50");
+        let q = DbSearchQuery::parse("amount:-50");
         assert_eq!(q.amount_min, Some(-5000));
         assert_eq!(q.amount_max, Some(-5000));
     }
 
     #[test]
     fn test_parse_combined() {
-        let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 account:Chase/ groceries");
+        let q = DbSearchQuery::parse("date:2024-01 amount:>100 account:Chase/ groceries");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
@@ -720,23 +712,6 @@ mod tests {
         assert_eq!(q.accounts[0].bank_prefix, "Chase");
         assert_eq!(q.accounts[0].account_prefix, Some("".to_string()));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "groceries");
-    }
-
-    #[test]
-    fn test_parse_transition_to_fuzzy() {
-        let (q, transition) = DbSearchQuery::parse("date:2024 coffee ~");
-        assert!(transition);
-        assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
-        assert_eq!(
-            q.date_from,
-            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
-        );
-    }
-
-    #[test]
-    fn test_parse_no_transition_without_space() {
-        let (_, transition) = DbSearchQuery::parse("coffee~");
-        assert!(!transition);
     }
 
     #[test]
@@ -775,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_parse_account_quoted() {
-        let (q, _) = DbSearchQuery::parse(r#"account:"ING/Orange Everyday""#);
+        let q = DbSearchQuery::parse(r#"account:"ING/Orange Everyday""#);
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "ING");
         assert_eq!(
@@ -786,7 +761,7 @@ mod tests {
 
     #[test]
     fn test_parse_account_backslash() {
-        let (q, _) = DbSearchQuery::parse(r"account:ING/Orange\ Everyday");
+        let q = DbSearchQuery::parse(r"account:ING/Orange\ Everyday");
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "ING");
         assert_eq!(
@@ -797,7 +772,7 @@ mod tests {
 
     #[test]
     fn test_parse_account_bank_only() {
-        let (q, _) = DbSearchQuery::parse("account:St coffee");
+        let q = DbSearchQuery::parse("account:St coffee");
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "St");
         assert_eq!(q.accounts[0].account_prefix, None);
@@ -806,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_parse_account_multiple() {
-        let (q, _) = DbSearchQuery::parse(r#"account:"ING/Orange"|"St George/Savings""#);
+        let q = DbSearchQuery::parse(r#"account:"ING/Orange"|"St George/Savings""#);
         assert_eq!(q.accounts.len(), 2);
         assert_eq!(q.accounts[0].bank_prefix, "ING");
         assert_eq!(q.accounts[0].account_prefix, Some("Orange".to_string()));
@@ -816,14 +791,14 @@ mod tests {
 
     #[test]
     fn test_parse_category_multiple() {
-        let (q, _) = DbSearchQuery::parse("category:Food|Transport");
+        let q = DbSearchQuery::parse("category:Food|Transport");
         assert_eq!(q.categories, vec!["Food", "Transport"]);
     }
 
     #[test]
     fn test_parse_shortcuts() {
         // d: for date
-        let (q, _) = DbSearchQuery::parse("d:2024-01");
+        let q = DbSearchQuery::parse("d:2024-01");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
@@ -834,17 +809,17 @@ mod tests {
         );
 
         // a: for account
-        let (q, _) = DbSearchQuery::parse("a:ING/Orange");
+        let q = DbSearchQuery::parse("a:ING/Orange");
         assert_eq!(q.accounts.len(), 1);
         assert_eq!(q.accounts[0].bank_prefix, "ING");
         assert_eq!(q.accounts[0].account_prefix, Some("Orange".to_string()));
 
         // c: for category
-        let (q, _) = DbSearchQuery::parse("c:Food|Transport");
+        let q = DbSearchQuery::parse("c:Food|Transport");
         assert_eq!(q.categories, vec!["Food", "Transport"]);
 
         // Combined shortcuts
-        let (q, _) = DbSearchQuery::parse("d:2024 a:Chase c:Food coffee");
+        let q = DbSearchQuery::parse("d:2024 a:Chase c:Food coffee");
         assert_eq!(
             q.date_from,
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
@@ -856,7 +831,7 @@ mod tests {
 
     #[test]
     fn test_to_filter() {
-        let (q, _) = DbSearchQuery::parse("date:2024-01 amount:>100 account:Chase/ groceries");
+        let q = DbSearchQuery::parse("date:2024-01 amount:>100 account:Chase/ groceries");
         let filter = q.to_filter(Some(500));
 
         assert_eq!(
@@ -876,7 +851,7 @@ mod tests {
 
     #[test]
     fn test_to_filter_regex() {
-        let (q, _) = DbSearchQuery::parse("/coffee.*/i");
+        let q = DbSearchQuery::parse("/coffee.*/i");
         let filter = q.to_filter(None);
 
         assert!(filter.fts_query.is_none());
@@ -952,40 +927,40 @@ mod tests {
     #[test]
     fn test_parse_with_cursor_implicit_prefix() {
         // Cursor at end of term -> adds prefix
-        let (q, _) = DbSearchQuery::parse_with_cursor("coffee", Some(6));
+        let q = DbSearchQuery::parse_with_cursor("coffee", Some(6));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee*");
 
         // Cursor at end of first term in multi-word -> adds prefix there
-        let (q, _) = DbSearchQuery::parse_with_cursor("aam oct", Some(3));
+        let q = DbSearchQuery::parse_with_cursor("aam oct", Some(3));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "aam* oct");
 
         // Cursor in middle of term -> no prefix
-        let (q, _) = DbSearchQuery::parse_with_cursor("coffee", Some(3));
+        let q = DbSearchQuery::parse_with_cursor("coffee", Some(3));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
 
         // Cursor after space (not at end of term) -> no prefix
-        let (q, _) = DbSearchQuery::parse_with_cursor("coffee ", Some(7));
+        let q = DbSearchQuery::parse_with_cursor("coffee ", Some(7));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
 
         // No cursor -> no prefix (programmatic use)
-        let (q, _) = DbSearchQuery::parse("coffee");
+        let q = DbSearchQuery::parse("coffee");
         assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee");
 
         // With filter, cursor at end of text term
-        let (q, _) = DbSearchQuery::parse_with_cursor("d:2024 coffee", Some(13));
+        let q = DbSearchQuery::parse_with_cursor("d:2024 coffee", Some(13));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "coffee*");
 
         // With filter, cursor at end of first text term
-        let (q, _) = DbSearchQuery::parse_with_cursor("d:2024 aam oct", Some(10));
+        let q = DbSearchQuery::parse_with_cursor("d:2024 aam oct", Some(10));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "aam* oct");
 
         // Cursor within token before close-paren: (Treehous_) where _ is cursor at pos 9
         // (=0, T=1, r=2, e=3, e=4, h=5, o=6, u=7, s=8, )=9
-        let (q, _) = DbSearchQuery::parse_with_cursor("(Treehous)", Some(9));
+        let q = DbSearchQuery::parse_with_cursor("(Treehous)", Some(9));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "(Treehous*)");
 
         // Cursor within token in middle of word
-        let (q, _) = DbSearchQuery::parse_with_cursor("(Tree)", Some(3));
+        let q = DbSearchQuery::parse_with_cursor("(Tree)", Some(3));
         assert_eq!(q.fts_match.as_ref().unwrap().query, "(Tree)");
     }
 }

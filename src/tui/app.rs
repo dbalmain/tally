@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 
-use tui_input::{Input, InputRequest};
+use tui_input::Input;
 
 use crate::{
-    Account, Bank, Category, CategorySource, DbSearchQuery, FuzzyMatcher, Transaction,
+    Account, Bank, Category, CategorySource, FuzzyMatcher, Transaction,
     TransactionFilter, TransactionStore, TransactionWithEnrichment, Transfer, TransferSource,
     TransferWithTransactions,
+    search::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, SearchConfig},
 };
+
+use super::search_bar::{KeyResult, SearchBar};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -71,10 +74,9 @@ impl TabKey {
 }
 
 /// Per-tab search state (DB search + fuzzy search + selection).
-#[derive(Default)]
 pub struct TabSearchState {
-    pub db_search_input: Input,
-    pub db_search_query: DbSearchQuery,
+    /// SearchBar for DB search queries
+    pub search_bar: SearchBar,
     pub db_search_active: bool,
     pub fuzzy_search_input: Input,
     pub fuzzy_pattern: String,
@@ -84,6 +86,22 @@ pub struct TabSearchState {
     pub editing_db_search: bool,
     /// Was actively editing fuzzy search when we left this tab
     pub editing_fuzzy_search: bool,
+}
+
+impl TabSearchState {
+    /// Create a new TabSearchState with the given SearchConfig.
+    pub fn new(config: SearchConfig) -> Self {
+        Self {
+            search_bar: SearchBar::new(config),
+            db_search_active: false,
+            fuzzy_search_input: Input::default(),
+            fuzzy_pattern: String::new(),
+            fuzzy_search_active: false,
+            selected_index: 0,
+            editing_db_search: false,
+            editing_fuzzy_search: false,
+        }
+    }
 }
 
 impl TodoSubTab {
@@ -116,128 +134,7 @@ pub enum InputMode {
     TransferNoMatch,
 }
 
-/// Type of filter being autocompleted
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilterAutocompleteType {
-    Account,
-    Category,
-}
 
-/// State for filter value autocomplete popup
-#[derive(Debug, Clone)]
-pub struct FilterAutocompleteState {
-    pub filter_type: FilterAutocompleteType,
-    pub suggestions: Vec<String>,
-    pub selected: usize,
-    /// Byte position in input where the filter value starts (after `account:` or `category:`)
-    pub value_start: usize,
-    /// Byte position where the filter value ends (current end of typed value)
-    pub value_end: usize,
-    /// Whether user started the value with a quote (determines escaping behavior)
-    pub quoted: bool,
-}
-
-/// Split a string by unescaped `|` characters.
-fn split_by_unescaped_pipe(s: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            // Escaped character - include both the backslash and the next char
-            current.push(c);
-            if let Some(next) = chars.next() {
-                current.push(next);
-            }
-        } else if c == '|' {
-            // Unescaped pipe - end of segment
-            segments.push(current);
-            current = String::new();
-        } else {
-            current.push(c);
-        }
-    }
-    segments.push(current);
-    segments
-}
-
-/// Unescape a filter value (convert `\ ` to ` ` and `\|` to `|`).
-fn unescape_filter_value(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            // Take the next character literally
-            if let Some(next) = chars.next() {
-                result.push(next);
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-/// Find the position of the first unescaped `|` in a string.
-fn find_first_unescaped_pipe(s: &str) -> Option<usize> {
-    let mut chars = s.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if c == '\\' {
-            chars.next(); // Skip escaped character
-        } else if c == '|' {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Find the position of the last unescaped `|` in a string.
-fn find_last_unescaped_pipe(s: &str) -> Option<usize> {
-    let mut last_pipe = None;
-    let mut chars = s.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if c == '\\' {
-            chars.next(); // Skip escaped character
-        } else if c == '|' {
-            last_pipe = Some(i);
-        }
-    }
-    last_pipe
-}
-
-/// Find the end of a filter value starting at `start` within `s`.
-/// Accounts for escaped characters (e.g., `\ ` for space, `\|` for pipe).
-/// Returns the position of the first unescaped whitespace, or `s.len()` if none.
-fn find_filter_value_end(s: &str, start: usize) -> usize {
-    let mut chars = s[start..].char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if c == '\\' {
-            // Skip the next character (it's escaped)
-            chars.next();
-        } else if c.is_whitespace() {
-            return start + i;
-        }
-    }
-    s.len()
-}
-
-/// Token type for filter reordering logic
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReorderTokenType {
-    Filter,
-    Regex,
-    Fts,
-}
-
-/// Token info for filter reordering
-#[derive(Debug, Clone)]
-struct ReorderToken {
-    start: usize,
-    end: usize,
-    token_type: ReorderTokenType,
-}
 
 pub struct App {
     pub store: TransactionStore,
@@ -279,8 +176,6 @@ pub struct App {
     pub confirm_action: Option<ConfirmAction>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
-    // Filter autocomplete state (for account:/category: filters)
-    pub filter_autocomplete: Option<FilterAutocompleteState>,
 }
 
 #[derive(Debug, Clone)]
@@ -446,7 +341,6 @@ impl App {
             confirm_message: None,
             confirm_action: None,
             tab_search_state: HashMap::new(),
-            filter_autocomplete: None,
         };
         app.rebuild_caches();
         app
@@ -456,13 +350,64 @@ impl App {
         TabKey::from_tab(self.current_tab, self.todo_subtab)
     }
 
-    fn current_search_state(&self) -> Option<&TabSearchState> {
+    pub fn current_search_state(&self) -> Option<&TabSearchState> {
         self.tab_search_state.get(&self.current_tab_key())
     }
 
     fn current_search_state_mut(&mut self) -> &mut TabSearchState {
         let key = self.current_tab_key();
-        self.tab_search_state.entry(key).or_default()
+        if !self.tab_search_state.contains_key(&key) {
+            let config = self.build_search_config(key);
+            self.tab_search_state
+                .insert(key, TabSearchState::new(config));
+        }
+        self.tab_search_state.get_mut(&key).unwrap()
+    }
+
+    /// Build SearchConfig for a given TabKey.
+    fn build_search_config(&self, key: TabKey) -> SearchConfig {
+        let account_options: Vec<String> = self
+            .accounts
+            .values()
+            .filter_map(|a| {
+                self.banks.get(&a.bank_id).map(|b| format!("{}/{}", b.name, a.name))
+            })
+            .collect();
+        let category_options: Vec<String> = self.categories.iter().map(|c| c.path.clone()).collect();
+
+        match key {
+            TabKey::Transactions => SearchConfig::new(vec![
+                Box::new(DateFilter),
+                Box::new(AmountFilter),
+                Box::new(AccountFilter::with_options(account_options)),
+                Box::new(CategoryFilter::with_options(category_options)),
+            ]),
+            TabKey::Transfers => SearchConfig::new(vec![
+                Box::new(DateFilter),
+                Box::new(AmountFilter),
+                Box::new(AccountFilter::with_options(account_options)),
+            ]),
+            TabKey::Categories => SearchConfig::new(vec![
+                // Categories tab doesn't need transaction search filters
+            ]),
+            TabKey::TodoUncategorised => SearchConfig::new(vec![
+                Box::new(DateFilter),
+                Box::new(AmountFilter),
+                Box::new(AccountFilter::with_options(account_options)),
+                // No CategoryFilter for uncategorised - they have no category
+            ]),
+            TabKey::TodoAiReview => SearchConfig::new(vec![
+                Box::new(DateFilter),
+                Box::new(AmountFilter),
+                Box::new(AccountFilter::with_options(account_options)),
+                Box::new(CategoryFilter::with_options(category_options)),
+            ]),
+            TabKey::TodoTransferReview => SearchConfig::new(vec![
+                Box::new(DateFilter),
+                Box::new(AmountFilter),
+                Box::new(AccountFilter::with_options(account_options)),
+            ]),
+        }
     }
 
     fn rebuild_caches(&mut self) {
@@ -615,7 +560,12 @@ impl App {
     /// Save current state to the tab's search state before switching away
     fn save_tab_state(&mut self) {
         let key = self.current_tab_key();
-        let state = self.tab_search_state.entry(key).or_default();
+        if !self.tab_search_state.contains_key(&key) {
+            let config = self.build_search_config(key);
+            self.tab_search_state
+                .insert(key, TabSearchState::new(config));
+        }
+        let state = self.tab_search_state.get_mut(&key).unwrap();
         state.selected_index = self.selected_index;
         state.editing_db_search = self.input_mode == InputMode::DbSearch;
         state.editing_fuzzy_search = self.input_mode == InputMode::FuzzySearch;
@@ -1076,671 +1026,22 @@ impl App {
     }
 
     pub fn handle_db_search_input(&mut self, req: tui_input::InputRequest) {
-        // Handle special regex behavior before standard input processing
-        if self.handle_db_search_regex_input(&req) {
-            // Regex handling consumed the input - also apply reordering
-            self.reorder_filters_before_fts();
+        let res = self.current_search_state_mut().search_bar.handle_input(req);
 
-            // Re-parse and reload
-            let state = self.current_search_state_mut();
-            let cursor = state.db_search_input.cursor();
-            let input_value = state.db_search_input.value().to_string();
-            let (query, transition_to_fuzzy) =
-                DbSearchQuery::parse_with_cursor(&input_value, Some(cursor));
-
-            if transition_to_fuzzy {
-                let trimmed = input_value[..input_value.len() - 2].to_string();
-                let state = self.current_search_state_mut();
-                state.db_search_input = Input::new(trimmed.clone());
-                state.db_search_query = DbSearchQuery::parse(&trimmed).0;
-                self.reload_current_tab();
-                self.start_fuzzy_search();
-            } else {
-                let state = self.current_search_state_mut();
-                state.db_search_query = query;
-                self.reload_current_tab();
-            }
-            self.current_search_state_mut().selected_index = 0;
-            self.selected_index = 0;
-            self.update_filter_autocomplete();
-            return;
-        }
-
-        let state = self.current_search_state_mut();
-        state.db_search_input.handle(req);
-
-        // Expand shortcuts like d: -> date:, a: -> account:, etc.
-        self.expand_db_search_shortcuts();
-
-        // Jump to existing filter if typing a duplicate filter keyword
-        self.deduplicate_db_search_filter();
-
-        // Jump to existing regex if typing a second /
-        self.deduplicate_db_search_regex();
-
-        // Move filters before FTS text (filters must come before free text)
-        self.reorder_filters_before_fts();
-
-        let state = self.current_search_state_mut();
-        let cursor = state.db_search_input.cursor();
-        let input_value = state.db_search_input.value().to_string();
-        let (query, transition_to_fuzzy) =
-            DbSearchQuery::parse_with_cursor(&input_value, Some(cursor));
-
-        if transition_to_fuzzy {
-            // Remove " ~" from input and transition to fuzzy mode
-            let trimmed = input_value[..input_value.len() - 2].to_string();
-            let state = self.current_search_state_mut();
-            state.db_search_input = Input::new(trimmed.clone());
-            state.db_search_query = DbSearchQuery::parse(&trimmed).0;
+        // Check for transition to fuzzy search
+        if res == KeyResult::TransitionToFuzzy {
             self.reload_current_tab();
             self.start_fuzzy_search();
         } else {
-            let state = self.current_search_state_mut();
-            state.db_search_query = query;
             self.reload_current_tab();
         }
         self.current_search_state_mut().selected_index = 0;
         self.selected_index = 0;
-        self.update_filter_autocomplete();
-    }
-
-    /// Expand filter shortcuts at cursor position:
-    /// - `d:` → `date:`
-    /// - `a:` → `account:`
-    /// - `am:` → `amount:`
-    /// - `c:` → `category:`
-    fn expand_db_search_shortcuts(&mut self) {
-        const SHORTCUTS: &[(&str, &str)] = &[
-            ("am:", "amount:"),
-            ("d:", "date:"),
-            ("a:", "account:"),
-            ("c:", "category:"),
-        ];
-
-        let state = self.current_search_state_mut();
-        let cursor = state.db_search_input.cursor();
-        let value = state.db_search_input.value();
-
-        // Check if any shortcut ends at cursor position
-        for (shortcut, expansion) in SHORTCUTS {
-            if cursor >= shortcut.len() {
-                let start = cursor - shortcut.len();
-                // Only expand at word boundary (start of input or preceded by space)
-                let at_word_start = start == 0
-                    || value
-                        .chars()
-                        .nth(start - 1)
-                        .map(|c| c.is_whitespace())
-                        .unwrap_or(false);
-
-                if at_word_start && value[start..cursor] == **shortcut {
-                    // Build new value with expansion
-                    let mut new_value = String::with_capacity(value.len() + expansion.len());
-                    new_value.push_str(&value[..start]);
-                    new_value.push_str(expansion);
-                    new_value.push_str(&value[cursor..]);
-
-                    // Replace input and position cursor at end of expansion
-                    // Input::new puts cursor at end, so move back by the tail length
-                    let tail_len = value.len() - cursor;
-                    state.db_search_input = Input::new(new_value);
-                    for _ in 0..tail_len {
-                        state.db_search_input.handle(InputRequest::GoToPrevChar);
-                    }
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Deduplicate filter keywords: if a filter like `date:` is typed when one
-    /// already exists, delete the new one and jump cursor to end of existing filter.
-    /// Any value typed after the duplicate keyword is appended to the existing filter.
-    ///
-    /// Example: `date:2024 date:2025` → `date:20242025` with cursor at end
-    fn deduplicate_db_search_filter(&mut self) {
-        const FILTER_KEYWORDS: &[&str] = &["date:", "account:", "amount:", "category:"];
-
-        let state = self.current_search_state_mut();
-        let cursor = state.db_search_input.cursor();
-        let value = state.db_search_input.value().to_string();
-
-        // For each filter keyword, check if it appears twice and cursor is in the second one
-        for keyword in FILTER_KEYWORDS {
-            // Find all occurrences of this keyword
-            let occurrences: Vec<usize> = value
-                .match_indices(keyword)
-                .filter(|(pos, _)| {
-                    // Must be at word boundary (start of input or preceded by space)
-                    *pos == 0
-                        || value
-                            .chars()
-                            .nth(*pos - 1)
-                            .map(|c| c.is_whitespace())
-                            .unwrap_or(false)
-                })
-                .map(|(pos, _)| pos)
-                .collect();
-
-            if occurrences.len() < 2 {
-                continue;
-            }
-
-            // Check if cursor is within or just after the second (or later) occurrence
-            let first_pos = occurrences[0];
-            for &dup_pos in &occurrences[1..] {
-                let dup_end = dup_pos + keyword.len();
-                // Cursor must be at or after the duplicate keyword
-                if cursor >= dup_pos {
-                    // Find the end of the first filter's value (accounting for escaped spaces)
-                    let first_value_start = first_pos + keyword.len();
-                    let first_value_end = find_filter_value_end(&value, first_value_start);
-
-                    // Find the end of the duplicate filter's value
-                    let dup_value_start = dup_end;
-                    let dup_value_end = find_filter_value_end(&value, dup_value_start);
-
-                    // Only proceed if cursor is within the duplicate filter token
-                    if cursor > dup_value_end {
-                        continue;
-                    }
-
-                    // Extract value typed after duplicate keyword (portion before cursor)
-                    let extra_value = if cursor > dup_value_start {
-                        &value[dup_value_start..cursor]
-                    } else {
-                        ""
-                    };
-
-                    // Build new value:
-                    // 1. Everything up to end of first filter's value
-                    // 2. Append extra value from duplicate
-                    // 3. Add middle content (between first filter and duplicate)
-                    // 4. Add everything after the duplicate token
-                    let after_dup = if dup_value_end < value.len() {
-                        &value[dup_value_end..]
-                    } else {
-                        ""
-                    };
-
-                    // Insert extra value at end of first filter's value
-                    let mut new_value = String::with_capacity(value.len());
-                    new_value.push_str(&value[..first_value_end]);
-                    new_value.push_str(extra_value);
-                    // Add back the rest (between first filter end and duplicate start)
-                    if first_value_end < dup_pos {
-                        let middle = value[first_value_end..dup_pos].trim();
-                        if !middle.is_empty() {
-                            new_value.push(' ');
-                            new_value.push_str(middle);
-                        }
-                    }
-                    new_value.push_str(after_dup);
-
-                    // Position cursor at end of first filter's value + extra
-                    let new_cursor = first_value_end + extra_value.len();
-
-                    // Replace input
-                    let tail_len = new_value.len() - new_cursor;
-                    let state = self.current_search_state_mut();
-                    state.db_search_input = Input::new(new_value);
-                    for _ in 0..tail_len {
-                        state.db_search_input.handle(InputRequest::GoToPrevChar);
-                    }
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Handle regex deduplication: only one regex allowed in query.
-    /// When typing `/` and a regex already exists, delete the new `/` and jump cursor
-    /// to end of existing regex content (before closing `/` or flags).
-    fn deduplicate_db_search_regex(&mut self) {
-        let state = self.current_search_state_mut();
-        let cursor = state.db_search_input.cursor();
-        let value = state.db_search_input.value().to_string();
-
-        // Find existing regex using proper parsing (handles escaped slashes, etc.)
-        let Some((_regex_start, closing_slash, regex_end)) = self.find_regex_in_value(&value)
-        else {
-            return;
-        };
-
-        // Find `/` at word boundary OUTSIDE the existing regex
-        let dup_slash = value
-            .char_indices()
-            .find(|(pos, c)| {
-                *c == '/'
-                    && *pos >= regex_end // Must be after the existing regex
-                    && (*pos == 0
-                        || value
-                            .chars()
-                            .nth(*pos - 1)
-                            .map(|prev| prev.is_whitespace())
-                            .unwrap_or(false))
-            })
-            .map(|(pos, _)| pos);
-
-        let Some(dup_slash) = dup_slash else {
-            return;
-        };
-
-        // Cursor must be at or just after this duplicate slash
-        if cursor < dup_slash || cursor > dup_slash + 1 {
-            return;
-        }
-
-        // Build new value: remove the duplicate slash
-        let mut new_value = String::with_capacity(value.len() - 1);
-        new_value.push_str(&value[..dup_slash]);
-        if dup_slash + 1 < value.len() {
-            new_value.push_str(&value[dup_slash + 1..]);
-        }
-
-        // Position cursor at end of first regex content (before closing /)
-        let new_cursor = closing_slash.min(new_value.len());
-        let tail_len = new_value.len() - new_cursor;
-
-        let state = self.current_search_state_mut();
-        state.db_search_input = Input::new(new_value);
-        for _ in 0..tail_len {
-            state.db_search_input.handle(InputRequest::GoToPrevChar);
-        }
-    }
-
-    /// Reorder filters and regex to appear before FTS text.
-    /// When a filter or regex is typed after free text, move it before the FTS portion.
-    ///
-    /// Examples:
-    /// - `groceries date:2024` → `date:2024 groceries`
-    /// - `coffee /pattern/` → `/pattern/ coffee`
-    fn reorder_filters_before_fts(&mut self) {
-        let state = self.current_search_state_mut();
-        let cursor = state.db_search_input.cursor();
-        let value = state.db_search_input.value().to_string();
-
-        // Parse tokens to identify structure
-        let tokens = Self::tokenize_for_reorder(&value);
-        if tokens.is_empty() {
-            return;
-        }
-
-        // Find the first FTS token (not a filter, not a regex)
-        let first_fts_idx = tokens.iter().position(|t| t.token_type == ReorderTokenType::Fts);
-
-        // Find if there's a filter or regex AFTER the first FTS token
-        let token_after_fts = first_fts_idx.and_then(|fts_idx| {
-            tokens[fts_idx + 1..]
-                .iter()
-                .enumerate()
-                .find(|(_, t)| {
-                    t.token_type == ReorderTokenType::Filter
-                        || t.token_type == ReorderTokenType::Regex
-                })
-                .map(|(i, t)| (fts_idx + 1 + i, t.clone()))
-        });
-
-        let Some((_token_idx, move_token)) = token_after_fts else {
-            return;
-        };
-
-        // Check if cursor is within or just after the token we want to move
-        // Only reorder if cursor is in the token being typed
-        if cursor < move_token.start || cursor > move_token.end {
-            return;
-        }
-
-        // Build new value with token moved before FTS
-        let first_fts_idx = first_fts_idx.unwrap();
-
-        // Calculate where to insert the token (just before first FTS token)
-        let insert_pos = tokens[first_fts_idx].start;
-
-        // Build new value:
-        // 1. Everything before insert position
-        // 2. The token + space
-        // 3. Everything from insert position to token start (minus trailing space before token)
-        // 4. Everything after token end
-        let before_insert = &value[..insert_pos];
-        let token_text = &value[move_token.start..move_token.end];
-
-        // Handle spacing: remove space before the token if present
-        let between_start = insert_pos;
-        let between_end = move_token.start;
-        let between = value[between_start..between_end].trim_end();
-
-        let after_token = &value[move_token.end..];
-        let after_token = after_token.trim_start();
-
-        let mut new_value = String::with_capacity(value.len());
-        new_value.push_str(before_insert);
-        new_value.push_str(token_text);
-        if !between.is_empty() || !after_token.is_empty() {
-            new_value.push(' ');
-        }
-        new_value.push_str(between);
-        if !between.is_empty() && !after_token.is_empty() {
-            new_value.push(' ');
-        }
-        new_value.push_str(after_token);
-
-        // Calculate new cursor position:
-        // Cursor was at `cursor` within the token. The token moved from move_token.start
-        // to insert_pos. Adjust cursor by the delta.
-        let cursor_offset_in_token = cursor - move_token.start;
-        let new_cursor = insert_pos + cursor_offset_in_token;
-
-        let tail_len = new_value.len().saturating_sub(new_cursor);
-        let state = self.current_search_state_mut();
-        state.db_search_input = Input::new(new_value);
-        for _ in 0..tail_len {
-            state.db_search_input.handle(InputRequest::GoToPrevChar);
-        }
-    }
-
-    /// Tokenize input for reorder logic, identifying token types and positions.
-    fn tokenize_for_reorder(input: &str) -> Vec<ReorderToken> {
-        let mut tokens = Vec::new();
-        let mut current_start = None;
-        let mut in_quotes = false;
-        let mut in_regex = false;
-        let mut regex_closed = false;
-        let mut pos = 0;
-        let mut chars = input.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            match c {
-                '/' if !in_quotes && !in_regex && current_start.is_none() => {
-                    // Start of regex
-                    current_start = Some(pos);
-                    pos += 1;
-                    in_regex = true;
-                    regex_closed = false;
-                }
-                '\\' if in_regex && !regex_closed => {
-                    // Escaped char in regex
-                    pos += 1;
-                    if chars.next().is_some() {
-                        pos += 1;
-                    }
-                }
-                '/' if in_regex && !regex_closed => {
-                    // Closing slash
-                    pos += 1;
-                    regex_closed = true;
-                }
-                c if in_regex && regex_closed => {
-                    // Consume flags
-                    if c.is_ascii_alphabetic() {
-                        pos += 1;
-                    } else {
-                        // End of regex token
-                        if let Some(start) = current_start.take() {
-                            tokens.push(ReorderToken {
-                                start,
-                                end: pos,
-                                token_type: ReorderTokenType::Regex,
-                            });
-                        }
-                        in_regex = false;
-                        regex_closed = false;
-                        // Handle current char
-                        if c == ' ' || c == '\t' {
-                            pos += 1;
-                        } else {
-                            current_start = Some(pos);
-                            pos += 1;
-                        }
-                    }
-                }
-                _ if in_regex => {
-                    // Inside regex
-                    pos += 1;
-                }
-                '\\' if !in_quotes => {
-                    // Escaped char outside regex
-                    if current_start.is_none() {
-                        current_start = Some(pos);
-                    }
-                    pos += 1;
-                    if chars.next().is_some() {
-                        pos += 1;
-                    }
-                }
-                '"' => {
-                    in_quotes = !in_quotes;
-                    if current_start.is_none() && in_quotes {
-                        current_start = Some(pos);
-                    }
-                    pos += 1;
-                }
-                ' ' | '\t' if !in_quotes => {
-                    // End of token
-                    if let Some(start) = current_start.take() {
-                        let token_text = &input[start..pos];
-                        let token_type = Self::classify_token(token_text);
-                        tokens.push(ReorderToken {
-                            start,
-                            end: pos,
-                            token_type,
-                        });
-                    }
-                    pos += 1;
-                }
-                _ => {
-                    if current_start.is_none() {
-                        current_start = Some(pos);
-                    }
-                    pos += 1;
-                }
-            }
-        }
-
-        // Handle final token
-        if in_regex {
-            if let Some(start) = current_start {
-                tokens.push(ReorderToken {
-                    start,
-                    end: pos,
-                    token_type: ReorderTokenType::Regex,
-                });
-            }
-        } else if let Some(start) = current_start {
-            let token_text = &input[start..pos];
-            let token_type = Self::classify_token(token_text);
-            tokens.push(ReorderToken {
-                start,
-                end: pos,
-                token_type,
-            });
-        }
-
-        tokens
-    }
-
-    /// Classify a token as Filter, Regex, or FTS based on its content
-    fn classify_token(token: &str) -> ReorderTokenType {
-        const FILTER_PREFIXES: &[&str] = &[
-            "date:",
-            "d:",
-            "account:",
-            "a:",
-            "amount:",
-            "am:",
-            "category:",
-            "c:",
-        ];
-
-        if token.starts_with('/') {
-            ReorderTokenType::Regex
-        } else if FILTER_PREFIXES.iter().any(|p| token.starts_with(p)) {
-            ReorderTokenType::Filter
-        } else {
-            ReorderTokenType::Fts
-        }
-    }
-
-    /// Handle special regex input behavior:
-    /// - Typing `/` when no regex exists: insert `//` and place cursor between
-    /// - Typing `/` when cursor is inside regex (before closing `/`): move cursor past closing `/`
-    /// - Deleting either `/` delimiter: delete entire regex including flags
-    ///
-    /// Returns true if the input was handled (caller should skip normal processing).
-    fn handle_db_search_regex_input(&mut self, req: &InputRequest) -> bool {
-        let state = self.current_search_state_mut();
-        let cursor = state.db_search_input.cursor();
-        let value = state.db_search_input.value().to_string();
-
-        // Find existing regex: /.../ or /.../flags
-        let regex_info = self.find_regex_in_value(&value);
-
-        // Check if previous char is backslash (for escaping / inside regex)
-        let prev_is_backslash = cursor > 0
-            && value
-                .chars()
-                .nth(cursor - 1)
-                .map(|c| c == '\\')
-                .unwrap_or(false);
-
-        match req {
-            InputRequest::InsertChar('/') => {
-                if let Some((regex_start, closing_slash, _regex_end)) = regex_info {
-                    // Regex exists - check if cursor is inside (between opening and closing /)
-                    if cursor > regex_start && cursor <= closing_slash {
-                        // If previous char is \, insert literal / (escaped slash in regex)
-                        if prev_is_backslash {
-                            return false; // Let normal input handling insert the /
-                        }
-                        // Move cursor past closing slash (but before flags)
-                        let new_cursor = closing_slash + 1;
-                        let tail_len = value.len() - new_cursor;
-                        let state = self.current_search_state_mut();
-                        state.db_search_input = Input::new(value);
-                        for _ in 0..tail_len {
-                            state.db_search_input.handle(InputRequest::GoToPrevChar);
-                        }
-                        return true;
-                    }
-                    // Cursor is outside regex - let deduplication handle it
-                    false
-                } else {
-                    // No regex exists - insert // and place cursor between
-                    let mut new_value = String::with_capacity(value.len() + 2);
-                    new_value.push_str(&value[..cursor]);
-                    new_value.push_str("//");
-                    new_value.push_str(&value[cursor..]);
-
-                    // Cursor goes between the slashes (one from end of inserted //)
-                    let new_cursor = cursor + 1;
-                    let tail_len = new_value.len() - new_cursor;
-                    let state = self.current_search_state_mut();
-                    state.db_search_input = Input::new(new_value);
-                    for _ in 0..tail_len {
-                        state.db_search_input.handle(InputRequest::GoToPrevChar);
-                    }
-                    true
-                }
-            }
-            InputRequest::DeletePrevChar => {
-                if let Some((regex_start, closing_slash, regex_end)) = regex_info {
-                    // Check if we're about to delete a / delimiter
-                    if cursor == regex_start + 1 || cursor == closing_slash + 1 {
-                        // Deleting opening or closing / - remove entire regex
-                        let mut new_value = String::with_capacity(value.len());
-                        new_value.push_str(&value[..regex_start]);
-                        // Skip space before regex if present
-                        let after = &value[regex_end..];
-                        let after = after.strip_prefix(' ').unwrap_or(after);
-                        if !new_value.is_empty() && !after.is_empty() {
-                            new_value.push(' ');
-                        }
-                        new_value.push_str(after);
-
-                        let new_cursor = regex_start.min(new_value.len());
-                        let tail_len = new_value.len() - new_cursor;
-                        let state = self.current_search_state_mut();
-                        state.db_search_input = Input::new(new_value);
-                        for _ in 0..tail_len {
-                            state.db_search_input.handle(InputRequest::GoToPrevChar);
-                        }
-                        return true;
-                    }
-                }
-                false
-            }
-            InputRequest::DeleteNextChar => {
-                if let Some((regex_start, closing_slash, regex_end)) = regex_info {
-                    // Check if we're about to delete a / delimiter
-                    if cursor == regex_start || cursor == closing_slash {
-                        // Deleting opening or closing / - remove entire regex
-                        let mut new_value = String::with_capacity(value.len());
-                        new_value.push_str(&value[..regex_start]);
-                        let after = &value[regex_end..];
-                        let after = after.strip_prefix(' ').unwrap_or(after);
-                        if !new_value.is_empty() && !after.is_empty() {
-                            new_value.push(' ');
-                        }
-                        new_value.push_str(after);
-
-                        let new_cursor = regex_start.min(new_value.len());
-                        let tail_len = new_value.len() - new_cursor;
-                        let state = self.current_search_state_mut();
-                        state.db_search_input = Input::new(new_value);
-                        for _ in 0..tail_len {
-                            state.db_search_input.handle(InputRequest::GoToPrevChar);
-                        }
-                        return true;
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
-    }
-
-    /// Find regex in value, returning (start, closing_slash_pos, end) if found.
-    /// End includes any flags after the closing slash.
-    fn find_regex_in_value(&self, value: &str) -> Option<(usize, usize, usize)> {
-        // Find opening / at word boundary
-        let mut chars = value.char_indices().peekable();
-        while let Some((i, c)) = chars.next() {
-            if c == '/' {
-                let at_word_boundary =
-                    i == 0 || value.chars().nth(i - 1).map(|c| c.is_whitespace()).unwrap_or(false);
-                if at_word_boundary {
-                    // Look for closing /
-                    let start = i;
-                    while let Some((j, c2)) = chars.next() {
-                        if c2 == '\\' {
-                            // Skip escaped character
-                            chars.next();
-                        } else if c2 == '/' {
-                            // Found closing /, now consume flags
-                            let mut end = j + 1;
-                            for (k, c3) in value[end..].char_indices() {
-                                if c3.is_ascii_alphabetic() {
-                                    end = j + 1 + k + 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                            return Some((start, j, end));
-                        }
-                    }
-                    // No closing / found - unclosed regex
-                    return Some((start, value.len(), value.len()));
-                }
-            }
-        }
-        None
     }
 
     pub fn clear_db_search(&mut self) {
         let state = self.current_search_state_mut();
-        state.db_search_input.reset();
-        state.db_search_query = DbSearchQuery::default();
+        state.search_bar.reset();
         state.db_search_active = false;
         state.selected_index = 0;
         self.selected_index = 0;
@@ -1749,349 +1050,57 @@ impl App {
     }
 
     pub fn confirm_db_search(&mut self) {
+        // If autocomplete is active, select from it instead of confirming
+        let state = self.current_search_state_mut();
+        if state.search_bar.autocomplete_active() {
+            state.search_bar.autocomplete_select();
+            self.reload_current_tab();
+            self.selected_index = 0;
+            return;
+        }
         self.input_mode = InputMode::Normal;
     }
 
     pub fn db_search_value(&self) -> &str {
         self.current_search_state()
-            .map(|s| s.db_search_input.value())
+            .map(|s| s.search_bar.value())
             .unwrap_or("")
     }
 
     pub fn db_search_cursor(&self) -> usize {
         self.current_search_state()
-            .map(|s| s.db_search_input.visual_cursor())
+            .map(|s| s.search_bar.cursor())
             .unwrap_or(0)
     }
 
     // ==================== Filter Autocomplete ====================
 
-    /// Check if we're typing a filter value and should show autocomplete popup.
-    /// Call this after each input change to update autocomplete state.
-    pub fn update_filter_autocomplete(&mut self) {
-        let value = self.db_search_value().to_string();
-        let cursor = self.db_search_cursor();
-
-        // Find if cursor is inside an account: or category: filter value
-        if let Some((filter_type, value_start, value_end, quoted, already_selected)) =
-            self.find_filter_at_cursor(&value, cursor)
-        {
-            let typed_value = &value[value_start..value_end];
-            let suggestions =
-                self.build_filter_suggestions(filter_type, typed_value, &already_selected);
-
-            if suggestions.is_empty() {
-                self.filter_autocomplete = None;
-            } else {
-                // Preserve selection if we already had autocomplete state
-                let selected = self
-                    .filter_autocomplete
-                    .as_ref()
-                    .map(|s| s.selected.min(suggestions.len().saturating_sub(1)))
-                    .unwrap_or(0);
-
-                self.filter_autocomplete = Some(FilterAutocompleteState {
-                    filter_type,
-                    suggestions,
-                    selected,
-                    value_start,
-                    value_end,
-                    quoted,
-                });
-            }
-        } else {
-            self.filter_autocomplete = None;
-        }
-    }
-
-    /// Find if cursor is inside an account: or category: filter value.
-    /// Returns (filter_type, value_start, value_end, is_quoted, already_selected) if found.
-    /// For OR syntax (|), returns the segment after the last | before cursor.
-    /// `already_selected` contains values from other segments (to exclude from suggestions).
-    fn find_filter_at_cursor(
-        &self,
-        input: &str,
-        cursor: usize,
-    ) -> Option<(FilterAutocompleteType, usize, usize, bool, Vec<String>)> {
-        const FILTER_PREFIXES: &[(&str, FilterAutocompleteType)] = &[
-            ("account:", FilterAutocompleteType::Account),
-            ("a:", FilterAutocompleteType::Account),
-            ("category:", FilterAutocompleteType::Category),
-            ("c:", FilterAutocompleteType::Category),
-        ];
-
-        // Find all filter occurrences
-        for (prefix, filter_type) in FILTER_PREFIXES {
-            for (pos, _) in input.match_indices(prefix) {
-                // Must be at word boundary
-                let at_word_start = pos == 0
-                    || input
-                        .chars()
-                        .nth(pos - 1)
-                        .map(|c| c.is_whitespace())
-                        .unwrap_or(false);
-
-                if !at_word_start {
-                    continue;
-                }
-
-                let filter_value_start = pos + prefix.len();
-
-                // Determine if value is quoted
-                let is_quoted = input[filter_value_start..].starts_with('"');
-                let content_start = if is_quoted {
-                    filter_value_start + 1
-                } else {
-                    filter_value_start
-                };
-
-                // Find end of entire filter value (all segments including |)
-                // Must handle escaped characters (\ followed by any char)
-                let filter_value_end = if is_quoted {
-                    // Look for closing quote
-                    input[content_start..]
-                        .find('"')
-                        .map(|i| content_start + i)
-                        .unwrap_or(input.len())
-                } else {
-                    // End at unescaped whitespace
-                    find_filter_value_end(input, filter_value_start)
-                };
-
-                // Check if cursor is within this filter value range
-                if cursor >= filter_value_start && cursor <= filter_value_end {
-                    // Find the segment the cursor is in (delimited by unescaped |)
-                    // Look for last unescaped | before cursor within the filter value
-                    let value_portion = &input[content_start..cursor.min(filter_value_end)];
-                    let segment_start =
-                        if let Some(pipe_pos) = find_last_unescaped_pipe(value_portion) {
-                            // Cursor is after a |, segment starts after the |
-                            content_start + pipe_pos + 1
-                        } else {
-                            content_start
-                        };
-
-                    // Find end of this segment (next unescaped | or end of filter value)
-                    let remaining = &input[segment_start..filter_value_end];
-                    let segment_end = find_first_unescaped_pipe(remaining)
-                        .map(|i| segment_start + i)
-                        .unwrap_or(filter_value_end);
-
-                    // Extract already-selected values from other segments
-                    // Need to split by unescaped | only
-                    let full_value = &input[content_start..filter_value_end];
-                    let current_segment = &input[segment_start..segment_end];
-                    let segments = split_by_unescaped_pipe(full_value);
-                    let already_selected: Vec<String> = segments
-                        .into_iter()
-                        .filter(|s| s != current_segment && !s.is_empty())
-                        .map(|s| unescape_filter_value(&s))
-                        .collect();
-
-                    return Some((
-                        *filter_type,
-                        segment_start,
-                        segment_end,
-                        is_quoted,
-                        already_selected,
-                    ));
-                }
-            }
-        }
-        None
-    }
-
-    /// Build fuzzy-matched suggestions for the given filter type and typed value.
-    fn build_filter_suggestions(
-        &mut self,
-        filter_type: FilterAutocompleteType,
-        typed_value: &str,
-        already_selected: &[String],
-    ) -> Vec<String> {
-        match filter_type {
-            FilterAutocompleteType::Account => {
-                self.build_account_suggestions(typed_value, already_selected)
-            }
-            FilterAutocompleteType::Category => {
-                self.build_category_suggestions(typed_value, already_selected)
-            }
-        }
-    }
-
-    /// Build suggestions for account filter (Bank/Account format).
-    fn build_account_suggestions(
-        &mut self,
-        typed_value: &str,
-        already_selected: &[String],
-    ) -> Vec<String> {
-        let mut suggestions = Vec::new();
-
-        // Build all Bank/Account combinations
-        for account in self.accounts.values() {
-            if let Some(bank) = self.banks.get(&account.bank_id) {
-                let full_name = format!("{}/{}", bank.name, account.name);
-                suggestions.push(full_name);
-            }
-        }
-
-        // Also add bank-only suggestions (Bank/)
-        for bank in self.banks.values() {
-            suggestions.push(format!("{}/", bank.name));
-        }
-
-        // Filter out already-selected values
-        suggestions.retain(|s| !already_selected.contains(s));
-
-        // Filter by fuzzy matching
-        if typed_value.is_empty() {
-            suggestions.sort();
-            suggestions
-        } else {
-            let mut scored: Vec<_> = suggestions
-                .into_iter()
-                .filter_map(|s| {
-                    // Simple case-insensitive substring match for now
-                    let s_lower = s.to_lowercase();
-                    let typed_lower = typed_value.to_lowercase();
-                    if s_lower.contains(&typed_lower)
-                        || self.fuzzy_matcher.fuzzy_matches(typed_value, &s)
-                    {
-                        // Score by position of match (earlier = better)
-                        let score = s_lower.find(&typed_lower).unwrap_or(1000);
-                        Some((s, score))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            scored.sort_by_key(|(_, score)| *score);
-            scored.into_iter().map(|(s, _)| s).take(10).collect()
-        }
-    }
-
-    /// Build suggestions for category filter.
-    fn build_category_suggestions(
-        &mut self,
-        typed_value: &str,
-        already_selected: &[String],
-    ) -> Vec<String> {
-        let suggestions: Vec<String> = self
-            .categories
-            .iter()
-            .map(|c| c.path.clone())
-            .filter(|s| !already_selected.contains(s))
-            .collect();
-
-        if typed_value.is_empty() {
-            suggestions
-        } else {
-            let mut scored: Vec<_> = suggestions
-                .into_iter()
-                .filter_map(|s| {
-                    let s_lower = s.to_lowercase();
-                    let typed_lower = typed_value.to_lowercase();
-                    if s_lower.contains(&typed_lower)
-                        || self.fuzzy_matcher.fuzzy_matches(typed_value, &s)
-                    {
-                        let score = s_lower.find(&typed_lower).unwrap_or(1000);
-                        Some((s, score))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            scored.sort_by_key(|(_, score)| *score);
-            scored.into_iter().map(|(s, _)| s).take(10).collect()
-        }
-    }
-
-    /// Move to next suggestion in autocomplete popup.
     pub fn filter_autocomplete_next(&mut self) {
-        if let Some(ref mut state) = self.filter_autocomplete {
-            if !state.suggestions.is_empty() {
-                state.selected = (state.selected + 1) % state.suggestions.len();
-            }
-        }
+        self.current_search_state_mut().search_bar.autocomplete_next();
     }
 
-    /// Move to previous suggestion in autocomplete popup.
     pub fn filter_autocomplete_prev(&mut self) {
-        if let Some(ref mut state) = self.filter_autocomplete {
-            if !state.suggestions.is_empty() {
-                state.selected =
-                    (state.selected + state.suggestions.len() - 1) % state.suggestions.len();
-            }
-        }
+        self.current_search_state_mut().search_bar.autocomplete_prev();
     }
 
-    /// Select current suggestion and insert into search input.
-    /// Returns true if a selection was made.
     pub fn filter_autocomplete_select(&mut self) -> bool {
-        let Some(ac_state) = self.filter_autocomplete.take() else {
-            return false;
-        };
-
-        let Some(selected_value) = ac_state.suggestions.get(ac_state.selected).cloned() else {
-            return false;
-        };
-
-        // Escape the value appropriately
-        let escaped = if ac_state.quoted {
-            // Inside quotes, no escaping needed (but we keep the quote structure)
-            selected_value
-        } else if selected_value.contains(' ') || selected_value.contains('|') {
-            // Escape spaces with backslash
-            selected_value.replace(' ', "\\ ").replace('|', "\\|")
-        } else {
-            selected_value
-        };
-
-        // Replace the typed value with the selected value
         let state = self.current_search_state_mut();
-        let old_value = state.db_search_input.value().to_string();
-
-        let mut new_value = String::with_capacity(old_value.len() + escaped.len());
-        new_value.push_str(&old_value[..ac_state.value_start]);
-        new_value.push_str(&escaped);
-        if ac_state.quoted {
-            // Add closing quote if it wasn't there
-            if ac_state.value_end >= old_value.len()
-                || !old_value[ac_state.value_end..].starts_with('"')
-            {
-                new_value.push('"');
-            }
+        let selected = state.search_bar.autocomplete_select();
+        if selected {
+            self.reload_current_tab();
+            self.selected_index = 0;
         }
-        // Don't add trailing space - user may want to type | for OR syntax
-        new_value.push_str(&old_value[ac_state.value_end..]);
-
-        // Position cursor after the inserted value
-        let new_cursor = ac_state.value_start + escaped.len() + if ac_state.quoted { 1 } else { 0 };
-        let tail_len = new_value.len().saturating_sub(new_cursor);
-
-        state.db_search_input = Input::new(new_value);
-        for _ in 0..tail_len {
-            state.db_search_input.handle(InputRequest::GoToPrevChar);
-        }
-
-        // Re-parse query and reload
-        let cursor = state.db_search_input.cursor();
-        let input_value = state.db_search_input.value().to_string();
-        let (query, _) = DbSearchQuery::parse_with_cursor(&input_value, Some(cursor));
-        state.db_search_query = query;
-        self.reload_current_tab();
-        self.selected_index = 0;
-
-        true
+        selected
     }
 
-    /// Close autocomplete popup without selecting.
     pub fn filter_autocomplete_close(&mut self) {
-        self.filter_autocomplete = None;
+        self.current_search_state_mut().search_bar.autocomplete_close();
     }
 
-    /// Check if filter autocomplete popup is active.
     pub fn filter_autocomplete_active(&self) -> bool {
-        self.filter_autocomplete.is_some()
+        self.current_search_state()
+            .map(|s| s.search_bar.autocomplete_active())
+            .unwrap_or(false)
     }
 
     // ==================== Fuzzy Search ====================
@@ -2149,7 +1158,7 @@ impl App {
     fn reload_current_tab(&mut self) {
         let filter = self
             .current_search_state()
-            .map(|s| s.db_search_query.to_filter(Some(500)))
+            .map(|s| s.search_bar.parsed().to_transaction_filter(Some(500)))
             .unwrap_or_else(|| TransactionFilter {
                 limit: Some(500),
                 ..Default::default()
@@ -2339,103 +1348,3 @@ impl App {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tokenize_for_reorder_simple() {
-        let tokens = App::tokenize_for_reorder("groceries date:2024");
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
-        assert_eq!(tokens[0].start, 0);
-        assert_eq!(tokens[0].end, 9);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Filter);
-        assert_eq!(tokens[1].start, 10);
-        assert_eq!(tokens[1].end, 19);
-    }
-
-    #[test]
-    fn test_tokenize_for_reorder_filter_first() {
-        let tokens = App::tokenize_for_reorder("date:2024 groceries");
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Filter);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Fts);
-    }
-
-    #[test]
-    fn test_tokenize_for_reorder_with_regex() {
-        let tokens = App::tokenize_for_reorder("/pattern/i date:2024 coffee");
-        assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Regex);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Filter);
-        assert_eq!(tokens[2].token_type, ReorderTokenType::Fts);
-    }
-
-    #[test]
-    fn test_tokenize_for_reorder_filter_shortcuts() {
-        let tokens = App::tokenize_for_reorder("coffee d:2024");
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Filter);
-
-        let tokens = App::tokenize_for_reorder("a:ING food");
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Filter);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Fts);
-    }
-
-    #[test]
-    fn test_tokenize_for_reorder_quoted_filter() {
-        let tokens = App::tokenize_for_reorder(r#"coffee account:"ING/Orange Everyday""#);
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Filter);
-    }
-
-    #[test]
-    fn test_tokenize_for_reorder_multiple_fts() {
-        let tokens = App::tokenize_for_reorder("coffee shop date:2024");
-        assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Fts);
-        assert_eq!(tokens[2].token_type, ReorderTokenType::Filter);
-    }
-
-    #[test]
-    fn test_classify_token() {
-        assert_eq!(App::classify_token("groceries"), ReorderTokenType::Fts);
-        assert_eq!(App::classify_token("date:2024"), ReorderTokenType::Filter);
-        assert_eq!(App::classify_token("d:2024"), ReorderTokenType::Filter);
-        assert_eq!(App::classify_token("account:ING"), ReorderTokenType::Filter);
-        assert_eq!(App::classify_token("a:ING"), ReorderTokenType::Filter);
-        assert_eq!(App::classify_token("amount:>100"), ReorderTokenType::Filter);
-        assert_eq!(App::classify_token("am:>100"), ReorderTokenType::Filter);
-        assert_eq!(App::classify_token("category:Food"), ReorderTokenType::Filter);
-        assert_eq!(App::classify_token("c:Food"), ReorderTokenType::Filter);
-        assert_eq!(App::classify_token("/pattern/i"), ReorderTokenType::Regex);
-    }
-
-    #[test]
-    fn test_tokenize_for_reorder_regex_after_fts() {
-        // Regex after FTS text should be detected for reordering
-        let tokens = App::tokenize_for_reorder("coffee /pattern/i");
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Fts);
-        assert_eq!(tokens[0].start, 0);
-        assert_eq!(tokens[0].end, 6);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Regex);
-        assert_eq!(tokens[1].start, 7);
-        assert_eq!(tokens[1].end, 17);
-    }
-
-    #[test]
-    fn test_tokenize_for_reorder_mixed() {
-        // Filter, FTS, then regex - regex should be detected after FTS
-        let tokens = App::tokenize_for_reorder("date:2024 coffee /pat/");
-        assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0].token_type, ReorderTokenType::Filter);
-        assert_eq!(tokens[1].token_type, ReorderTokenType::Fts);
-        assert_eq!(tokens[2].token_type, ReorderTokenType::Regex);
-    }
-}

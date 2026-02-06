@@ -21,7 +21,7 @@
 //!   - `coffee OR tea` - native FTS5 OR
 //!   - `"exact phrase"` - phrase match
 //!
-//! - **Transition**: End with ` ~` to switch to fuzzy mode
+//! - **Transition**: Type `~` at a word boundary to switch to fuzzy mode
 
 mod context;
 mod filter;

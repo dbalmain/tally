@@ -108,7 +108,7 @@ impl AmountFilter {
 
 /// Parse an amount string to cents.
 /// Supports: 100, 100.50, 100.5
-fn parse_amount(s: &str) -> Option<i64> {
+pub(crate) fn parse_amount(s: &str) -> Option<i64> {
     if s.is_empty() {
         return None;
     }

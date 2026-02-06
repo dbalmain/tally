@@ -31,7 +31,7 @@ impl SearchConfig {
         }
     }
 
-    /// Find a filter by name or alias.
+    /// Find a filter by name or alias (internal use).
     fn find_filter(&self, name: &str) -> Option<&dyn Filter> {
         self.filters.iter().find_map(|f| {
             if f.name() == name || f.alias() == Some(name) {
@@ -42,19 +42,39 @@ impl SearchConfig {
         })
     }
 
+    /// Find a filter by its canonical name (for autocomplete).
+    pub fn find_filter_by_name(&self, name: &str) -> Option<&dyn Filter> {
+        self.filters.iter().find_map(|f| {
+            if f.name() == name {
+                Some(f.as_ref())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get all shortcut expansions: (alias + ":", canonical_name + ":").
+    /// Sorted by alias length descending so longer aliases match first (e.g., "am:" before "a:").
+    pub fn shortcut_expansions(&self) -> Vec<(String, String)> {
+        let mut expansions: Vec<_> = self
+            .filters
+            .iter()
+            .filter_map(|f| {
+                f.alias().map(|alias| {
+                    (format!("{}:", alias), format!("{}:", f.name()))
+                })
+            })
+            .collect();
+        // Sort by alias length descending so "am:" matches before "a:"
+        expansions.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        expansions
+    }
 }
 
 /// Parse search input with cursor position.
 ///
 /// Returns the parsed query and cursor context for key handling.
 pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery, CursorContext) {
-    // Check for transition to fuzzy mode
-    let (input, transition_to_fuzzy) = if let Some(stripped) = input.strip_suffix(" ~") {
-        (stripped, true)
-    } else {
-        (input, false)
-    };
-
     let raw_tokens = tokenize(input);
     let mut parts = Vec::new();
     let mut cursor_context = CursorContext::Whitespace;
@@ -178,7 +198,6 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
     (
         ParsedQuery {
             parts,
-            transition_to_fuzzy,
         },
         cursor_context,
     )
@@ -405,14 +424,6 @@ mod tests {
             }
             _ => panic!("Expected FTS context, got {:?}", context),
         }
-    }
-
-    #[test]
-    fn test_transition_to_fuzzy() {
-        let config = test_config();
-        let (query, _) = parse(&config, "date:2024 coffee ~", 17);
-
-        assert!(query.transition_to_fuzzy);
     }
 
     #[test]
