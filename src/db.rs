@@ -82,6 +82,102 @@ CREATE INDEX IF NOT EXISTS idx_enrichments_category ON transaction_enrichments(c
 CREATE INDEX IF NOT EXISTS idx_enrichments_confirmed ON transaction_enrichments(category_confirmed);
 CREATE INDEX IF NOT EXISTS idx_transfers_confirmed ON transfers(confirmed);
 
+-- Pre-joined view for transaction searches
+-- Provides consistent column names for pluggable filters
+DROP VIEW IF EXISTS transactions_search;
+CREATE VIEW transactions_search AS
+SELECT
+    t.id,
+    t.account_id,
+    t.date,
+    t.description,
+    t.amount_cents,
+    t.balance_cents,
+    t.hash,
+    t.metadata,
+    t.source_file,
+    t.import_batch_id,
+    a.bank_id,
+    b.name AS bank_name,
+    a.name AS account_name,
+    e.category_id,
+    c.path AS category_path,
+    e.category_source,
+    e.category_confirmed,
+    e.ai_confidence
+FROM transactions t
+JOIN accounts a ON t.account_id = a.id
+JOIN banks b ON a.bank_id = b.id
+LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
+LEFT JOIN categories c ON e.category_id = c.id
+WHERE a.deleted_at IS NULL AND b.deleted_at IS NULL;
+
+-- View for uncategorised transactions (todo list)
+DROP VIEW IF EXISTS transactions_uncategorised;
+CREATE VIEW transactions_uncategorised AS
+SELECT
+    t.id,
+    t.account_id,
+    t.date,
+    t.description,
+    t.amount_cents,
+    t.balance_cents,
+    t.hash,
+    t.metadata,
+    t.source_file,
+    t.import_batch_id,
+    a.bank_id,
+    b.name AS bank_name,
+    a.name AS account_name
+FROM transactions t
+JOIN accounts a ON t.account_id = a.id
+JOIN banks b ON a.bank_id = b.id
+LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
+LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id
+WHERE a.deleted_at IS NULL 
+  AND b.deleted_at IS NULL
+  AND e.category_id IS NULL
+  AND tr.id IS NULL;
+
+-- View for transfer searches
+-- Date comes from the "from" transaction for filtering
+DROP VIEW IF EXISTS transfers_search;
+CREATE VIEW transfers_search AS
+SELECT
+    tr.id AS transfer_id,
+    tr.source AS transfer_source,
+    tr.confirmed AS transfer_confirmed,
+    tr.created_at AS transfer_created_at,
+    -- From transaction
+    ft.id AS from_id,
+    ft.date AS date,
+    ft.description AS from_description,
+    ft.amount_cents AS from_amount_cents,
+    ft.balance_cents AS from_balance_cents,
+    fa.bank_id AS from_bank_id,
+    fb.name AS from_bank_name,
+    fa.name AS from_account_name,
+    -- To transaction
+    tt.id AS to_id,
+    tt.date AS to_date,
+    tt.description AS to_description,
+    tt.amount_cents AS to_amount_cents,
+    tt.balance_cents AS to_balance_cents,
+    ta.bank_id AS to_bank_id,
+    tb.name AS to_bank_name,
+    ta.name AS to_account_name
+FROM transfers tr
+JOIN transactions ft ON tr.from_transaction_id = ft.id
+JOIN accounts fa ON ft.account_id = fa.id
+JOIN banks fb ON fa.bank_id = fb.id
+JOIN transactions tt ON tr.to_transaction_id = tt.id
+JOIN accounts ta ON tt.account_id = ta.id
+JOIN banks tb ON ta.bank_id = tb.id
+WHERE fa.deleted_at IS NULL 
+  AND fb.deleted_at IS NULL
+  AND ta.deleted_at IS NULL
+  AND tb.deleted_at IS NULL;
+
 -- FTS5 virtual table for full-text search on transactions
 -- contentless: we don't duplicate data, just index it
 -- contentless_delete=1: allows DELETE operations

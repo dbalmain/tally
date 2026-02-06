@@ -1,0 +1,36 @@
+//! Search system with pluggable filters and context-aware parsing.
+//!
+//! This module provides a clean, extensible search system with:
+//! - Simple tokenization (filters, regex, FTS)
+//! - Trait-based pluggable filters that return SQL directly
+//! - Context-aware key handling based on cursor position
+//!
+//! # Query Syntax
+//!
+//! - **Filters**: `name:value` where value has no whitespace
+//!   - `date:2024`, `date:2024-01`, `date:2024-01..2024-06`
+//!   - `amount:100`, `amount:>100`, `amount:50..200`
+//!   - `account:ING/Orange`, `account:ING|NAB`
+//!   - `category:Food`, `category:Food|Transport`
+//!
+//! - **Regex**: `/pattern/flags` (e.g., `/coffee.*/i`)
+//!
+//! - **FTS**: Everything else is full-text search
+//!   - `groceries` - simple term
+//!   - `coffee shop` - implicit AND
+//!   - `coffee OR tea` - native FTS5 OR
+//!   - `"exact phrase"` - phrase match
+//!
+//! - **Transition**: End with ` ~` to switch to fuzzy mode
+
+mod context;
+mod filter;
+mod legacy;
+mod query;
+
+pub use context::CursorContext;
+pub use filter::{Filter, FilterResult};
+pub use query::{ParsedQuery, QueryPart, Span};
+
+// Re-export legacy types for backwards compatibility during migration
+pub use legacy::{DbFtsMatch, DbRegexMatch, DbSearchQuery, FuzzyMatcher};

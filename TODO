@@ -1,0 +1,16 @@
+- select transactions for classifications
+  - I should be able to select all, or select a number of transactions
+  - I should be able to change the search and select even more transactions, the selected transactions should remain
+  - I should be able to select a range
+- vim-style navigation
+  - number transactions and go to transaction
+  - repeat command. e.g. 10j to go down 10 rows
+- delete any part of `date:` and the whole query part goes
+- error indication in search. Highlight bad search query parts red
+- you need to close and re-open tally to load new categories
+- show sum it debit/credit column
+- MCP server
+- filters
+- add `filter:` to query
+- export as CSV or JSON
+- range grammar should utilise `..` and `..=` only. 
