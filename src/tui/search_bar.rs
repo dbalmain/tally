@@ -218,14 +218,8 @@ impl SearchBar {
         new_input.push_str(&selected);
         new_input.push_str(&old_input[segment_end..]);
 
-        // Position cursor after the inserted value
-        let new_cursor = segment_start + selected.len();
-        let tail_len = new_input.len().saturating_sub(new_cursor);
-
         self.input = Input::new(new_input);
-        for _ in 0..tail_len {
-            self.input.handle(InputRequest::GoToPrevChar);
-        }
+        self.set_cursor(segment_start + selected.len());
 
         self.reparse();
         true
@@ -238,8 +232,14 @@ impl SearchBar {
 
     /// Set the input value and position cursor at the given character index.
     fn set_input(&mut self, value: String, cursor_pos: usize) {
-        let tail = value.len().saturating_sub(cursor_pos);
         self.input = Input::new(value);
+        self.set_cursor(cursor_pos);
+    }
+
+    /// Position cursor at the given character index.
+    fn set_cursor(&mut self, cursor_pos: usize) {
+        let value = self.input.value();
+        let tail = value.len().saturating_sub(cursor_pos);
         for _ in 0..tail {
             self.input.handle(InputRequest::GoToPrevChar);
         }
@@ -512,14 +512,8 @@ impl SearchBar {
         new_value.push_str("//");
         new_value.push_str(&value[cursor..]);
 
-        // Place cursor between the slashes
-        let new_cursor = cursor + 1;
-        let tail_len = new_value.len() - new_cursor;
-
         self.input = Input::new(new_value);
-        for _ in 0..tail_len {
-            self.input.handle(InputRequest::GoToPrevChar);
-        }
+        self.set_cursor(cursor + 1);
 
         true
     }
@@ -527,7 +521,6 @@ impl SearchBar {
     /// Handle delete in regex - delete entire regex when deleting a delimiter.
     fn handle_delete_in_regex(&mut self, req: &InputRequest) -> bool {
         let cursor = self.cursor();
-        let value = self.input.value().to_string();
 
         // Find regex that cursor is in or adjacent to
         let regex_part = self.parsed.parts.iter().find(|p| {
@@ -544,32 +537,10 @@ impl SearchBar {
             return false;
         };
 
-        // Check if we're deleting a slash delimiter
+        // Check if we're deleting the first or last slash
         let deleting_delimiter = match req {
-            InputRequest::DeletePrevChar => {
-                // Deleting opening slash or closing slash
-                cursor == span.start + 1 || {
-                    // Check if cursor is just after closing slash
-                    let content = &value[span.start..span.end];
-                    if let Some(closing_pos) = content.rfind('/') {
-                        cursor == span.start + closing_pos + 1
-                    } else {
-                        false
-                    }
-                }
-            }
-            InputRequest::DeleteNextChar => {
-                // Deleting opening slash
-                cursor == span.start || {
-                    // Check if cursor is at closing slash
-                    let content = &value[span.start..span.end];
-                    if let Some(closing_pos) = content[1..].rfind('/') {
-                        cursor == span.start + 1 + closing_pos
-                    } else {
-                        false
-                    }
-                }
-            }
+            InputRequest::DeletePrevChar => cursor == span.start + 1 || cursor == span.end,
+            InputRequest::DeleteNextChar => cursor == span.start || cursor == span.end - 1,
             _ => false,
         };
 
@@ -578,6 +549,7 @@ impl SearchBar {
         }
 
         // Delete entire regex
+        let value = self.input.value();
         let mut new_value = String::with_capacity(value.len());
         new_value.push_str(&value[..span.start]);
 
@@ -590,12 +562,8 @@ impl SearchBar {
         new_value.push_str(after);
 
         let new_cursor = span.start.min(new_value.len());
-        let tail_len = new_value.len().saturating_sub(new_cursor);
-
         self.input = Input::new(new_value);
-        for _ in 0..tail_len {
-            self.input.handle(InputRequest::GoToPrevChar);
-        }
+        self.set_cursor(new_cursor);
 
         true
     }
@@ -610,12 +578,8 @@ impl SearchBar {
         // Build styled spans for each token
         let mut spans = vec![Span::styled(prefix, Style::default().fg(Color::DarkGray))];
 
-        if value.is_empty() {
-            // Empty input - just show prefix
-        } else if active {
-            spans.extend(self.styled_spans_active(cursor));
-        } else {
-            spans.extend(self.styled_spans_inactive());
+        if !value.is_empty() {
+            spans.extend(self.styled_spans(active.then_some(cursor)));
         }
 
         let line = Line::from(spans);
@@ -628,70 +592,60 @@ impl SearchBar {
         (cursor_x, area.y)
     }
 
-    /// Generate styled spans for active (editing) state.
-    fn styled_spans_active(&self, cursor: usize) -> Vec<Span<'_>> {
+    /// Generate styled spans for the search bar content.
+    fn styled_spans(&self, cursor: Option<usize>) -> Vec<Span<'_>> {
         let value = self.input.value();
         let mut spans = Vec::new();
 
-        // Find which part the cursor is in
-        let cursor_part_idx = self.parsed.parts.iter().position(|p| {
-            let span = p.span();
-            cursor >= span.start && cursor <= span.end
+        // Determine which parts are "active" (cursor is in them)
+        let active_part_idx = cursor.and_then(|c| {
+            if matches!(self.context, CursorContext::Fts { .. }) {
+                // When in FTS, all FTS parts are active
+                None
+            } else {
+                self.parsed.parts.iter().position(|p| {
+                    let span = p.span();
+                    c >= span.start && c <= span.end
+                })
+            }
         });
-
-        // Also check if cursor is in FTS block (all FTS parts highlighted together)
-        let cursor_in_fts = matches!(self.context, CursorContext::Fts { .. });
 
         for (idx, part) in self.parsed.parts.iter().enumerate() {
             let span = part.span();
             let text = &value[span.start..span.end];
 
-            let is_active = if cursor_in_fts {
-                matches!(part, QueryPart::Fts { .. })
-            } else {
-                Some(idx) == cursor_part_idx
+            let is_active = match active_part_idx {
+                Some(active_idx) => idx == active_idx,
+                None => {
+                    // When in FTS context, all FTS parts are active
+                    cursor.is_some() && matches!(part, QueryPart::Fts { .. })
+                }
             };
 
             let color = self.color_for_part(part, is_active);
             spans.push(Span::styled(text, Style::default().fg(color)));
         }
 
-        // Handle any trailing content not covered by parts
+        // Handle trailing content not covered by parts
         if let Some(last) = self.parsed.parts.last() {
             let end = last.span().end;
             if end < value.len() {
                 let text = &value[end..];
-                spans.push(Span::styled(text, Style::default().fg(Color::Cyan)));
+                let color = if cursor.is_some() {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                };
+                spans.push(Span::styled(text, Style::default().fg(color)));
             }
         } else if !value.is_empty() {
             // No parts - show all as FTS
-            spans.push(Span::styled(value, Style::default().fg(Color::Cyan)));
-        }
-
-        spans
-    }
-
-    /// Generate styled spans for inactive state.
-    fn styled_spans_inactive(&self) -> Vec<Span<'_>> {
-        let value = self.input.value();
-        let mut spans = Vec::new();
-
-        for part in &self.parsed.parts {
-            let span = part.span();
-            let text = &value[span.start..span.end];
-            let color = self.color_for_part(part, false);
-            spans.push(Span::styled(text, Style::default().fg(color)));
-        }
-
-        // Handle trailing content
-        if let Some(last) = self.parsed.parts.last() {
-            let end = last.span().end;
-            if end < value.len() {
-                let text = &value[end..];
-                spans.push(Span::styled(text, Style::default().fg(Color::DarkGray)));
-            }
-        } else if !value.is_empty() {
-            spans.push(Span::styled(value, Style::default().fg(Color::DarkGray)));
+            let color = if cursor.is_some() {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            };
+            spans.push(Span::styled(value, Style::default().fg(color)));
         }
 
         spans
