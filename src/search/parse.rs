@@ -53,21 +53,12 @@ impl SearchConfig {
         })
     }
 
-    /// Get all shortcut expansions: (alias + ":", canonical_name + ":").
-    /// Sorted by alias length descending so longer aliases match first (e.g., "am:" before "a:").
-    pub fn shortcut_expansions(&self) -> Vec<(String, String)> {
-        let mut expansions: Vec<_> = self
-            .filters
-            .iter()
-            .filter_map(|f| {
-                f.alias().map(|alias| {
-                    (format!("{}:", alias), format!("{}:", f.name()))
-                })
-            })
-            .collect();
-        // Sort by alias length descending so "am:" matches before "a:"
-        expansions.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        expansions
+    /// Resolve a word to a canonical filter name.
+    ///
+    /// Checks both canonical names and aliases.
+    /// Returns the canonical name if found.
+    pub fn resolve_filter_name(&self, word: &str) -> Option<&'static str> {
+        self.find_filter(word).map(|f| f.name())
     }
 }
 
@@ -81,6 +72,9 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
 
     // Collect FTS tokens for combining
     let mut fts_tokens: Vec<(String, Span)> = Vec::new();
+    // Whitespace between FTS tokens is deferred: the combined FTS span covers it,
+    // so adding it to parts would cause overlap and wrong ordering.
+    let mut pending_whitespace: Option<Span> = None;
 
     for token in &raw_tokens {
         match token {
@@ -92,8 +86,20 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
             } => {
                 // Flush any pending FTS tokens
                 if !fts_tokens.is_empty() {
-                    parts.push(combine_fts_tokens(&fts_tokens, cursor));
+                    let fts_part = combine_fts_tokens(&fts_tokens, cursor);
+                    if let QueryPart::Fts { span: fts_span, .. } = &fts_part {
+                        if fts_span.contains(cursor) || fts_span.at_end(cursor) {
+                            cursor_context = CursorContext::Fts {
+                                offset: cursor - fts_span.start,
+                            };
+                        }
+                    }
+                    parts.push(fts_part);
                     fts_tokens.clear();
+                }
+                // Flush pending whitespace (between FTS and this filter)
+                if let Some(ws_span) = pending_whitespace.take() {
+                    parts.push(QueryPart::Whitespace { span: ws_span });
                 }
 
                 if let Some(filter) = config.find_filter(name) {
@@ -130,8 +136,20 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
             } => {
                 // Flush any pending FTS tokens
                 if !fts_tokens.is_empty() {
-                    parts.push(combine_fts_tokens(&fts_tokens, cursor));
+                    let fts_part = combine_fts_tokens(&fts_tokens, cursor);
+                    if let QueryPart::Fts { span: fts_span, .. } = &fts_part {
+                        if fts_span.contains(cursor) || fts_span.at_end(cursor) {
+                            cursor_context = CursorContext::Fts {
+                                offset: cursor - fts_span.start,
+                            };
+                        }
+                    }
+                    parts.push(fts_part);
                     fts_tokens.clear();
+                }
+                // Flush pending whitespace (between FTS and this regex)
+                if let Some(ws_span) = pending_whitespace.take() {
+                    parts.push(QueryPart::Whitespace { span: ws_span });
                 }
 
                 if !config.allow_regex {
@@ -166,17 +184,24 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
             }
 
             RawToken::Fts { text, span } => {
+                // Clear pending whitespace — the combined FTS span will cover it
+                pending_whitespace = None;
                 if config.allow_fts {
                     fts_tokens.push((text.clone(), *span));
                 }
             }
 
             RawToken::Whitespace { span } => {
-                // Check if cursor is in whitespace
-                if span.contains(cursor) {
-                    cursor_context = CursorContext::Whitespace;
+                // Don't set cursor_context here: it defaults to Whitespace,
+                // and at boundaries (e.g., cursor at filter value end == whitespace start)
+                // the preceding token should win.
+                if fts_tokens.is_empty() {
+                    // No pending FTS — safe to add directly
+                    parts.push(QueryPart::Whitespace { span: *span });
+                } else {
+                    // Between FTS tokens — defer so we don't overlap with combined FTS span
+                    pending_whitespace = Some(*span);
                 }
-                parts.push(QueryPart::Whitespace { span: *span });
             }
         }
     }
@@ -193,6 +218,11 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
             }
         }
         parts.push(fts_part);
+    }
+
+    // Flush trailing whitespace (e.g., "Salary ")
+    if let Some(ws_span) = pending_whitespace.take() {
+        parts.push(QueryPart::Whitespace { span: ws_span });
     }
 
     (
@@ -422,6 +452,31 @@ mod tests {
             CursorContext::Fts { offset } => {
                 assert!(offset > 0);
             }
+            _ => panic!("Expected FTS context, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_cursor_context_filter_before_fts() {
+        let config = test_config();
+        // Cursor at end of filter value when followed by FTS
+        let (_, context) = parse(&config, "account:ING coffee", 11);
+        match context {
+            CursorContext::Filter { name, offset } => {
+                assert_eq!(name, "account");
+                assert_eq!(offset, 3); // After "ING"
+            }
+            _ => panic!("Expected Filter context, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_cursor_context_fts_before_filter() {
+        let config = test_config();
+        // Cursor in FTS that appears before a filter
+        let (_, context) = parse(&config, "coffee date:2024", 4);
+        match context {
+            CursorContext::Fts { .. } => {}
             _ => panic!("Expected FTS context, got {:?}", context),
         }
     }

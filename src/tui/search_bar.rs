@@ -142,8 +142,6 @@ impl SearchBar {
             KeyResult::NotHandled => {}
             res => {
                 self.reparse();
-                self.expand_shortcuts();
-                self.reparse();
                 self.update_autocomplete();
                 return res;
             }
@@ -152,74 +150,8 @@ impl SearchBar {
         // Normal input handling
         self.input.handle(req);
         self.reparse();
-        self.expand_shortcuts();
-        self.reparse();
         self.update_autocomplete();
         KeyResult::Handled
-    }
-
-    /// Expand filter shortcuts at cursor position based on registered filters.
-    ///
-    /// Uses each filter's `alias()` method to determine shortcut expansions.
-    /// For example, if DateFilter has alias "d", then `d:` expands to `date:`.
-    fn expand_shortcuts(&mut self) {
-        let cursor = self.cursor();
-        let value = self.input.value();
-
-        // Get expansions from config (sorted by length descending)
-        let expansions = self.config.shortcut_expansions();
-
-        for (shortcut, expansion) in &expansions {
-            if cursor >= shortcut.len() {
-                let start = cursor - shortcut.len();
-                // Only expand at word boundary (start of input or preceded by space)
-                let at_word_start = start == 0
-                    || value
-                        .chars()
-                        .nth(start - 1)
-                        .map(|c| c.is_whitespace())
-                        .unwrap_or(false);
-
-                if at_word_start && value.get(start..cursor) == Some(shortcut.as_str()) {
-                    // Build new value with expansion
-                    let mut new_value = String::with_capacity(value.len() + expansion.len());
-                    new_value.push_str(&value[..start]);
-                    new_value.push_str(expansion);
-                    new_value.push_str(&value[cursor..]);
-
-                    // Position cursor at end of expansion
-                    let tail_len = value.len() - cursor;
-                    self.input = Input::new(new_value);
-                    for _ in 0..tail_len {
-                        self.input.handle(InputRequest::GoToPrevChar);
-                    }
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Handle Enter key.
-    pub fn confirm(&mut self) -> KeyResult {
-        // If autocomplete is active and has selection, select it
-        if let Some(ref ac) = self.autocomplete {
-            if !ac.suggestions.is_empty() {
-                self.autocomplete_select();
-                return KeyResult::Handled;
-            }
-        }
-        self.autocomplete = None;
-        KeyResult::Confirmed
-    }
-
-    /// Handle Esc key.
-    pub fn cancel(&mut self) -> KeyResult {
-        // If autocomplete is active, close it first
-        if self.autocomplete.is_some() {
-            self.autocomplete = None;
-            return KeyResult::Handled;
-        }
-        KeyResult::Cancelled
     }
 
     /// Navigate to next autocomplete suggestion.
@@ -304,6 +236,15 @@ impl SearchBar {
         self.autocomplete = None;
     }
 
+    /// Set the input value and position cursor at the given character index.
+    fn set_input(&mut self, value: String, cursor_pos: usize) {
+        let tail = value.len().saturating_sub(cursor_pos);
+        self.input = Input::new(value);
+        for _ in 0..tail {
+            self.input.handle(InputRequest::GoToPrevChar);
+        }
+    }
+
     /// Reparse the input and update context.
     fn reparse(&mut self) {
         let value = self.input.value();
@@ -379,6 +320,13 @@ impl SearchBar {
     /// Returns the result of handling the input.
     fn handle_special_input(&mut self, req: &InputRequest) -> KeyResult {
         match req {
+            InputRequest::InsertChar(':') => {
+                if self.handle_colon_insert() {
+                    KeyResult::Handled
+                } else {
+                    KeyResult::NotHandled
+                }
+            }
             InputRequest::InsertChar('/') => {
                 if self.handle_slash_insert() {
                     KeyResult::Handled
@@ -402,6 +350,112 @@ impl SearchBar {
             }
             _ => KeyResult::NotHandled,
         }
+    }
+
+    /// Handle `:` key - filter creation, deduplication, and reordering.
+    ///
+    /// When `:` is typed in FTS/whitespace context:
+    /// 1. Look at the word before cursor (e.g., `d` in `coffee d:`)
+    /// 2. Check if it matches a registered filter name or alias
+    /// 3. If matching filter already exists → delete typed text, jump cursor to that filter
+    /// 4. If no existing filter → create `name:` and move it before FTS text
+    fn handle_colon_insert(&mut self) -> bool {
+        // Only special behavior in FTS or whitespace context
+        if !matches!(
+            self.context,
+            CursorContext::Fts { .. } | CursorContext::Whitespace
+        ) {
+            return false;
+        }
+
+        let cursor = self.cursor();
+        let value = self.input.value().to_string();
+
+        // Find word before cursor (scan back for whitespace)
+        let word_start = value[..cursor]
+            .rfind(|c: char| c.is_whitespace())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        if word_start == cursor {
+            return false; // No word before cursor
+        }
+
+        let word = &value[word_start..cursor];
+
+        // Resolve to canonical filter name
+        let Some(canonical) = self.config.resolve_filter_name(word) else {
+            return false;
+        };
+
+        // Check if this filter already exists in the query
+        let existing = self
+            .parsed
+            .parts
+            .iter()
+            .any(|p| matches!(p, QueryPart::Filter { name, .. } if *name == canonical));
+
+        // Remove the word from input, trimming surrounding whitespace
+        let before = value[..word_start].trim_end();
+        let after = value[cursor..].trim_start();
+        let cleaned = match (before.is_empty(), after.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => after.to_string(),
+            (false, true) => before.to_string(),
+            (false, false) => format!("{} {}", before, after),
+        };
+
+        if existing {
+            // Filter exists: jump cursor to end of its value
+            let (parsed, _) = parse(&self.config, &cleaned, 0);
+
+            let target = parsed
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    QueryPart::Filter {
+                        name, value_span, ..
+                    } if *name == canonical => Some(value_span.end),
+                    _ => None,
+                })
+                .unwrap_or(0);
+
+            self.set_input(cleaned, target);
+        } else {
+            // New filter: insert before FTS
+            let filter_text = format!("{}:", canonical);
+
+            // Parse cleaned string to find FTS position
+            let (cleaned_parsed, _) = parse(&self.config, &cleaned, 0);
+
+            let fts_start = cleaned_parsed.parts.iter().find_map(|p| match p {
+                QueryPart::Fts { span, .. } => Some(span.start),
+                _ => None,
+            });
+
+            let (new_value, cursor_pos) = if let Some(pos) = fts_start {
+                let prefix = cleaned[..pos].trim_end();
+                let suffix = cleaned[pos..].trim_start();
+                if prefix.is_empty() {
+                    (
+                        format!("{} {}", filter_text, suffix),
+                        filter_text.len(),
+                    )
+                } else {
+                    let cursor = prefix.len() + 1 + filter_text.len();
+                    (format!("{} {} {}", prefix, filter_text, suffix), cursor)
+                }
+            } else if cleaned.is_empty() {
+                (filter_text.clone(), filter_text.len())
+            } else {
+                let cursor = cleaned.len() + 1 + filter_text.len();
+                (format!("{} {}", cleaned, filter_text), cursor)
+            };
+
+            self.set_input(new_value, cursor_pos);
+        }
+
+        true
     }
 
     /// Handle `~` key - transition to fuzzy search if at word boundary.
@@ -741,8 +795,79 @@ mod tests {
         bar.handle_input(InputRequest::InsertChar('0'));
         bar.handle_input(InputRequest::InsertChar('2'));
         bar.handle_input(InputRequest::InsertChar('4'));
-        // d: gets expanded to date: by shortcut handling
+        // d: gets expanded to date: by colon handler
         assert_eq!(bar.value(), "date:2024");
+    }
+
+    #[test]
+    fn test_colon_expands_alias() {
+        let mut bar = SearchBar::new(test_config());
+        // Type "am:" - should expand to "amount:"
+        for c in "am".chars() {
+            bar.handle_input(InputRequest::InsertChar(c));
+        }
+        bar.handle_input(InputRequest::InsertChar(':'));
+        assert_eq!(bar.value(), "amount:");
+        assert_eq!(bar.cursor(), 7);
+    }
+
+    #[test]
+    fn test_colon_reorders_before_fts() {
+        let mut bar = SearchBar::new(test_config());
+        // Type "coffee d:" - should become "date: coffee"
+        for c in "coffee d".chars() {
+            bar.handle_input(InputRequest::InsertChar(c));
+        }
+        bar.handle_input(InputRequest::InsertChar(':'));
+        assert_eq!(bar.value(), "date: coffee");
+        assert_eq!(bar.cursor(), 5); // After "date:"
+    }
+
+    #[test]
+    fn test_colon_dedup_jumps_to_existing() {
+        let mut bar = SearchBar::new(test_config());
+        // Type "date:2024 " then "d:"
+        for c in "date:2024 d".chars() {
+            bar.handle_input(InputRequest::InsertChar(c));
+        }
+        bar.handle_input(InputRequest::InsertChar(':'));
+        assert_eq!(bar.value(), "date:2024");
+        assert_eq!(bar.cursor(), 9); // After "2024"
+    }
+
+    #[test]
+    fn test_colon_dedup_with_fts() {
+        let mut bar = SearchBar::new(test_config());
+        // Type "date:2024 coffee d:" - should remove "d", keep FTS, jump to existing filter
+        for c in "date:2024 coffee d".chars() {
+            bar.handle_input(InputRequest::InsertChar(c));
+        }
+        bar.handle_input(InputRequest::InsertChar(':'));
+        assert_eq!(bar.value(), "date:2024 coffee");
+        assert_eq!(bar.cursor(), 9); // After "2024"
+    }
+
+    #[test]
+    fn test_colon_unknown_filter_passes_through() {
+        let mut bar = SearchBar::new(test_config());
+        // Type "foo:" - "foo" isn't a filter, so ':' inserted normally
+        for c in "foo".chars() {
+            bar.handle_input(InputRequest::InsertChar(c));
+        }
+        bar.handle_input(InputRequest::InsertChar(':'));
+        assert_eq!(bar.value(), "foo:");
+    }
+
+    #[test]
+    fn test_colon_reorders_with_existing_filter() {
+        let mut bar = SearchBar::new(test_config());
+        // Type "amount:>100 coffee d:" - should become "amount:>100 date: coffee"
+        for c in "amount:>100 coffee d".chars() {
+            bar.handle_input(InputRequest::InsertChar(c));
+        }
+        bar.handle_input(InputRequest::InsertChar(':'));
+        assert_eq!(bar.value(), "amount:>100 date: coffee");
+        assert_eq!(bar.cursor(), 17); // After "date:"
     }
 
     #[test]
@@ -764,6 +889,29 @@ mod tests {
         bar.reparse();
         bar.update_autocomplete();
         assert!(bar.autocomplete_active());
+        let ac = bar.autocomplete().unwrap();
+        assert!(ac.suggestions.iter().any(|s| s.contains("ING")));
+    }
+
+    #[test]
+    fn test_autocomplete_filter_before_fts() {
+        // Autocomplete must work when filter appears before FTS terms
+        let mut bar = SearchBar::new(test_config());
+        // Type "account:I coffee" with cursor right after "I"
+        for c in "account:I".chars() {
+            bar.handle_input(InputRequest::InsertChar(c));
+        }
+        // Add " coffee" after cursor
+        let value = bar.value().to_string();
+        let cursor = bar.cursor();
+        bar.set_input(format!("{} coffee", value), cursor);
+        bar.reparse();
+        bar.update_autocomplete();
+        assert!(
+            bar.autocomplete_active(),
+            "autocomplete should be active when filter is before FTS, context: {:?}",
+            bar.context()
+        );
         let ac = bar.autocomplete().unwrap();
         assert!(ac.suggestions.iter().any(|s| s.contains("ING")));
     }
