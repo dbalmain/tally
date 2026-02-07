@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use tui_input::Input;
 
 use crate::{
-    Account, Bank, Category, CategorySource, FuzzyMatcher, Transaction,
-    TransactionFilter, TransactionStore, TransactionWithEnrichment, Transfer, TransferSource,
+    Account, Bank, Category, CategorySource, FuzzyMatcher, Transaction, TransactionFilter,
+    TransactionStore, TransactionWithEnrichment, Transfer, TransferSource,
     TransferWithTransactions,
     search::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, SearchConfig},
 };
@@ -133,8 +133,6 @@ pub enum InputMode {
     TransferPending,
     TransferNoMatch,
 }
-
-
 
 pub struct App {
     pub store: TransactionStore,
@@ -370,10 +368,13 @@ impl App {
             .accounts
             .values()
             .filter_map(|a| {
-                self.banks.get(&a.bank_id).map(|b| format!("{}/{}", b.name, a.name))
+                self.banks
+                    .get(&a.bank_id)
+                    .map(|b| format!("{}/{}", b.name, a.name))
             })
             .collect();
-        let category_options: Vec<String> = self.categories.iter().map(|c| c.path.clone()).collect();
+        let category_options: Vec<String> =
+            self.categories.iter().map(|c| c.path.clone()).collect();
 
         match key {
             TabKey::Transactions => SearchConfig::new(vec![
@@ -576,7 +577,13 @@ impl App {
         // Extract values before mutating self
         let (selected_index, editing_fuzzy, editing_db) = self
             .current_search_state()
-            .map(|s| (s.selected_index, s.editing_fuzzy_search, s.editing_db_search))
+            .map(|s| {
+                (
+                    s.selected_index,
+                    s.editing_fuzzy_search,
+                    s.editing_db_search,
+                )
+            })
             .unwrap_or((0, false, false));
 
         self.selected_index = selected_index;
@@ -1076,11 +1083,15 @@ impl App {
     // ==================== Filter Autocomplete ====================
 
     pub fn filter_autocomplete_next(&mut self) {
-        self.current_search_state_mut().search_bar.autocomplete_next();
+        self.current_search_state_mut()
+            .search_bar
+            .autocomplete_next();
     }
 
     pub fn filter_autocomplete_prev(&mut self) {
-        self.current_search_state_mut().search_bar.autocomplete_prev();
+        self.current_search_state_mut()
+            .search_bar
+            .autocomplete_prev();
     }
 
     pub fn filter_autocomplete_select(&mut self) -> bool {
@@ -1094,7 +1105,9 @@ impl App {
     }
 
     pub fn filter_autocomplete_close(&mut self) {
-        self.current_search_state_mut().search_bar.autocomplete_close();
+        self.current_search_state_mut()
+            .search_bar
+            .autocomplete_close();
     }
 
     pub fn filter_autocomplete_active(&self) -> bool {
@@ -1217,7 +1230,9 @@ impl App {
                     self.transactions
                         .iter()
                         .enumerate()
-                        .filter(|(_, tx)| self.fuzzy_matcher.fuzzy_matches(&pattern, &tx.description))
+                        .filter(|(_, tx)| {
+                            self.fuzzy_matcher.fuzzy_matches(&pattern, &tx.description)
+                        })
                         .map(|(i, _)| i)
                         .collect()
                 };
@@ -1347,4 +1362,3 @@ impl App {
         }
     }
 }
-

@@ -97,14 +97,14 @@ pub struct ParsedQuery {
 impl ParsedQuery {
     /// Create an empty parsed query.
     pub fn empty() -> Self {
-        Self {
-            parts: Vec::new(),
-        }
+        Self { parts: Vec::new() }
     }
 
     /// Check if the query is empty (no meaningful content).
     pub fn is_empty(&self) -> bool {
-        self.parts.iter().all(|p| matches!(p, QueryPart::Whitespace { .. }))
+        self.parts
+            .iter()
+            .all(|p| matches!(p, QueryPart::Whitespace { .. }))
     }
 
     /// Convert to SQL WHERE clause and parameters.
@@ -215,15 +215,15 @@ impl ParsedQuery {
 
     fn extract_date(value: &str, filter: &mut TransactionFilter) {
         if let Some((from, to)) = value.split_once("..") {
-            if !from.is_empty() {
-                if let Some((start, _)) = parse_date_spec(from) {
-                    filter.from_date = Some(start);
-                }
+            if !from.is_empty()
+                && let Some((start, _)) = parse_date_spec(from)
+            {
+                filter.from_date = Some(start);
             }
-            if !to.is_empty() {
-                if let Some((_, end)) = parse_date_spec(to) {
-                    filter.to_date = Some(end);
-                }
+            if !to.is_empty()
+                && let Some((_, end)) = parse_date_spec(to)
+            {
+                filter.to_date = Some(end);
             }
         } else if let Some((start, end)) = parse_date_spec(value) {
             filter.from_date = Some(start);
@@ -241,15 +241,15 @@ impl ParsedQuery {
                 filter.amount_max = Some(cents - 1);
             }
         } else if let Some((from, to)) = value.split_once("..") {
-            if !from.is_empty() {
-                if let Some(cents) = parse_amount(from) {
-                    filter.amount_min = Some(cents);
-                }
+            if !from.is_empty()
+                && let Some(cents) = parse_amount(from)
+            {
+                filter.amount_min = Some(cents);
             }
-            if !to.is_empty() {
-                if let Some(cents) = parse_amount(to) {
-                    filter.amount_max = Some(cents);
-                }
+            if !to.is_empty()
+                && let Some(cents) = parse_amount(to)
+            {
+                filter.amount_max = Some(cents);
             }
         } else if let Some(cents) = parse_amount(value) {
             // Exact match
@@ -323,11 +323,19 @@ mod tests {
     fn test_to_sql_multiple_filters() {
         let query = ParsedQuery {
             parts: vec![
-                make_filter("date", "date >= ?", vec![Value::Text("2024-01-01".to_string())]),
+                make_filter(
+                    "date",
+                    "date >= ?",
+                    vec![Value::Text("2024-01-01".to_string())],
+                ),
                 QueryPart::Whitespace {
                     span: Span::new(0, 0),
                 },
-                make_filter("amount", "ABS(amount_cents) > ?", vec![Value::Integer(10000)]),
+                make_filter(
+                    "amount",
+                    "ABS(amount_cents) > ?",
+                    vec![Value::Integer(10000)],
+                ),
             ],
         };
 
@@ -351,7 +359,11 @@ mod tests {
     fn test_fts_query() {
         let query = ParsedQuery {
             parts: vec![
-                make_filter("date", "date >= ?", vec![Value::Text("2024-01-01".to_string())]),
+                make_filter(
+                    "date",
+                    "date >= ?",
+                    vec![Value::Text("2024-01-01".to_string())],
+                ),
                 QueryPart::Whitespace {
                     span: Span::new(0, 0),
                 },

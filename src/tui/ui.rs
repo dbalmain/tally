@@ -745,7 +745,11 @@ fn draw_filter_autocomplete_popup(f: &mut Frame, app: &App) {
 
     // Calculate scroll offset for suggestions
     let visible_height = area.height as usize;
-    let offset = calculate_scroll_offset(ac_state.selected, ac_state.suggestions.len(), visible_height);
+    let offset = calculate_scroll_offset(
+        ac_state.selected,
+        ac_state.suggestions.len(),
+        visible_height,
+    );
 
     let suggestions: Vec<Line> = ac_state
         .suggestions
@@ -1096,4 +1100,3 @@ fn draw_pending_transfer_details(f: &mut Frame, app: &App, transfer: &crate::Tra
     let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(paragraph, area);
 }
-

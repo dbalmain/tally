@@ -34,9 +34,9 @@ mod tokenize;
 pub use context::CursorContext;
 pub use filter::{Filter, FilterResult};
 pub use filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
-pub use parse::{parse, SearchConfig};
+pub use parse::{SearchConfig, parse};
 pub use query::{ParsedQuery, QueryPart, Span};
-pub use tokenize::{tokenize, RawToken};
+pub use tokenize::{RawToken, tokenize};
 
 // Re-export legacy types for backwards compatibility during migration
 pub use legacy::{DbFtsMatch, DbRegexMatch, DbSearchQuery, FuzzyMatcher};

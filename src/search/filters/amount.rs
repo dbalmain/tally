@@ -188,10 +188,7 @@ mod tests {
         match parse("100..500") {
             FilterResult::Valid { sql, params } => {
                 assert_eq!(sql, "ABS(amount_cents) >= ? AND ABS(amount_cents) <= ?");
-                assert_eq!(
-                    params,
-                    vec![Value::Integer(10000), Value::Integer(50000)]
-                );
+                assert_eq!(params, vec![Value::Integer(10000), Value::Integer(50000)]);
             }
             _ => panic!("Expected Valid"),
         }

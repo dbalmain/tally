@@ -39,10 +39,7 @@ impl Filter for DateFilter {
         match parse_date_spec(value) {
             Some((from, to)) => FilterResult::Valid {
                 sql: "date >= ? AND date <= ?".to_string(),
-                params: vec![
-                    Value::Text(from.to_string()),
-                    Value::Text(to.to_string()),
-                ],
+                params: vec![Value::Text(from.to_string()), Value::Text(to.to_string())],
             },
             None => FilterResult::Invalid(format!("Invalid date: {}", value)),
         }

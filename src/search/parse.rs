@@ -8,9 +8,9 @@
 
 use regex::Regex;
 
-use super::{CursorContext, Filter, ParsedQuery, QueryPart, RawToken, Span, tokenize};
 #[cfg(test)]
 use super::FilterResult;
+use super::{CursorContext, Filter, ParsedQuery, QueryPart, RawToken, Span, tokenize};
 
 /// Configuration for parsing search queries.
 pub struct SearchConfig {
@@ -87,12 +87,12 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
                 // Flush any pending FTS tokens
                 if !fts_tokens.is_empty() {
                     let fts_part = combine_fts_tokens(&fts_tokens, cursor);
-                    if let QueryPart::Fts { span: fts_span, .. } = &fts_part {
-                        if fts_span.contains(cursor) || fts_span.at_end(cursor) {
-                            cursor_context = CursorContext::Fts {
-                                offset: cursor - fts_span.start,
-                            };
-                        }
+                    if let QueryPart::Fts { span: fts_span, .. } = &fts_part
+                        && (fts_span.contains(cursor) || fts_span.at_end(cursor))
+                    {
+                        cursor_context = CursorContext::Fts {
+                            offset: cursor - fts_span.start,
+                        };
                     }
                     parts.push(fts_part);
                     fts_tokens.clear();
@@ -137,12 +137,12 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
                 // Flush any pending FTS tokens
                 if !fts_tokens.is_empty() {
                     let fts_part = combine_fts_tokens(&fts_tokens, cursor);
-                    if let QueryPart::Fts { span: fts_span, .. } = &fts_part {
-                        if fts_span.contains(cursor) || fts_span.at_end(cursor) {
-                            cursor_context = CursorContext::Fts {
-                                offset: cursor - fts_span.start,
-                            };
-                        }
+                    if let QueryPart::Fts { span: fts_span, .. } = &fts_part
+                        && (fts_span.contains(cursor) || fts_span.at_end(cursor))
+                    {
+                        cursor_context = CursorContext::Fts {
+                            offset: cursor - fts_span.start,
+                        };
                     }
                     parts.push(fts_part);
                     fts_tokens.clear();
@@ -210,12 +210,12 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
     if !fts_tokens.is_empty() {
         let fts_part = combine_fts_tokens(&fts_tokens, cursor);
         // Update cursor context if in FTS
-        if let QueryPart::Fts { span, .. } = &fts_part {
-            if span.contains(cursor) || span.at_end(cursor) {
-                cursor_context = CursorContext::Fts {
-                    offset: cursor - span.start,
-                };
-            }
+        if let QueryPart::Fts { span, .. } = &fts_part
+            && (span.contains(cursor) || span.at_end(cursor))
+        {
+            cursor_context = CursorContext::Fts {
+                offset: cursor - span.start,
+            };
         }
         parts.push(fts_part);
     }
@@ -225,17 +225,16 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
         parts.push(QueryPart::Whitespace { span: ws_span });
     }
 
-    (
-        ParsedQuery {
-            parts,
-        },
-        cursor_context,
-    )
+    (ParsedQuery { parts }, cursor_context)
 }
 
 /// Combine multiple FTS tokens into a single FTS part.
 fn combine_fts_tokens(tokens: &[(String, Span)], cursor: usize) -> QueryPart {
-    let original: String = tokens.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(" ");
+    let original: String = tokens
+        .iter()
+        .map(|(t, _)| t.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
 
     // Find overall span
     let start = tokens.first().map(|(_, s)| s.start).unwrap_or(0);
@@ -302,17 +301,21 @@ fn process_fts_query(text: &str, cursor: Option<usize>) -> String {
         }
 
         // Add implicit prefix at cursor if at word boundary
-        if let Some(cur) = cursor {
-            if i + 1 == cur && !in_quote {
-                // Check if cursor is at a word boundary (end of word)
-                let at_word_end = i + 1 >= len
-                    || chars.get(i + 1).map(|c| c.is_whitespace() || *c == ')').unwrap_or(true);
-                let is_word_char = c.is_alphanumeric();
-                let not_already_prefix = c != '*';
+        if let Some(cur) = cursor
+            && i + 1 == cur
+            && !in_quote
+        {
+            // Check if cursor is at a word boundary (end of word)
+            let at_word_end = i + 1 >= len
+                || chars
+                    .get(i + 1)
+                    .map(|c| c.is_whitespace() || *c == ')')
+                    .unwrap_or(true);
+            let is_word_char = c.is_alphanumeric();
+            let not_already_prefix = c != '*';
 
-                if at_word_end && is_word_char && not_already_prefix {
-                    result.push('*');
-                }
+            if at_word_end && is_word_char && not_already_prefix {
+                result.push('*');
             }
         }
     }
@@ -360,7 +363,12 @@ mod tests {
 
         assert_eq!(query.parts.len(), 1);
         match &query.parts[0] {
-            QueryPart::Filter { name, value, result, .. } => {
+            QueryPart::Filter {
+                name,
+                value,
+                result,
+                ..
+            } => {
                 assert_eq!(*name, "date");
                 assert_eq!(value, "2024");
                 assert!(matches!(result, FilterResult::Valid { .. }));
@@ -402,11 +410,17 @@ mod tests {
         let (query, _) = parse(&config, "groceries", 9);
 
         // Should have FTS part
-        let fts_parts: Vec<_> = query.parts.iter().filter(|p| matches!(p, QueryPart::Fts { .. })).collect();
+        let fts_parts: Vec<_> = query
+            .parts
+            .iter()
+            .filter(|p| matches!(p, QueryPart::Fts { .. }))
+            .collect();
         assert_eq!(fts_parts.len(), 1);
 
         match fts_parts[0] {
-            QueryPart::Fts { original, query, .. } => {
+            QueryPart::Fts {
+                original, query, ..
+            } => {
                 assert_eq!(original, "groceries");
                 assert_eq!(query, "groceries*"); // Implicit prefix at cursor
             }
@@ -420,9 +434,21 @@ mod tests {
         let (query, _) = parse(&config, "date:2024 account:ING /coffee.*/i groceries", 43);
 
         // Count each type
-        let filter_count = query.parts.iter().filter(|p| matches!(p, QueryPart::Filter { .. })).count();
-        let regex_count = query.parts.iter().filter(|p| matches!(p, QueryPart::Regex { .. })).count();
-        let fts_count = query.parts.iter().filter(|p| matches!(p, QueryPart::Fts { .. })).count();
+        let filter_count = query
+            .parts
+            .iter()
+            .filter(|p| matches!(p, QueryPart::Filter { .. }))
+            .count();
+        let regex_count = query
+            .parts
+            .iter()
+            .filter(|p| matches!(p, QueryPart::Regex { .. }))
+            .count();
+        let fts_count = query
+            .parts
+            .iter()
+            .filter(|p| matches!(p, QueryPart::Fts { .. }))
+            .count();
 
         assert_eq!(filter_count, 2);
         assert_eq!(regex_count, 1);

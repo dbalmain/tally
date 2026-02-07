@@ -324,11 +324,17 @@ mod tests {
         // date:2024, space, account:..., space, regex, space, fts
         assert_eq!(tokens.len(), 7);
 
-        assert!(matches!(&tokens[0], RawToken::Filter { name, value, .. } if name == "date" && value == "2024"));
+        assert!(
+            matches!(&tokens[0], RawToken::Filter { name, value, .. } if name == "date" && value == "2024")
+        );
         assert!(matches!(&tokens[1], RawToken::Whitespace { .. }));
-        assert!(matches!(&tokens[2], RawToken::Filter { name, value, .. } if name == "account" && value == "ING/Orange"));
+        assert!(
+            matches!(&tokens[2], RawToken::Filter { name, value, .. } if name == "account" && value == "ING/Orange")
+        );
         assert!(matches!(&tokens[3], RawToken::Whitespace { .. }));
-        assert!(matches!(&tokens[4], RawToken::Regex { pattern, flags, .. } if pattern == "coffee.*" && flags == "i"));
+        assert!(
+            matches!(&tokens[4], RawToken::Regex { pattern, flags, .. } if pattern == "coffee.*" && flags == "i")
+        );
         assert!(matches!(&tokens[5], RawToken::Whitespace { .. }));
         assert!(matches!(&tokens[6], RawToken::Fts { text, .. } if text == "groceries"));
     }
@@ -350,7 +356,9 @@ mod tests {
 
         assert!(matches!(&tokens[0], RawToken::Filter { name, .. } if name == "date"));
         assert!(matches!(&tokens[2], RawToken::Filter { name, .. } if name == "amount"));
-        assert!(matches!(&tokens[4], RawToken::Filter { name, value, .. } if name == "category" && value == "Food|Transport"));
+        assert!(
+            matches!(&tokens[4], RawToken::Filter { name, value, .. } if name == "category" && value == "Food|Transport")
+        );
     }
 
     #[test]
@@ -384,7 +392,9 @@ mod tests {
     fn test_tokenize_only_whitespace() {
         let tokens = tokenize("   ");
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(&tokens[0], RawToken::Whitespace { span } if span.start == 0 && span.end == 3));
+        assert!(
+            matches!(&tokens[0], RawToken::Whitespace { span } if span.start == 0 && span.end == 3)
+        );
     }
 
     #[test]

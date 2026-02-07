@@ -1196,11 +1196,11 @@ fn build_account_pattern_clause(
             )));
         }
 
-        if let Some(ref account_prefix) = pattern.account_prefix {
-            if !account_prefix.is_empty() {
-                and_parts.push(format!("LOWER({}) LIKE ?", account_col));
-                params.push(Value::Text(format!("{}%", account_prefix.to_lowercase())));
-            }
+        if let Some(ref account_prefix) = pattern.account_prefix
+            && !account_prefix.is_empty()
+        {
+            and_parts.push(format!("LOWER({}) LIKE ?", account_col));
+            params.push(Value::Text(format!("{}%", account_prefix.to_lowercase())));
         }
 
         if and_parts.is_empty() {

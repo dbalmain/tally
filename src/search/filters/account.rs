@@ -139,7 +139,9 @@ impl Filter for AccountFilter {
             .filter_map(|opt| {
                 let mut buf = Vec::new();
                 let haystack = Utf32Str::new(opt, &mut buf);
-                pattern.score(haystack, &mut matcher).map(|score| (score, opt))
+                pattern
+                    .score(haystack, &mut matcher)
+                    .map(|score| (score, opt))
             })
             .collect();
 

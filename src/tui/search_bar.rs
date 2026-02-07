@@ -156,19 +156,19 @@ impl SearchBar {
 
     /// Navigate to next autocomplete suggestion.
     pub fn autocomplete_next(&mut self) {
-        if let Some(ref mut ac) = self.autocomplete {
-            if !ac.suggestions.is_empty() {
-                ac.selected = (ac.selected + 1) % ac.suggestions.len();
-            }
+        if let Some(ref mut ac) = self.autocomplete
+            && !ac.suggestions.is_empty()
+        {
+            ac.selected = (ac.selected + 1) % ac.suggestions.len();
         }
     }
 
     /// Navigate to previous autocomplete suggestion.
     pub fn autocomplete_prev(&mut self) {
-        if let Some(ref mut ac) = self.autocomplete {
-            if !ac.suggestions.is_empty() {
-                ac.selected = (ac.selected + ac.suggestions.len() - 1) % ac.suggestions.len();
-            }
+        if let Some(ref mut ac) = self.autocomplete
+            && !ac.suggestions.is_empty()
+        {
+            ac.selected = (ac.selected + ac.suggestions.len() - 1) % ac.suggestions.len();
         }
     }
 
@@ -437,10 +437,7 @@ impl SearchBar {
                 let prefix = cleaned[..pos].trim_end();
                 let suffix = cleaned[pos..].trim_start();
                 if prefix.is_empty() {
-                    (
-                        format!("{} {}", filter_text, suffix),
-                        filter_text.len(),
-                    )
+                    (format!("{} {}", filter_text, suffix), filter_text.len())
                 } else {
                     let cursor = prefix.len() + 1 + filter_text.len();
                     (format!("{} {} {}", prefix, filter_text, suffix), cursor)

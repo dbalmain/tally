@@ -102,10 +102,8 @@ impl DbSearchQuery {
                     .map(|(idx, (start, _))| {
                         // Calculate position in joined text:
                         // sum of previous token lengths + spaces + offset within current token
-                        let prev_len: usize = text_parts[..idx]
-                            .iter()
-                            .map(|s| s.chars().count())
-                            .sum();
+                        let prev_len: usize =
+                            text_parts[..idx].iter().map(|s| s.chars().count()).sum();
                         let spaces = idx; // spaces between tokens
                         let offset_in_token = c - start;
                         prev_len + spaces + offset_in_token
@@ -361,15 +359,15 @@ fn parse_fts_query(input: &str, cursor_pos: Option<usize>) -> String {
         }
 
         // Check if we should insert * after this character
-        if let Some(cursor) = cursor_pos {
-            if i + 1 == cursor && !in_quotes {
-                // Cursor is right after this character
-                let next_char = input.chars().nth(i + 1);
-                let at_word_boundary =
-                    next_char.map_or(true, |nc| nc.is_whitespace() || nc == ')');
-                if at_word_boundary && c.is_alphanumeric() {
-                    result.push('*');
-                }
+        if let Some(cursor) = cursor_pos
+            && i + 1 == cursor
+            && !in_quotes
+        {
+            // Cursor is right after this character
+            let next_char = input.chars().nth(i + 1);
+            let at_word_boundary = next_char.is_none_or(|nc| nc.is_whitespace() || nc == ')');
+            if at_word_boundary && c.is_alphanumeric() {
+                result.push('*');
             }
         }
     }
@@ -602,7 +600,10 @@ mod tests {
 
         // Escaped slash with spaces
         let q = DbSearchQuery::parse(r"/path\/to\/file/i");
-        assert_eq!(q.regex_match.as_ref().unwrap().pattern, r"(?i)path\/to\/file");
+        assert_eq!(
+            q.regex_match.as_ref().unwrap().pattern,
+            r"(?i)path\/to\/file"
+        );
 
         // Escaped slash followed by FTS
         let q = DbSearchQuery::parse(r"/a\/b/ coffee");
