@@ -129,12 +129,6 @@ impl SearchBar {
         self.autocomplete = None;
     }
 
-    /// Update the search configuration.
-    pub fn set_config(&mut self, config: SearchConfig) {
-        self.config = config;
-        self.reparse();
-    }
-
     /// Handle an input request and return whether it was handled.
     pub fn handle_input(&mut self, req: InputRequest) -> KeyResult {
         // Check for special context-aware behavior
@@ -691,8 +685,8 @@ impl SearchBar {
     }
 }
 
-/// Split a string at a character index.
-fn split_at_char_index(s: &str, char_idx: usize) -> (&str, &str) {
+/// Split a string at a character index (handles multi-byte UTF-8).
+pub fn split_at_char_index(s: &str, char_idx: usize) -> (&str, &str) {
     let byte_idx = s
         .char_indices()
         .nth(char_idx)

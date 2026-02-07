@@ -16,19 +16,11 @@ use super::{CursorContext, Filter, ParsedQuery, QueryPart, RawToken, Span, token
 pub struct SearchConfig {
     /// Available filters for this search context.
     filters: Vec<Box<dyn Filter>>,
-    /// Whether regex patterns are allowed.
-    allow_regex: bool,
-    /// Whether FTS text is allowed.
-    allow_fts: bool,
 }
 
 impl SearchConfig {
     pub fn new(filters: Vec<Box<dyn Filter>>) -> Self {
-        Self {
-            filters,
-            allow_regex: true,
-            allow_fts: true,
-        }
+        Self { filters }
     }
 
     /// Find a filter by name or alias (internal use).
@@ -84,20 +76,7 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
                 span,
                 value_span,
             } => {
-                // Flush any pending FTS tokens
-                if !fts_tokens.is_empty() {
-                    let fts_part = combine_fts_tokens(&fts_tokens, cursor);
-                    if let QueryPart::Fts { span: fts_span, .. } = &fts_part
-                        && (fts_span.contains(cursor) || fts_span.at_end(cursor))
-                    {
-                        cursor_context = CursorContext::Fts {
-                            offset: cursor - fts_span.start,
-                        };
-                    }
-                    parts.push(fts_part);
-                    fts_tokens.clear();
-                }
-                // Flush pending whitespace (between FTS and this filter)
+                flush_fts(&mut fts_tokens, cursor, &mut parts, &mut cursor_context);
                 if let Some(ws_span) = pending_whitespace.take() {
                     parts.push(QueryPart::Whitespace { span: ws_span });
                 }
@@ -134,28 +113,9 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
                 complete,
                 span,
             } => {
-                // Flush any pending FTS tokens
-                if !fts_tokens.is_empty() {
-                    let fts_part = combine_fts_tokens(&fts_tokens, cursor);
-                    if let QueryPart::Fts { span: fts_span, .. } = &fts_part
-                        && (fts_span.contains(cursor) || fts_span.at_end(cursor))
-                    {
-                        cursor_context = CursorContext::Fts {
-                            offset: cursor - fts_span.start,
-                        };
-                    }
-                    parts.push(fts_part);
-                    fts_tokens.clear();
-                }
-                // Flush pending whitespace (between FTS and this regex)
+                flush_fts(&mut fts_tokens, cursor, &mut parts, &mut cursor_context);
                 if let Some(ws_span) = pending_whitespace.take() {
                     parts.push(QueryPart::Whitespace { span: ws_span });
-                }
-
-                if !config.allow_regex {
-                    // Treat as FTS if regex not allowed
-                    fts_tokens.push((original.clone(), *span));
-                    continue;
                 }
 
                 // Build regex pattern with flags
@@ -186,9 +146,7 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
             RawToken::Fts { text, span } => {
                 // Clear pending whitespace — the combined FTS span will cover it
                 pending_whitespace = None;
-                if config.allow_fts {
-                    fts_tokens.push((text.clone(), *span));
-                }
+                fts_tokens.push((text.clone(), *span));
             }
 
             RawToken::Whitespace { span } => {
@@ -206,19 +164,7 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
         }
     }
 
-    // Flush any remaining FTS tokens
-    if !fts_tokens.is_empty() {
-        let fts_part = combine_fts_tokens(&fts_tokens, cursor);
-        // Update cursor context if in FTS
-        if let QueryPart::Fts { span, .. } = &fts_part
-            && (span.contains(cursor) || span.at_end(cursor))
-        {
-            cursor_context = CursorContext::Fts {
-                offset: cursor - span.start,
-            };
-        }
-        parts.push(fts_part);
-    }
+    flush_fts(&mut fts_tokens, cursor, &mut parts, &mut cursor_context);
 
     // Flush trailing whitespace (e.g., "Salary ")
     if let Some(ws_span) = pending_whitespace.take() {
@@ -226,6 +172,28 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
     }
 
     (ParsedQuery { parts }, cursor_context)
+}
+
+/// Flush pending FTS tokens into parts, updating cursor context if needed.
+fn flush_fts(
+    fts_tokens: &mut Vec<(String, Span)>,
+    cursor: usize,
+    parts: &mut Vec<QueryPart>,
+    cursor_context: &mut CursorContext,
+) {
+    if fts_tokens.is_empty() {
+        return;
+    }
+    let fts_part = combine_fts_tokens(fts_tokens, cursor);
+    if let QueryPart::Fts { span, .. } = &fts_part
+        && (span.contains(cursor) || span.at_end(cursor))
+    {
+        *cursor_context = CursorContext::Fts {
+            offset: cursor - span.start,
+        };
+    }
+    parts.push(fts_part);
+    fts_tokens.clear();
 }
 
 /// Combine multiple FTS tokens into a single FTS part.

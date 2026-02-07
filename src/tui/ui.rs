@@ -9,6 +9,7 @@ use ratatui::{
 use crate::{Transaction, TransactionWithEnrichment, TransferWithTransactions};
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
+use super::search_bar::split_at_char_index;
 
 const DETAILS_HEIGHT: u16 = 8;
 
@@ -134,15 +135,6 @@ fn draw_fuzzy_search_bar(f: &mut Frame, app: &App, area: Rect) {
         ]);
         f.render_widget(Paragraph::new(search_line), area);
     }
-}
-
-fn split_at_char_index(s: &str, char_idx: usize) -> (&str, &str) {
-    let byte_idx = s
-        .char_indices()
-        .nth(char_idx)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
-    s.split_at(byte_idx)
 }
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
