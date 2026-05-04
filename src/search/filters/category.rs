@@ -46,18 +46,16 @@ impl Filter for CategoryFilter {
             return FilterResult::Empty;
         }
 
-        // Split by | for OR
-        let patterns: Vec<&str> = value.split('|').collect();
         let mut clauses = Vec::new();
         let mut params = Vec::new();
 
-        for pattern in patterns {
+        for pattern in value.split('|') {
             if pattern.is_empty() {
                 continue;
             }
 
-            clauses.push("category_path LIKE ?".to_string());
-            params.push(Value::Text(format!("%{}%", pattern)));
+            clauses.push("LOWER({category_path}) LIKE ?".to_string());
+            params.push(Value::Text(format!("%{}%", pattern.to_lowercase())));
         }
 
         if clauses.is_empty() {
@@ -79,7 +77,7 @@ impl Filter for CategoryFilter {
             .split('|')
             .scan(0, |pos, seg| {
                 let start = *pos;
-                *pos += seg.len() + 1; // +1 for the |
+                *pos += seg.chars().count() + 1; // +1 for the |
                 Some((start, seg))
             })
             .collect();
@@ -87,7 +85,7 @@ impl Filter for CategoryFilter {
         // Find which segment the cursor is in
         let (anchor_offset, current_segment) = segments
             .iter()
-            .find(|(start, seg)| cursor >= *start && cursor <= start + seg.len())
+            .find(|(start, seg)| cursor >= *start && cursor <= start + seg.chars().count())
             .map(|(start, seg)| (*start, *seg))
             .unwrap_or((0, value));
 
@@ -160,8 +158,8 @@ mod tests {
     fn test_single() {
         match parse("Food") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "category_path LIKE ?");
-                assert_eq!(params, vec![Value::Text("%Food%".to_string())]);
+                assert_eq!(sql, "LOWER({category_path}) LIKE ?");
+                assert_eq!(params, vec![Value::Text("%food%".to_string())]);
             }
             _ => panic!("Expected Valid"),
         }
@@ -171,8 +169,8 @@ mod tests {
     fn test_with_slash() {
         match parse("Food/Groceries") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "category_path LIKE ?");
-                assert_eq!(params, vec![Value::Text("%Food/Groceries%".to_string())]);
+                assert_eq!(sql, "LOWER({category_path}) LIKE ?");
+                assert_eq!(params, vec![Value::Text("%food/groceries%".to_string())]);
             }
             _ => panic!("Expected Valid"),
         }
@@ -182,12 +180,15 @@ mod tests {
     fn test_multiple_or() {
         match parse("Food|Transport") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "(category_path LIKE ? OR category_path LIKE ?)");
+                assert_eq!(
+                    sql,
+                    "(LOWER({category_path}) LIKE ? OR LOWER({category_path}) LIKE ?)"
+                );
                 assert_eq!(
                     params,
                     vec![
-                        Value::Text("%Food%".to_string()),
-                        Value::Text("%Transport%".to_string())
+                        Value::Text("%food%".to_string()),
+                        Value::Text("%transport%".to_string())
                     ]
                 );
             }

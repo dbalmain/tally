@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use tui_input::Input;
 
 use crate::{
-    Account, Bank, Category, CategorySource, FuzzyMatcher, Transaction, TransactionFilter,
-    TransactionStore, TransactionWithEnrichment, Transfer, TransferSource,
-    TransferWithTransactions,
-    search::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, SearchConfig},
+    Account, Bank, Category, CategorySource, FuzzyMatcher, Transaction, TransactionStore,
+    TransactionWithEnrichment, Transfer, TransferSource, TransferWithTransactions,
+    search::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, ParsedQuery, SearchConfig},
 };
 
 use super::search_bar::{KeyResult, SearchBar};
@@ -268,28 +267,22 @@ impl App {
 
 impl App {
     pub fn new(store: TransactionStore) -> Self {
+        let empty_query = ParsedQuery::empty();
         let transactions = store
-            .query_transactions(&TransactionFilter {
-                limit: Some(500),
-                ..Default::default()
-            })
+            .query_transactions(&empty_query, Some(500))
             .unwrap_or_default();
 
-        let default_filter = TransactionFilter {
-            limit: Some(500),
-            ..Default::default()
-        };
         let uncategorised = store
-            .get_uncategorised_transactions(&default_filter)
+            .get_uncategorised_transactions(&empty_query, Some(500))
             .unwrap_or_default();
         let ai_reviews = store
-            .get_pending_ai_reviews(&default_filter)
+            .get_pending_ai_reviews(&empty_query, Some(500))
             .unwrap_or_default();
         let transfer_reviews = store
-            .get_pending_transfer_reviews(&default_filter)
+            .get_pending_transfer_reviews(&empty_query, Some(500))
             .unwrap_or_default();
         let linked_transfers = store
-            .list_transfers_with_transactions(true, &default_filter)
+            .list_transfers_with_transactions(true, &empty_query, Some(500))
             .unwrap_or_default();
 
         let bank_list = store.list_banks().unwrap_or_default();
@@ -408,6 +401,16 @@ impl App {
                 Box::new(AmountFilter),
                 Box::new(AccountFilter::with_options(account_options)),
             ]),
+        }
+    }
+
+    fn rebuild_search_configs(&mut self) {
+        let keys: Vec<TabKey> = self.tab_search_state.keys().copied().collect();
+        for key in keys {
+            let config = self.build_search_config(key);
+            if let Some(state) = self.tab_search_state.get_mut(&key) {
+                state.search_bar.set_config(config);
+            }
         }
     }
 
@@ -872,6 +875,8 @@ impl App {
 
     pub fn refresh_data(&mut self) {
         // Reload the current tab's data using its search state
+        self.categories = self.store.list_categories().unwrap_or_default();
+        self.rebuild_search_configs();
         self.reload_current_tab();
     }
 
@@ -992,6 +997,7 @@ impl App {
 
     fn reload_categories(&mut self) {
         self.categories = self.store.list_categories().unwrap_or_default();
+        self.rebuild_search_configs();
         self.category_tx_count.clear();
         for cat in &self.categories {
             if let Ok(count) = self.store.count_transactions_in_category(cat.id) {
@@ -1169,22 +1175,23 @@ impl App {
 
     /// Reload only the current tab's data from DB based on its search query
     fn reload_current_tab(&mut self) {
-        let filter = self
+        let parsed = self
             .current_search_state()
-            .map(|s| s.search_bar.parsed().to_transaction_filter(Some(500)))
-            .unwrap_or_else(|| TransactionFilter {
-                limit: Some(500),
-                ..Default::default()
-            });
+            .map(|s| s.search_bar.parsed().clone())
+            .unwrap_or_default();
+        let limit = Some(500);
 
         match self.current_tab {
             Tab::Transactions => {
-                self.transactions = self.store.query_transactions(&filter).unwrap_or_default();
+                self.transactions = self
+                    .store
+                    .query_transactions(&parsed, limit)
+                    .unwrap_or_default();
             }
             Tab::Transfers => {
                 self.linked_transfers = self
                     .store
-                    .list_transfers_with_transactions(true, &filter)
+                    .list_transfers_with_transactions(true, &parsed, limit)
                     .unwrap_or_default();
             }
             Tab::Categories => {
@@ -1194,19 +1201,19 @@ impl App {
                 TodoSubTab::Uncategorised => {
                     self.uncategorised = self
                         .store
-                        .get_uncategorised_transactions(&filter)
+                        .get_uncategorised_transactions(&parsed, limit)
                         .unwrap_or_default();
                 }
                 TodoSubTab::AiReview => {
                     self.ai_reviews = self
                         .store
-                        .get_pending_ai_reviews(&filter)
+                        .get_pending_ai_reviews(&parsed, limit)
                         .unwrap_or_default();
                 }
                 TodoSubTab::TransferReview => {
                     self.transfer_reviews = self
                         .store
-                        .get_pending_transfer_reviews(&filter)
+                        .get_pending_transfer_reviews(&parsed, limit)
                         .unwrap_or_default();
                 }
             },

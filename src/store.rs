@@ -6,11 +6,91 @@ use crate::db::{build_searchable_text, init_db};
 use crate::import::{
     compute_hash, find_csv_files, find_import_script, hash_file, run_import_script,
 };
+use crate::search::{ParsedQuery, SqlContext};
 use crate::{
-    Account, AccountPattern, Bank, Category, CategorySource, Error, RefreshReport, Result,
-    Transaction, TransactionEnrichment, TransactionFilter, TransactionWithEnrichment, Transfer,
-    TransferSource, TransferWithTransactions,
+    Account, Bank, Category, CategorySource, Error, FuzzyMatcher, RefreshReport, Result,
+    Transaction, TransactionEnrichment, TransactionWithEnrichment, Transfer, TransferSource,
+    TransferWithTransactions,
 };
+
+/// SQL context for queries rooted at the `transactions t` / `accounts a` /
+/// `banks b` aliases (with optional `categories c` and `transactions_fts fts`).
+fn transaction_ctx() -> SqlContext {
+    SqlContext::new()
+        .with("date", "t.date")
+        .with("amount_cents", "t.amount_cents")
+        .with("description", "t.description")
+        .with("bank_name", "b.name")
+        .with("account_name", "a.name")
+        .with("category_path", "c.path")
+        .with("fts", "transactions_fts")
+}
+
+/// SQL context for transfer queries — same as transaction_ctx but with custom
+/// table aliases (so we can render once for from-side, once for to-side).
+///
+fn transfer_side_ctx(tx_alias: &str, account_alias: &str, bank_alias: &str) -> SqlContext {
+    SqlContext::new()
+        .with("date", format!("{}.date", tx_alias))
+        .with("amount_cents", format!("{}.amount_cents", tx_alias))
+        .with("description", format!("{}.description", tx_alias))
+        .with("bank_name", format!("{}.name", bank_alias))
+        .with("account_name", format!("{}.name", account_alias))
+}
+
+/// Joins to splice into a transaction query based on what the parsed query needs.
+fn transaction_joins(parsed: &ParsedQuery) -> String {
+    let mut joins = String::new();
+    if parsed.fts_query().is_some() {
+        joins.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
+    }
+    if parsed.uses_placeholder("category_path") {
+        joins.push_str(
+            " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id\
+             \n LEFT JOIN categories c ON e.category_id = c.id",
+        );
+    }
+    joins
+}
+
+fn render_transfer_query(query: &ParsedQuery) -> crate::search::Rendered {
+    let mut lhs = query.render(&transfer_side_ctx("ft", "fa", "fb"));
+    add_transfer_side_fts(&mut lhs, "ft", query);
+
+    let mut rhs = query.render(&transfer_side_ctx("tt", "ta", "tb"));
+    add_transfer_side_fts(&mut rhs, "tt", query);
+
+    match (lhs.is_empty(), rhs.is_empty()) {
+        (true, true) => crate::search::Rendered::default(),
+        (false, true) => lhs,
+        (true, false) => rhs,
+        (false, false) => {
+            let mut params = lhs.params;
+            params.extend(rhs.params);
+            crate::search::Rendered {
+                where_clause: format!("(({}) OR ({}))", lhs.where_clause, rhs.where_clause),
+                params,
+            }
+        }
+    }
+}
+
+fn add_transfer_side_fts(
+    rendered: &mut crate::search::Rendered,
+    tx_alias: &str,
+    query: &ParsedQuery,
+) {
+    for fts_query in query.fts_queries() {
+        if !rendered.where_clause.is_empty() {
+            rendered.where_clause.push_str(" AND ");
+        }
+        rendered.where_clause.push_str(&format!(
+            "{}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
+            tx_alias
+        ));
+        rendered.params.push(Value::Text(fts_query.to_string()));
+    }
+}
 
 pub struct TransactionStore {
     conn: Connection,
@@ -131,11 +211,14 @@ impl TransactionStore {
         Ok(accounts)
     }
 
-    /// Query transactions with optional filters.
-    pub fn query_transactions(&self, filter: &TransactionFilter) -> Result<Vec<Transaction>> {
-        let needs_category_join = !filter.category_patterns.is_empty();
-        let needs_fts_join = filter.fts_query.is_some();
-
+    /// Query transactions matching a parsed search query.
+    ///
+    /// `limit` is `None` for unbounded queries.
+    pub fn query_transactions(
+        &self,
+        query: &ParsedQuery,
+        limit: Option<usize>,
+    ) -> Result<Vec<Transaction>> {
         let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
@@ -143,103 +226,25 @@ impl TransactionStore {
              JOIN accounts a ON t.account_id = a.id
              JOIN banks b ON a.bank_id = b.id",
         );
-
-        if needs_fts_join {
-            sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
-        }
-
-        if needs_category_join {
-            sql.push_str(
-                " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
-                 LEFT JOIN categories c ON e.category_id = c.id",
-            );
-        }
-
+        sql.push_str(&transaction_joins(query));
         sql.push_str(" WHERE a.deleted_at IS NULL");
-        let mut params: Vec<Value> = Vec::new();
 
-        if let Some(ref fts_query) = filter.fts_query {
-            sql.push_str(" AND transactions_fts MATCH ?");
-            params.push(Value::Text(fts_query.clone()));
-        }
-        if let Some(bank_id) = filter.bank_id {
-            sql.push_str(" AND a.bank_id = ?");
-            params.push(Value::Integer(bank_id));
-        }
-        if let Some(account_id) = filter.account_id {
-            sql.push_str(" AND t.account_id = ?");
-            params.push(Value::Integer(account_id));
-        }
-        if let Some(ref from_date) = filter.from_date {
-            sql.push_str(" AND t.date >= ?");
-            params.push(Value::Text(from_date.to_string()));
-        }
-        if let Some(ref to_date) = filter.to_date {
-            sql.push_str(" AND t.date <= ?");
-            params.push(Value::Text(to_date.to_string()));
-        }
-        if let Some(amount_min) = filter.amount_min {
-            sql.push_str(" AND t.amount_cents >= ?");
-            params.push(Value::Integer(amount_min));
-        }
-        if let Some(amount_max) = filter.amount_max {
-            sql.push_str(" AND t.amount_cents <= ?");
-            params.push(Value::Integer(amount_max));
-        }
-        if !filter.account_patterns.is_empty() {
-            let (clause, pattern_params) =
-                build_account_pattern_clause(&filter.account_patterns, "b.name", "a.name");
-            sql.push_str(&clause);
-            params.extend(pattern_params);
-        }
-        if !filter.category_patterns.is_empty() {
-            let (clause, pattern_params) =
-                build_category_pattern_clause(&filter.category_patterns, "c.path");
-            sql.push_str(&clause);
-            params.extend(pattern_params);
-        }
-        if let Some(ref regex) = filter.description_regex {
-            sql.push_str(" AND regexp(?, t.description)");
-            params.push(Value::Text(regex.clone()));
-        }
+        let rendered = query.render(&transaction_ctx());
+        sql.push_str(&rendered.and_prefix());
+        let mut params = rendered.params;
 
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
 
-        if let Some(limit) = filter.limit {
+        if let Some(limit) = limit {
             sql.push_str(" LIMIT ?");
             params.push(Value::Integer(limit as i64));
-        }
-        if let Some(offset) = filter.offset {
-            sql.push_str(" OFFSET ?");
-            params.push(Value::Integer(offset as i64));
         }
 
         log::debug!("query_transactions SQL: {} params: {:?}", sql, params);
 
         let mut stmt = self.conn.prepare(&sql)?;
         let transactions = stmt
-            .query_map(rusqlite::params_from_iter(params), |row| {
-                let metadata_str: String = row.get(8)?;
-                let metadata: std::collections::HashMap<String, serde_json::Value> =
-                    serde_json::from_str(&metadata_str).unwrap_or_default();
-                let date_str: String = row.get(3)?;
-                let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                    .unwrap_or_else(|_| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
-
-                Ok(Transaction {
-                    id: row.get(0)?,
-                    bank_id: row.get(1)?,
-                    account_id: row.get(2)?,
-                    date,
-                    description: row.get(4)?,
-                    amount_cents: row.get(5)?,
-                    balance_cents: row.get(6)?,
-                    hash: row.get(7)?,
-                    metadata,
-                    source_file: row.get(9)?,
-                    import_batch_id: row.get(10)?,
-                })
-            })?
+            .query_map(rusqlite::params_from_iter(params), parse_transaction)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(transactions)
@@ -575,13 +580,10 @@ impl TransactionStore {
     /// Find categories matching a fuzzy query.
     pub fn find_categories(&self, query: &str) -> Result<Vec<Category>> {
         let all = self.list_categories()?;
-        let query_lower = query.to_lowercase();
-        let mut scored: Vec<(i32, Category)> = all
+        let mut matcher = FuzzyMatcher::new();
+        let mut scored: Vec<(u32, Category)> = all
             .into_iter()
-            .filter_map(|cat| {
-                let path_lower = cat.path.to_lowercase();
-                fuzzy_match(&path_lower, &query_lower).map(|score| (score, cat))
-            })
+            .filter_map(|cat| matcher.score(query, &cat.path).map(|score| (score, cat)))
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         Ok(scored.into_iter().map(|(_, cat)| cat).collect())
@@ -691,20 +693,6 @@ impl TransactionStore {
     }
 
     // ==================== Enrichments ====================
-
-    /// Get enrichment data for a transaction.
-    pub fn get_enrichment(&self, transaction_id: i64) -> Result<Option<TransactionEnrichment>> {
-        self.conn
-            .query_row(
-                "SELECT id, transaction_id, category_id, category_source, category_confirmed, 
-                        ai_confidence, created_at, updated_at 
-                 FROM transaction_enrichments WHERE transaction_id = ?",
-                [transaction_id],
-                parse_enrichment,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
 
     /// Set or update the category for a transaction.
     pub fn set_category(
@@ -925,32 +913,47 @@ impl TransactionStore {
 
     // ==================== Todo Queries ====================
 
-    /// Get transactions that need categorization, with optional filters.
+    /// Get transactions that need categorization, scoped by a parsed search query.
     pub fn get_uncategorised_transactions(
         &self,
-        filter: &TransactionFilter,
+        query: &ParsedQuery,
+        limit: Option<usize>,
     ) -> Result<Vec<Transaction>> {
-        let fts_join = build_fts_join_clause(filter);
-        let mut sql = format!(
+        let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
-             JOIN banks b ON a.bank_id = b.id{}
-             LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
-             LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id
-             WHERE a.deleted_at IS NULL
+             JOIN banks b ON a.bank_id = b.id",
+        );
+        // FTS join (conditional on the parsed query)
+        if query.fts_query().is_some() {
+            sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
+        }
+        // Always join enrichments (we filter on missing category) and transfers
+        // (we exclude transactions involved in a transfer).
+        sql.push_str(
+            " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
+             LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id",
+        );
+        // Optional category join is a no-op here because `e` is already joined
+        // — if the user filters by category we just need `c` too.
+        if query.uses_placeholder("category_path") {
+            sql.push_str(" LEFT JOIN categories c ON e.category_id = c.id");
+        }
+        sql.push_str(
+            " WHERE a.deleted_at IS NULL
                AND (e.category_id IS NULL OR e.id IS NULL)
                AND tr.id IS NULL",
-            fts_join
         );
-        let mut params: Vec<Value> = Vec::new();
 
-        append_transaction_filters(&mut sql, &mut params, filter);
+        let rendered = query.render(&transaction_ctx());
+        sql.push_str(&rendered.and_prefix());
+        let mut params = rendered.params;
 
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
 
-        if let Some(limit) = filter.limit {
+        if let Some(limit) = limit {
             sql.push_str(" LIMIT ?");
             params.push(Value::Integer(limit as i64));
         }
@@ -968,13 +971,13 @@ impl TransactionStore {
         Ok(transactions)
     }
 
-    /// Get transactions with AI-suggested categories pending review, with optional filters.
+    /// Get transactions with AI-suggested categories pending review.
     pub fn get_pending_ai_reviews(
         &self,
-        filter: &TransactionFilter,
+        query: &ParsedQuery,
+        limit: Option<usize>,
     ) -> Result<Vec<TransactionWithEnrichment>> {
-        let fts_join = build_fts_join_clause(filter);
-        let mut sql = format!(
+        let mut sql = String::from(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id,
                     e.id, e.transaction_id, e.category_id, e.category_source, e.category_confirmed,
@@ -982,21 +985,29 @@ impl TransactionStore {
                     c.id, c.path, c.created_at
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
-             JOIN banks b ON a.bank_id = b.id{}
-             JOIN transaction_enrichments e ON t.id = e.transaction_id
-             LEFT JOIN categories c ON e.category_id = c.id
-             WHERE a.deleted_at IS NULL
+             JOIN banks b ON a.bank_id = b.id",
+        );
+        if query.fts_query().is_some() {
+            sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
+        }
+        // Enrichment is required (we filter on it) and category is needed for SELECT.
+        sql.push_str(
+            " JOIN transaction_enrichments e ON t.id = e.transaction_id
+             LEFT JOIN categories c ON e.category_id = c.id",
+        );
+        sql.push_str(
+            " WHERE a.deleted_at IS NULL
                AND e.category_source = 'ai'
                AND e.category_confirmed = 0",
-            fts_join
         );
-        let mut params: Vec<Value> = Vec::new();
 
-        append_transaction_filters(&mut sql, &mut params, filter);
+        let rendered = query.render(&transaction_ctx());
+        sql.push_str(&rendered.and_prefix());
+        let mut params = rendered.params;
 
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
 
-        if let Some(limit) = filter.limit {
+        if let Some(limit) = limit {
             sql.push_str(" LIMIT ?");
             params.push(Value::Integer(limit as i64));
         }
@@ -1027,10 +1038,12 @@ impl TransactionStore {
         Ok(results)
     }
 
-    /// Get transfers pending user confirmation, with optional filters.
+    /// Get transfers pending user confirmation.
+    /// Filters match if EITHER the from or to transaction matches.
     pub fn get_pending_transfer_reviews(
         &self,
-        filter: &TransactionFilter,
+        query: &ParsedQuery,
+        limit: Option<usize>,
     ) -> Result<Vec<Transfer>> {
         let mut sql = String::from(
             "SELECT tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at
@@ -1041,21 +1054,21 @@ impl TransactionStore {
              JOIN transactions tt ON tt.id = tr.to_transaction_id
              JOIN accounts ta ON ta.id = tt.account_id
              JOIN banks tb ON tb.id = ta.bank_id
-             WHERE tr.confirmed = 0
+            ",
+        );
+
+        sql.push_str(
+            " WHERE tr.confirmed = 0
                AND fa.deleted_at IS NULL AND ta.deleted_at IS NULL",
         );
-        let mut params: Vec<Value> = Vec::new();
 
-        let (filter_sql, filter_params) =
-            build_transfer_filter_clause(filter, "ft", "fa", "fb", "tt", "ta", "tb");
-        if !filter_sql.is_empty() {
-            sql.push_str(&filter_sql);
-            params.extend(filter_params);
-        }
+        let rendered = render_transfer_query(query);
+        sql.push_str(&rendered.and_prefix());
+        let mut params = rendered.params;
 
         sql.push_str(" ORDER BY tr.created_at DESC");
 
-        if let Some(limit) = filter.limit {
+        if let Some(limit) = limit {
             sql.push_str(" LIMIT ?");
             params.push(Value::Integer(limit as i64));
         }
@@ -1089,28 +1102,13 @@ impl TransactionStore {
             .map_err(Into::into)
     }
 
-    /// List transfers, optionally filtered to confirmed only.
-    pub fn list_transfers(&self, confirmed_only: bool) -> Result<Vec<Transfer>> {
-        let sql = if confirmed_only {
-            "SELECT id, from_transaction_id, to_transaction_id, source, confirmed, created_at
-             FROM transfers WHERE confirmed = 1 ORDER BY created_at DESC"
-        } else {
-            "SELECT id, from_transaction_id, to_transaction_id, source, confirmed, created_at
-             FROM transfers ORDER BY created_at DESC"
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let transfers = stmt
-            .query_map([], parse_transfer)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(transfers)
-    }
-
-    /// List transfers with all transaction data resolved, with optional filters.
+    /// List transfers with all transaction data resolved.
     /// Filters match if EITHER the from or to transaction matches.
     pub fn list_transfers_with_transactions(
         &self,
         confirmed_only: bool,
-        filter: &TransactionFilter,
+        query: &ParsedQuery,
+        limit: Option<usize>,
     ) -> Result<Vec<TransferWithTransactions>> {
         let mut sql = String::from(
             "SELECT
@@ -1124,25 +1122,22 @@ impl TransactionStore {
              JOIN transactions tt ON tt.id = tr.to_transaction_id
              JOIN accounts ta ON ta.id = tt.account_id
              JOIN banks tb ON tb.id = ta.bank_id
-             WHERE fa.deleted_at IS NULL AND ta.deleted_at IS NULL",
+            ",
         );
-        let mut params: Vec<Value> = Vec::new();
+
+        sql.push_str(" WHERE fa.deleted_at IS NULL AND ta.deleted_at IS NULL");
 
         if confirmed_only {
             sql.push_str(" AND tr.confirmed = 1");
         }
 
-        // Apply filters - match if EITHER from or to transaction matches
-        let (filter_sql, filter_params) =
-            build_transfer_filter_clause(filter, "ft", "fa", "fb", "tt", "ta", "tb");
-        if !filter_sql.is_empty() {
-            sql.push_str(&filter_sql);
-            params.extend(filter_params);
-        }
+        let rendered = render_transfer_query(query);
+        sql.push_str(&rendered.and_prefix());
+        let mut params = rendered.params;
 
         sql.push_str(" ORDER BY tr.created_at DESC");
 
-        if let Some(limit) = filter.limit {
+        if let Some(limit) = limit {
             sql.push_str(" LIMIT ?");
             params.push(Value::Integer(limit as i64));
         }
@@ -1169,240 +1164,6 @@ impl TransactionStore {
 
         Ok(result)
     }
-}
-
-/// Build SQL clause for account patterns (OR'd together).
-/// Returns (sql_clause, params) where clause starts with " AND ".
-fn build_account_pattern_clause(
-    patterns: &[AccountPattern],
-    bank_col: &str,
-    account_col: &str,
-) -> (String, Vec<Value>) {
-    if patterns.is_empty() {
-        return (String::new(), Vec::new());
-    }
-
-    let mut or_parts = Vec::new();
-    let mut params = Vec::new();
-
-    for pattern in patterns {
-        let mut and_parts = Vec::new();
-
-        if !pattern.bank_prefix.is_empty() {
-            and_parts.push(format!("LOWER({}) LIKE ?", bank_col));
-            params.push(Value::Text(format!(
-                "{}%",
-                pattern.bank_prefix.to_lowercase()
-            )));
-        }
-
-        if let Some(ref account_prefix) = pattern.account_prefix
-            && !account_prefix.is_empty()
-        {
-            and_parts.push(format!("LOWER({}) LIKE ?", account_col));
-            params.push(Value::Text(format!("{}%", account_prefix.to_lowercase())));
-        }
-
-        if and_parts.is_empty() {
-            // Pattern like "/" matches everything - skip
-            continue;
-        }
-
-        or_parts.push(format!("({})", and_parts.join(" AND ")));
-    }
-
-    if or_parts.is_empty() {
-        return (String::new(), Vec::new());
-    }
-
-    let clause = format!(" AND ({})", or_parts.join(" OR "));
-    (clause, params)
-}
-
-/// Build SQL clause for category patterns (OR'd together, contains match).
-/// Returns (sql_clause, params) where clause starts with " AND ".
-fn build_category_pattern_clause(patterns: &[String], category_col: &str) -> (String, Vec<Value>) {
-    if patterns.is_empty() {
-        return (String::new(), Vec::new());
-    }
-
-    let mut or_parts = Vec::new();
-    let mut params = Vec::new();
-
-    for pattern in patterns {
-        or_parts.push(format!("LOWER({}) LIKE ?", category_col));
-        params.push(Value::Text(format!("%{}%", pattern.to_lowercase())));
-    }
-
-    let clause = format!(" AND ({})", or_parts.join(" OR "));
-    (clause, params)
-}
-
-/// Returns the FTS JOIN clause if FTS query is present, empty string otherwise.
-fn build_fts_join_clause(filter: &TransactionFilter) -> &'static str {
-    if filter.fts_query.is_some() {
-        " JOIN transactions_fts fts ON t.id = fts.rowid"
-    } else {
-        ""
-    }
-}
-
-/// Append common transaction filter clauses to SQL query.
-/// Assumes the query already has: t (transactions), a (accounts), b (banks) aliases.
-/// For FTS filtering, also needs: fts (transactions_fts) alias from a JOIN (use build_fts_join_clause).
-fn append_transaction_filters(
-    sql: &mut String,
-    params: &mut Vec<Value>,
-    filter: &TransactionFilter,
-) {
-    if let Some(ref fts_query) = filter.fts_query {
-        sql.push_str(" AND transactions_fts MATCH ?");
-        params.push(Value::Text(fts_query.clone()));
-    }
-    if let Some(bank_id) = filter.bank_id {
-        sql.push_str(" AND a.bank_id = ?");
-        params.push(Value::Integer(bank_id));
-    }
-    if let Some(account_id) = filter.account_id {
-        sql.push_str(" AND t.account_id = ?");
-        params.push(Value::Integer(account_id));
-    }
-    if let Some(ref from_date) = filter.from_date {
-        sql.push_str(" AND t.date >= ?");
-        params.push(Value::Text(from_date.to_string()));
-    }
-    if let Some(ref to_date) = filter.to_date {
-        sql.push_str(" AND t.date <= ?");
-        params.push(Value::Text(to_date.to_string()));
-    }
-    if let Some(amount_min) = filter.amount_min {
-        sql.push_str(" AND t.amount_cents >= ?");
-        params.push(Value::Integer(amount_min));
-    }
-    if let Some(amount_max) = filter.amount_max {
-        sql.push_str(" AND t.amount_cents <= ?");
-        params.push(Value::Integer(amount_max));
-    }
-    if !filter.account_patterns.is_empty() {
-        let (clause, pattern_params) =
-            build_account_pattern_clause(&filter.account_patterns, "b.name", "a.name");
-        sql.push_str(&clause);
-        params.extend(pattern_params);
-    }
-    if let Some(ref regex) = filter.description_regex {
-        sql.push_str(" AND regexp(?, t.description)");
-        params.push(Value::Text(regex.clone()));
-    }
-}
-
-/// Build filter clause for transfers where EITHER from or to transaction matches.
-/// Returns (sql_clause, params) to append to the query.
-fn build_transfer_filter_clause(
-    filter: &TransactionFilter,
-    from_t: &str,
-    from_a: &str,
-    from_b: &str,
-    to_t: &str,
-    to_a: &str,
-    to_b: &str,
-) -> (String, Vec<Value>) {
-    let mut conditions_from = Vec::new();
-    let mut conditions_to = Vec::new();
-    let mut params = Vec::new();
-
-    // Helper to add condition to both sides
-    macro_rules! add_filter {
-        ($cond_from:expr, $cond_to:expr, $val:expr) => {
-            conditions_from.push($cond_from);
-            conditions_to.push($cond_to);
-            params.push($val.clone());
-            params.push($val);
-        };
-    }
-
-    if let Some(bank_id) = filter.bank_id {
-        add_filter!(
-            format!("{}.bank_id = ?", from_a),
-            format!("{}.bank_id = ?", to_a),
-            Value::Integer(bank_id)
-        );
-    }
-    if let Some(account_id) = filter.account_id {
-        add_filter!(
-            format!("{}.account_id = ?", from_t),
-            format!("{}.account_id = ?", to_t),
-            Value::Integer(account_id)
-        );
-    }
-    if let Some(ref from_date) = filter.from_date {
-        add_filter!(
-            format!("{}.date >= ?", from_t),
-            format!("{}.date >= ?", to_t),
-            Value::Text(from_date.to_string())
-        );
-    }
-    if let Some(ref to_date) = filter.to_date {
-        add_filter!(
-            format!("{}.date <= ?", from_t),
-            format!("{}.date <= ?", to_t),
-            Value::Text(to_date.to_string())
-        );
-    }
-    if let Some(amount_min) = filter.amount_min {
-        add_filter!(
-            format!("{}.amount_cents >= ?", from_t),
-            format!("{}.amount_cents >= ?", to_t),
-            Value::Integer(amount_min)
-        );
-    }
-    if let Some(amount_max) = filter.amount_max {
-        add_filter!(
-            format!("{}.amount_cents <= ?", from_t),
-            format!("{}.amount_cents <= ?", to_t),
-            Value::Integer(amount_max)
-        );
-    }
-    // Account patterns: build OR clause for each side
-    if !filter.account_patterns.is_empty() {
-        let (from_clause, from_params) = build_account_pattern_clause(
-            &filter.account_patterns,
-            &format!("{}.name", from_b),
-            &format!("{}.name", from_a),
-        );
-        let (to_clause, to_params) = build_account_pattern_clause(
-            &filter.account_patterns,
-            &format!("{}.name", to_b),
-            &format!("{}.name", to_a),
-        );
-        // Strip leading " AND " from clauses for use in our OR structure
-        if !from_clause.is_empty() {
-            let from_inner = from_clause.strip_prefix(" AND ").unwrap_or(&from_clause);
-            let to_inner = to_clause.strip_prefix(" AND ").unwrap_or(&to_clause);
-            conditions_from.push(from_inner.to_string());
-            conditions_to.push(to_inner.to_string());
-            params.extend(from_params);
-            params.extend(to_params);
-        }
-    }
-    if let Some(ref regex) = filter.description_regex {
-        let pattern = Value::Text(regex.clone());
-        add_filter!(
-            format!("regexp(?, {}.description)", from_t),
-            format!("regexp(?, {}.description)", to_t),
-            pattern
-        );
-    }
-
-    if conditions_from.is_empty() {
-        return (String::new(), Vec::new());
-    }
-
-    // Build: AND ((from_cond1 AND from_cond2 ...) OR (to_cond1 AND to_cond2 ...))
-    let from_clause = conditions_from.join(" AND ");
-    let to_clause = conditions_to.join(" AND ");
-    let sql = format!(" AND (({}) OR ({}))", from_clause, to_clause);
-
-    (sql, params)
 }
 
 fn parse_datetime(s: &str) -> rusqlite::Result<chrono::DateTime<Utc>> {
@@ -1448,10 +1209,6 @@ fn parse_transaction_at_offset(
     })
 }
 
-fn parse_enrichment(row: &rusqlite::Row) -> rusqlite::Result<TransactionEnrichment> {
-    parse_enrichment_at_offset(row, 0)
-}
-
 fn parse_enrichment_at_offset(
     row: &rusqlite::Row,
     offset: usize,
@@ -1489,42 +1246,6 @@ fn parse_transfer(row: &rusqlite::Row) -> rusqlite::Result<Transfer> {
     })
 }
 
-fn fuzzy_match(haystack: &str, needle: &str) -> Option<i32> {
-    let mut score = 0i32;
-    let mut haystack_chars = haystack.chars().peekable();
-    let mut prev_matched = false;
-    let mut needle_pos = 0;
-
-    for needle_char in needle.chars() {
-        let mut found = false;
-        while let Some(&h_char) = haystack_chars.peek() {
-            haystack_chars.next();
-            if h_char == needle_char {
-                found = true;
-                if prev_matched {
-                    score += 2;
-                } else {
-                    score += 1;
-                }
-                prev_matched = true;
-                break;
-            } else {
-                prev_matched = false;
-            }
-        }
-        if !found {
-            return None;
-        }
-        needle_pos += 1;
-    }
-
-    if haystack.starts_with(needle) {
-        score += 10;
-    }
-
-    Some(score + needle_pos)
-}
-
 fn parse_date(date_str: &str) -> Result<NaiveDate> {
     if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
         return Ok(date);
@@ -1538,8 +1259,37 @@ fn parse_date(date_str: &str) -> Result<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransferSource;
+    use crate::search::{
+        AccountFilter, AmountFilter, CategoryFilter, DateFilter, SearchConfig, parse,
+    };
     use std::fs;
     use tempfile::TempDir;
+
+    /// Build a SearchConfig with all standard filters and no completion options.
+    fn search_config() -> SearchConfig {
+        SearchConfig::new(vec![
+            Box::new(DateFilter),
+            Box::new(AmountFilter),
+            Box::new(AccountFilter::with_options(vec![])),
+            Box::new(CategoryFilter::with_options(vec![])),
+        ])
+    }
+
+    /// Convenience: parse a query string with the standard search config.
+    fn q(input: &str) -> ParsedQuery {
+        let (parsed, _) = parse(&search_config(), input, input.chars().count());
+        parsed
+    }
+
+    /// Strip the cursor's implicit `*` so FTS tests get exact matching.
+    /// `parse()` adds a `*` at the end if the cursor is at the end of the FTS
+    /// text — handy in the TUI but a foot-gun in unit tests.
+    fn q_exact(input: &str) -> ParsedQuery {
+        // Pass cursor=0 so no implicit prefix is added.
+        let (parsed, _) = parse(&search_config(), input, 0);
+        parsed
+    }
 
     fn setup_test_exports() -> TempDir {
         let temp = TempDir::new().unwrap();
@@ -1571,8 +1321,181 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         temp
     }
 
+    /// Test fixture with two banks, three accounts, several transactions,
+    /// some categorised, and one transfer pair. Used to exercise rendering
+    /// across multiple filter types and store query methods.
+    fn setup_rich_fixture() -> (TempDir, TransactionStore) {
+        let temp = TempDir::new().unwrap();
+        let store = TransactionStore::open_in_memory(temp.path()).unwrap();
+
+        // Insert banks/accounts directly to avoid relying on import scripts.
+        store
+            .conn
+            .execute("INSERT INTO banks (name) VALUES ('ING')", [])
+            .unwrap();
+        store
+            .conn
+            .execute("INSERT INTO banks (name) VALUES ('NAB')", [])
+            .unwrap();
+        let ing_id: i64 = store
+            .conn
+            .query_row("SELECT id FROM banks WHERE name='ING'", [], |r| r.get(0))
+            .unwrap();
+        let nab_id: i64 = store
+            .conn
+            .query_row("SELECT id FROM banks WHERE name='NAB'", [], |r| r.get(0))
+            .unwrap();
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO accounts (bank_id, name) VALUES (?, 'Orange Everyday')",
+                [ing_id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO accounts (bank_id, name) VALUES (?, 'Savings Maximiser')",
+                [ing_id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO accounts (bank_id, name) VALUES (?, 'Classic')",
+                [nab_id],
+            )
+            .unwrap();
+        let ing_orange: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM accounts WHERE name='Orange Everyday'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ing_savings: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM accounts WHERE name='Savings Maximiser'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let nab_classic: i64 = store
+            .conn
+            .query_row("SELECT id FROM accounts WHERE name='Classic'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        // Make a batch.
+        store
+            .conn
+            .execute(
+                "INSERT INTO import_batches (started_at) VALUES ('2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let batch_id: i64 = store.conn.last_insert_rowid();
+
+        // Insert a handful of transactions.
+        let txs = [
+            (ing_orange, "2024-01-15", "Coffee Shop", -500i64, 100000i64),
+            (ing_orange, "2024-02-20", "Grocery Store", -8500, 91500),
+            (ing_orange, "2024-03-10", "Salary", 250000, 341500),
+            (ing_savings, "2024-03-15", "Interest", 1234, 50000),
+            (nab_classic, "2024-04-05", "Coffee Bean", -750, 75000),
+            // Transfer pair (equal & opposite)
+            (ing_orange, "2024-05-01", "Transfer Out", -10000, 331500),
+            (nab_classic, "2024-05-01", "Transfer In", 10000, 85000),
+        ];
+        for (account_id, date, desc, amount, balance) in txs {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO transactions
+                     (account_id, date, description, amount_cents, balance_cents,
+                      hash, metadata, source_file, import_batch_id)
+                     VALUES (?, ?, ?, ?, ?, ?, '{}', '', ?)",
+                    params![
+                        account_id,
+                        date,
+                        desc,
+                        amount,
+                        balance,
+                        format!("{}-{}-{}", account_id, date, amount),
+                        batch_id,
+                    ],
+                )
+                .unwrap();
+            let tx_id = store.conn.last_insert_rowid();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
+                    params![tx_id, desc],
+                )
+                .unwrap();
+        }
+
+        // Categorise some.
+        let mut store = store; // need mut for set_category
+        let food_id = store.get_or_create_category("Food/Groceries").unwrap();
+        let coffee_id = store.get_or_create_category("Food/Coffee").unwrap();
+        let income_id = store.get_or_create_category("Income/Salary").unwrap();
+
+        let id_of = |store: &TransactionStore, desc: &str| -> i64 {
+            store
+                .conn
+                .query_row(
+                    "SELECT id FROM transactions WHERE description = ? LIMIT 1",
+                    [desc],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+
+        let coffee_tx = id_of(&store, "Coffee Shop");
+        let groc_tx = id_of(&store, "Grocery Store");
+        let salary_tx = id_of(&store, "Salary");
+        let coffee_bean_tx = id_of(&store, "Coffee Bean");
+
+        store
+            .set_category(coffee_tx, coffee_id, CategorySource::Manual, true, None)
+            .unwrap();
+        store
+            .set_category(groc_tx, food_id, CategorySource::Manual, true, None)
+            .unwrap();
+        store
+            .set_category(salary_tx, income_id, CategorySource::Manual, true, None)
+            .unwrap();
+        // AI-suggested, awaiting review:
+        store
+            .set_category(
+                coffee_bean_tx,
+                coffee_id,
+                CategorySource::Ai,
+                false,
+                Some(0.85),
+            )
+            .unwrap();
+
+        // Create the transfer link.
+        let xfer_out = id_of(&store, "Transfer Out");
+        let xfer_in = id_of(&store, "Transfer In");
+        store
+            .create_transfer(xfer_out, xfer_in, TransferSource::Manual, true)
+            .unwrap();
+
+        (temp, store)
+    }
+
+    // ----- Schema/refresh tests (unchanged) -----
+
     #[test]
-    fn test_discover_banks_and_accounts() {
+    fn discover_banks_and_accounts() {
         let temp = setup_test_exports();
         let store = TransactionStore::open_in_memory(temp.path()).unwrap();
 
@@ -1583,7 +1506,7 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
     }
 
     #[test]
-    fn test_refresh_creates_banks_and_accounts() {
+    fn refresh_creates_banks_and_accounts() {
         let temp = setup_test_exports();
         let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
 
@@ -1597,7 +1520,7 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
     }
 
     #[test]
-    fn test_soft_delete_missing_bank() {
+    fn soft_delete_missing_bank() {
         let temp = setup_test_exports();
         let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
 
@@ -1612,119 +1535,319 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         assert!(banks.is_empty());
     }
 
+    // ----- query_transactions: filter coverage -----
+
     #[test]
-    fn test_query_transactions_amount_filter() {
-        let temp = setup_test_exports();
-        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
-        store.refresh().unwrap();
+    fn query_with_empty_query_returns_all() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        assert_eq!(txs.len(), 7);
+    }
 
-        // Transaction has amount -10000 cents
-        let filter = TransactionFilter {
-            amount_min: Some(-10000),
-            amount_max: Some(-10000),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
+    #[test]
+    fn query_respects_limit() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&ParsedQuery::empty(), Some(3))
+            .unwrap();
+        assert_eq!(txs.len(), 3);
+    }
+
+    #[test]
+    fn query_amount_exact_matches_either_sign() {
+        // ABS(amount) = X — matches both -X and +X
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("amount:100"), None).unwrap();
+        // Both Transfer Out (-10000) and Transfer In (10000) hit
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[test]
+    fn query_amount_greater_than() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("amount:>50"), None).unwrap();
+        // Anything with |amount| > $50: Grocery Store (-85), Salary (250),
+        // Transfer Out (-100), Transfer In (100) — 4 rows
+        assert_eq!(txs.len(), 4);
+    }
+
+    #[test]
+    fn query_amount_range() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("amount:1..50"), None).unwrap();
+        // |amount| between $1 and $50: Coffee Shop (-5), Coffee Bean (-7.50),
+        // Interest (12.34) — 3 rows
+        assert_eq!(txs.len(), 3);
+    }
+
+    #[test]
+    fn query_date_year() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("date:2024"), None).unwrap();
+        assert_eq!(txs.len(), 7);
+    }
+
+    #[test]
+    fn query_date_month() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("date:2024-03"), None).unwrap();
+        // March: Salary, Interest
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[test]
+    fn query_date_range() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&q("date:2024-02..2024-04"), None)
+            .unwrap();
+        // Feb 20, Mar 10, Mar 15, Apr 5 — 4 rows
+        assert_eq!(txs.len(), 4);
+    }
+
+    #[test]
+    fn query_account_bank_only() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("account:ING"), None).unwrap();
+        // ING has 5 transactions
+        assert_eq!(txs.len(), 5);
+    }
+
+    #[test]
+    fn query_account_bank_account() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&q("account:ING/Orange"), None)
+            .unwrap();
+        // ING/Orange Everyday: Coffee Shop, Grocery Store, Salary, Transfer Out
+        assert_eq!(txs.len(), 4);
+    }
+
+    #[test]
+    fn query_account_or() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&q("account:NAB|ING/Savings"), None)
+            .unwrap();
+        // NAB (2) + ING Savings (1) = 3
+        assert_eq!(txs.len(), 3);
+    }
+
+    #[test]
+    fn query_account_is_case_insensitive() {
+        let (_t, store) = setup_rich_fixture();
+        let upper = store.query_transactions(&q("account:ING"), None).unwrap();
+        let lower = store.query_transactions(&q("account:ing"), None).unwrap();
+        assert_eq!(upper.len(), lower.len());
+        assert!(!upper.is_empty());
+    }
+
+    #[test]
+    fn query_category_filter() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("category:Food"), None).unwrap();
+        // Food/Groceries + Food/Coffee assigned to: Coffee Shop, Grocery Store, Coffee Bean
+        assert_eq!(txs.len(), 3);
+    }
+
+    #[test]
+    fn query_category_or() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&q("category:Income|Coffee"), None)
+            .unwrap();
+        // Salary (Income), Coffee Shop (Food/Coffee), Coffee Bean (Food/Coffee)
+        assert_eq!(txs.len(), 3);
+    }
+
+    #[test]
+    fn query_category_is_case_insensitive() {
+        let (_t, store) = setup_rich_fixture();
+        let upper = store.query_transactions(&q("category:Food"), None).unwrap();
+        let lower = store.query_transactions(&q("category:food"), None).unwrap();
+        assert_eq!(upper.len(), lower.len());
+    }
+
+    #[test]
+    fn query_regex_description() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("/Coffee.*/"), None).unwrap();
+        // "Coffee Shop", "Coffee Bean"
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[test]
+    fn query_regex_case_insensitive_flag() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("/coffee/i"), None).unwrap();
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[test]
+    fn query_fts() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q_exact("Salary"), None).unwrap();
         assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].description, "Salary");
+    }
 
-        // Out of range
-        let filter = TransactionFilter {
-            amount_min: Some(0),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
+    #[test]
+    fn query_fts_prefix_at_cursor() {
+        // Cursor at end → implicit prefix → "trans" matches "Transfer Out"/"Transfer In"
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("trans"), None).unwrap();
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[test]
+    fn query_fts_no_match() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&q_exact("notpresent"), None)
+            .unwrap();
         assert!(txs.is_empty());
     }
 
     #[test]
-    fn test_query_transactions_account_pattern() {
-        let temp = setup_test_exports();
-        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
-        store.refresh().unwrap();
-
-        // "Test" bank prefix matches "TestBank"
-        let filter = TransactionFilter {
-            account_patterns: vec![AccountPattern::parse("Test")],
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
+    fn query_combines_filters_with_and() {
+        // amount range AND date AND account — narrows to a single tx
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&q("date:2024-01..2024-02 amount:>50 account:ING/"), None)
+            .unwrap();
+        // Jan 15 Coffee Shop ($5, too small), Feb 20 Grocery ($85, matches)
         assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].description, "Grocery Store");
+    }
 
-        // Case insensitive
-        let filter = TransactionFilter {
-            account_patterns: vec![AccountPattern::parse("test")],
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
+    // ----- get_uncategorised_transactions -----
 
-        // "Bank" does not match (starts-with, not contains)
-        let filter = TransactionFilter {
-            account_patterns: vec![AccountPattern::parse("Bank")],
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert!(txs.is_empty());
-
-        // Bank/Account pattern: "TestBank/Check" matches "TestBank/Checking"
-        let filter = TransactionFilter {
-            account_patterns: vec![AccountPattern::parse("TestBank/Check")],
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
-
-        // Multiple patterns with OR
-        let filter = TransactionFilter {
-            account_patterns: vec![
-                AccountPattern::parse("NonExistent"),
-                AccountPattern::parse("Test"),
-            ],
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
+    #[test]
+    fn uncategorised_excludes_categorised_and_transfers() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .get_uncategorised_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        // Categorised (3 confirmed + 1 ai) → 4 categorised, 7 total, 2 in transfers, 1 leftover (Interest)
+        // Coffee Bean has an AI enrichment → counts as categorised here
+        // So uncategorised excluding transfer = Interest (1)
+        let descs: Vec<_> = txs.iter().map(|t| t.description.clone()).collect();
+        assert_eq!(descs, vec!["Interest"]);
     }
 
     #[test]
-    fn test_query_transactions_description_regex() {
-        let temp = setup_test_exports();
-        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
-        store.refresh().unwrap();
-
-        // Regex matches
-        let filter = TransactionFilter {
-            description_regex: Some("Test.*action".to_string()),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
-
-        // Case-insensitive regex
-        let filter = TransactionFilter {
-            description_regex: Some("(?i)TEST".to_string()),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
-
-        // Non-matching regex
-        let filter = TransactionFilter {
-            description_regex: Some("^Coffee".to_string()),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
+    fn uncategorised_respects_filters() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .get_uncategorised_transactions(&q("date:2025"), None)
+            .unwrap();
         assert!(txs.is_empty());
     }
 
+    // ----- get_pending_ai_reviews -----
+
     #[test]
-    fn test_rename_category() {
+    fn pending_ai_reviews_only_unconfirmed_ai() {
+        let (_t, store) = setup_rich_fixture();
+        let pending = store
+            .get_pending_ai_reviews(&ParsedQuery::empty(), None)
+            .unwrap();
+        // Only Coffee Bean is AI + unconfirmed
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].transaction.description, "Coffee Bean");
+    }
+
+    #[test]
+    fn pending_ai_reviews_filtered_by_account() {
+        let (_t, store) = setup_rich_fixture();
+        let pending = store
+            .get_pending_ai_reviews(&q("account:ING"), None)
+            .unwrap();
+        // Coffee Bean is on NAB → filtered out
+        assert!(pending.is_empty());
+    }
+
+    // ----- transfer queries -----
+
+    #[test]
+    fn transfers_listed_for_either_side_match() {
+        let (_t, store) = setup_rich_fixture();
+        // Filter on NAB — should still return the transfer because tt-side is on NAB
+        let xfers = store
+            .list_transfers_with_transactions(true, &q("account:NAB"), None)
+            .unwrap();
+        assert_eq!(xfers.len(), 1);
+        assert_eq!(xfers[0].to_transaction.description, "Transfer In");
+    }
+
+    #[test]
+    fn transfers_listed_for_from_side_match() {
+        let (_t, store) = setup_rich_fixture();
+        let xfers = store
+            .list_transfers_with_transactions(true, &q("account:ING"), None)
+            .unwrap();
+        assert_eq!(xfers.len(), 1);
+        assert_eq!(xfers[0].from_transaction.description, "Transfer Out");
+    }
+
+    #[test]
+    fn transfers_dropped_when_no_side_matches() {
+        let (_t, store) = setup_rich_fixture();
+        let xfers = store
+            .list_transfers_with_transactions(true, &q("account:Nonexistent"), None)
+            .unwrap();
+        assert!(xfers.is_empty());
+    }
+
+    #[test]
+    fn transfers_filter_by_fts_on_either_side() {
+        let (_t, store) = setup_rich_fixture();
+        let xfers = store
+            .list_transfers_with_transactions(true, &q_exact("Transfer"), None)
+            .unwrap();
+        assert_eq!(xfers.len(), 1);
+
+        let xfers = store
+            .list_transfers_with_transactions(true, &q_exact("notpresent"), None)
+            .unwrap();
+        assert!(xfers.is_empty());
+    }
+
+    #[test]
+    fn transfers_keep_filters_and_fts_on_same_side() {
+        let (_t, store) = setup_rich_fixture();
+
+        let xfers = store
+            .list_transfers_with_transactions(true, &q_exact("account:ING In"), None)
+            .unwrap();
+        assert!(xfers.is_empty());
+
+        let xfers = store
+            .list_transfers_with_transactions(true, &q_exact("account:NAB In"), None)
+            .unwrap();
+        assert_eq!(xfers.len(), 1);
+        assert_eq!(xfers[0].to_transaction.description, "Transfer In");
+    }
+
+    #[test]
+    fn pending_transfer_reviews_empty_when_all_confirmed() {
+        let (_t, store) = setup_rich_fixture();
+        let pending = store
+            .get_pending_transfer_reviews(&ParsedQuery::empty(), None)
+            .unwrap();
+        assert!(pending.is_empty());
+    }
+
+    // ----- Category management (unchanged behaviour) -----
+
+    #[test]
+    fn rename_category_works() {
         let temp = setup_test_exports();
         let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
 
         let cat_id = store.get_or_create_category("Food/Groceries").unwrap();
-
-        // Rename should work
         store.rename_category(cat_id, "Food/Supermarket").unwrap();
 
         let cat = store.get_category(cat_id).unwrap().unwrap();
@@ -1732,20 +1855,19 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
     }
 
     #[test]
-    fn test_rename_category_conflict() {
+    fn rename_category_conflict_errors() {
         let temp = setup_test_exports();
         let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
 
         store.get_or_create_category("Food/Groceries").unwrap();
         let cat2_id = store.get_or_create_category("Food/Supermarket").unwrap();
 
-        // Renaming to existing name should fail
         let result = store.rename_category(cat2_id, "Food/Groceries");
         assert!(matches!(result, Err(Error::CategoryExists(_))));
     }
 
     #[test]
-    fn test_merge_categories() {
+    fn merge_categories_moves_transactions_and_drops_source() {
         let temp = setup_test_exports();
         let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
         store.refresh().unwrap();
@@ -1753,93 +1875,37 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         let source_id = store.get_or_create_category("OldCategory").unwrap();
         let target_id = store.get_or_create_category("NewCategory").unwrap();
 
-        // Assign a transaction to source category
         let txs = store
-            .query_transactions(&TransactionFilter::default())
+            .query_transactions(&ParsedQuery::empty(), None)
             .unwrap();
         let tx_id = txs[0].id;
         store
             .set_category(tx_id, source_id, CategorySource::Manual, true, None)
             .unwrap();
 
-        // Merge source into target
         store.merge_categories(source_id, target_id).unwrap();
 
-        // Source category should be deleted
         assert!(store.get_category(source_id).unwrap().is_none());
-
-        // Transaction should now have target category
         let cat = store.get_transaction_category(tx_id).unwrap().unwrap();
         assert_eq!(cat.id, target_id);
     }
 
     #[test]
-    fn test_count_transactions_in_category() {
+    fn count_transactions_in_category_tracks_assignments() {
         let temp = setup_test_exports();
         let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
         store.refresh().unwrap();
 
         let cat_id = store.get_or_create_category("TestCategory").unwrap();
-
-        // Initially empty
         assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 0);
 
-        // Assign transaction
         let txs = store
-            .query_transactions(&TransactionFilter::default())
+            .query_transactions(&ParsedQuery::empty(), None)
             .unwrap();
         store
             .set_category(txs[0].id, cat_id, CategorySource::Manual, true, None)
             .unwrap();
 
         assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 1);
-    }
-
-    #[test]
-    fn test_query_transactions_fts() {
-        let temp = setup_test_exports();
-        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
-        store.refresh().unwrap();
-
-        // The test transaction has description "Test transaction"
-        // FTS term search
-        let filter = TransactionFilter {
-            fts_query: Some("Test".to_string()),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
-
-        // Case insensitive
-        let filter = TransactionFilter {
-            fts_query: Some("test".to_string()),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
-
-        // Multiple terms (AND)
-        let filter = TransactionFilter {
-            fts_query: Some("Test transaction".to_string()),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
-
-        // No match
-        let filter = TransactionFilter {
-            fts_query: Some("Coffee".to_string()),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert!(txs.is_empty());
-
-        // Prefix match
-        let filter = TransactionFilter {
-            fts_query: Some("trans*".to_string()),
-            ..Default::default()
-        };
-        let txs = store.query_transactions(&filter).unwrap();
-        assert_eq!(txs.len(), 1);
     }
 }

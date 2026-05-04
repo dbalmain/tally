@@ -60,7 +60,7 @@ impl RawToken {
 /// Tokenize search input into raw tokens.
 ///
 /// Rules:
-/// - **Filter**: `name:value` where name is alphanumeric and value has no whitespace
+/// - **Filter**: `name:value` where value has no whitespace
 /// - **Regex**: `/` at word boundary, content until unescaped `/`, then flags until whitespace
 /// - **FTS**: Everything else (whitespace-separated, quotes for phrases)
 /// - **Whitespace**: Preserved between tokens for cursor positioning
@@ -141,7 +141,7 @@ fn try_parse_filter(chars: &[char], start: usize) -> Option<(RawToken, usize)> {
     pos += 1; // consume the ':'
     let value_start = pos;
 
-    // Parse the value: everything until whitespace
+    // Parse the value: everything until whitespace.
     while pos < len && !chars[pos].is_whitespace() {
         pos += 1;
     }

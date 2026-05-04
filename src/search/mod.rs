@@ -26,9 +26,10 @@
 mod context;
 mod filter;
 pub mod filters;
-mod legacy;
+mod fuzzy;
 mod parse;
 mod query;
+mod render;
 mod tokenize;
 
 pub use context::CursorContext;
@@ -36,7 +37,7 @@ pub use filter::{Filter, FilterResult};
 pub use filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
 pub use parse::{SearchConfig, parse};
 pub use query::{ParsedQuery, QueryPart, Span};
+pub use render::{Rendered, SqlContext};
 pub use tokenize::{RawToken, tokenize};
 
-// Re-export legacy types for backwards compatibility during migration
-pub use legacy::{DbFtsMatch, DbRegexMatch, DbSearchQuery, FuzzyMatcher};
+pub use fuzzy::FuzzyMatcher;

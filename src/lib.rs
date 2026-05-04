@@ -10,6 +10,6 @@ pub mod tui;
 pub mod types;
 
 pub use error::{Error, Result};
-pub use search::{DbFtsMatch, DbRegexMatch, DbSearchQuery, FuzzyMatcher};
+pub use search::FuzzyMatcher;
 pub use store::TransactionStore;
 pub use types::*;

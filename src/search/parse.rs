@@ -235,13 +235,13 @@ fn calculate_cursor_in_combined(combined: &str, tokens: &[(String, Span)], curso
             // Cursor is in this token
             return combined_pos + (cursor - span.start);
         }
-        combined_pos += text.len();
+        combined_pos += text.chars().count();
         if i < tokens.len() - 1 {
             combined_pos += 1; // space between tokens
         }
     }
 
-    combined.len()
+    combined.chars().count()
 }
 
 /// Process FTS query for SQLite FTS5.

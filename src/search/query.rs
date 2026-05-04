@@ -1,11 +1,6 @@
 //! Parsed query types representing tokenized and validated search input.
 
-use rusqlite::types::Value;
-
-use crate::{AccountPattern, TransactionFilter};
-
 use super::filter::FilterResult;
-use super::filters::{parse_amount, parse_date_spec};
 
 /// A span of characters in the original input string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +83,7 @@ impl QueryPart {
 }
 
 /// A fully parsed search query.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParsedQuery {
     /// The parsed parts of the query.
     pub parts: Vec<QueryPart>,
@@ -97,7 +92,7 @@ pub struct ParsedQuery {
 impl ParsedQuery {
     /// Create an empty parsed query.
     pub fn empty() -> Self {
-        Self { parts: Vec::new() }
+        Self::default()
     }
 
     /// Check if the query is empty (no meaningful content).
@@ -107,279 +102,21 @@ impl ParsedQuery {
             .all(|p| matches!(p, QueryPart::Whitespace { .. }))
     }
 
-    /// Convert to SQL WHERE clause and parameters.
-    ///
-    /// Returns (where_clause, params) for use in SQL queries.
-    /// The where_clause is a fragment like "date >= ? AND amount_cents > ?".
-    pub fn to_sql(&self) -> (String, Vec<Value>) {
-        let mut clauses = Vec::new();
-        let mut params = Vec::new();
-
-        for part in &self.parts {
-            match part {
-                QueryPart::Filter {
-                    result: FilterResult::Valid { sql, params: p },
-                    ..
-                } => {
-                    clauses.push(sql.clone());
-                    params.extend(p.clone());
-                }
-                QueryPart::Regex {
-                    pattern,
-                    valid: true,
-                    ..
-                } => {
-                    clauses.push("description REGEXP ?".to_string());
-                    params.push(Value::Text(pattern.clone()));
-                }
-                _ => {}
-            }
-        }
-
-        let where_clause = if clauses.is_empty() {
-            "1=1".to_string()
-        } else {
-            clauses.join(" AND ")
-        };
-
-        (where_clause, params)
-    }
-
     /// Get the FTS query if present.
     ///
     /// Returns the processed FTS5 query string for use in a JOIN or MATCH clause.
     pub fn fts_query(&self) -> Option<&str> {
-        self.parts.iter().find_map(|p| match p {
-            QueryPart::Fts { query, .. } if !query.is_empty() => Some(query.as_str()),
-            _ => None,
-        })
+        self.fts_queries().into_iter().next()
     }
 
-    /// Convert to a TransactionFilter for use with existing store methods.
-    ///
-    /// This is a temporary bridge during the search refactor. It re-parses
-    /// filter values to populate the structured TransactionFilter fields.
-    pub fn to_transaction_filter(&self, limit: Option<usize>) -> TransactionFilter {
-        let mut filter = TransactionFilter {
-            limit,
-            ..Default::default()
-        };
-
-        for part in &self.parts {
-            match part {
-                QueryPart::Filter {
-                    name,
-                    value,
-                    result,
-                    ..
-                } => {
-                    if !matches!(result, FilterResult::Valid { .. }) {
-                        continue;
-                    }
-                    match *name {
-                        "date" => Self::extract_date(value, &mut filter),
-                        "amount" => Self::extract_amount(value, &mut filter),
-                        "account" => {
-                            for segment in value.split('|') {
-                                if !segment.is_empty() {
-                                    filter.account_patterns.push(AccountPattern::parse(segment));
-                                }
-                            }
-                        }
-                        "category" => {
-                            for segment in value.split('|') {
-                                if !segment.is_empty() {
-                                    filter.category_patterns.push(segment.to_string());
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                QueryPart::Regex {
-                    pattern,
-                    valid: true,
-                    ..
-                } => {
-                    filter.description_regex = Some(pattern.clone());
-                }
-                QueryPart::Fts { query, .. } if !query.is_empty() => {
-                    filter.fts_query = Some(query.clone());
-                }
-                _ => {}
-            }
-        }
-
-        filter
-    }
-
-    fn extract_date(value: &str, filter: &mut TransactionFilter) {
-        if let Some((from, to)) = value.split_once("..") {
-            if !from.is_empty()
-                && let Some((start, _)) = parse_date_spec(from)
-            {
-                filter.from_date = Some(start);
-            }
-            if !to.is_empty()
-                && let Some((_, end)) = parse_date_spec(to)
-            {
-                filter.to_date = Some(end);
-            }
-        } else if let Some((start, end)) = parse_date_spec(value) {
-            filter.from_date = Some(start);
-            filter.to_date = Some(end);
-        }
-    }
-
-    fn extract_amount(value: &str, filter: &mut TransactionFilter) {
-        if let Some(rest) = value.strip_prefix('>') {
-            if let Some(cents) = parse_amount(rest) {
-                filter.amount_min = Some(cents + 1);
-            }
-        } else if let Some(rest) = value.strip_prefix('<') {
-            if let Some(cents) = parse_amount(rest) {
-                filter.amount_max = Some(cents - 1);
-            }
-        } else if let Some((from, to)) = value.split_once("..") {
-            if !from.is_empty()
-                && let Some(cents) = parse_amount(from)
-            {
-                filter.amount_min = Some(cents);
-            }
-            if !to.is_empty()
-                && let Some(cents) = parse_amount(to)
-            {
-                filter.amount_max = Some(cents);
-            }
-        } else if let Some(cents) = parse_amount(value) {
-            // Exact match
-            filter.amount_min = Some(cents);
-            filter.amount_max = Some(cents);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_filter(name: &'static str, sql: &str, params: Vec<Value>) -> QueryPart {
-        QueryPart::Filter {
-            name,
-            value: String::new(),
-            result: FilterResult::Valid {
-                sql: sql.to_string(),
-                params,
-            },
-            span: Span::new(0, 0),
-            value_span: Span::new(0, 0),
-        }
-    }
-
-    fn make_regex(pattern: &str) -> QueryPart {
-        QueryPart::Regex {
-            original: format!("/{}/", pattern),
-            pattern: pattern.to_string(),
-            valid: true,
-            span: Span::new(0, 0),
-        }
-    }
-
-    fn make_fts(query: &str) -> QueryPart {
-        QueryPart::Fts {
-            original: query.to_string(),
-            query: query.to_string(),
-            span: Span::new(0, 0),
-        }
-    }
-
-    #[test]
-    fn test_to_sql_empty() {
-        let query = ParsedQuery::empty();
-        let (sql, params) = query.to_sql();
-        assert_eq!(sql, "1=1");
-        assert!(params.is_empty());
-    }
-
-    #[test]
-    fn test_to_sql_single_filter() {
-        let query = ParsedQuery {
-            parts: vec![make_filter(
-                "date",
-                "date >= ? AND date <= ?",
-                vec![
-                    Value::Text("2024-01-01".to_string()),
-                    Value::Text("2024-12-31".to_string()),
-                ],
-            )],
-        };
-
-        let (sql, params) = query.to_sql();
-        assert_eq!(sql, "date >= ? AND date <= ?");
-        assert_eq!(params.len(), 2);
-    }
-
-    #[test]
-    fn test_to_sql_multiple_filters() {
-        let query = ParsedQuery {
-            parts: vec![
-                make_filter(
-                    "date",
-                    "date >= ?",
-                    vec![Value::Text("2024-01-01".to_string())],
-                ),
-                QueryPart::Whitespace {
-                    span: Span::new(0, 0),
-                },
-                make_filter(
-                    "amount",
-                    "ABS(amount_cents) > ?",
-                    vec![Value::Integer(10000)],
-                ),
-            ],
-        };
-
-        let (sql, params) = query.to_sql();
-        assert_eq!(sql, "date >= ? AND ABS(amount_cents) > ?");
-        assert_eq!(params.len(), 2);
-    }
-
-    #[test]
-    fn test_to_sql_regex() {
-        let query = ParsedQuery {
-            parts: vec![make_regex("(?i)coffee.*")],
-        };
-
-        let (sql, params) = query.to_sql();
-        assert_eq!(sql, "description REGEXP ?");
-        assert_eq!(params, vec![Value::Text("(?i)coffee.*".to_string())]);
-    }
-
-    #[test]
-    fn test_fts_query() {
-        let query = ParsedQuery {
-            parts: vec![
-                make_filter(
-                    "date",
-                    "date >= ?",
-                    vec![Value::Text("2024-01-01".to_string())],
-                ),
-                QueryPart::Whitespace {
-                    span: Span::new(0, 0),
-                },
-                make_fts("groceries*"),
-            ],
-        };
-
-        assert_eq!(query.fts_query(), Some("groceries*"));
-    }
-
-    #[test]
-    fn test_fts_query_none() {
-        let query = ParsedQuery {
-            parts: vec![make_filter("date", "date >= ?", vec![])],
-        };
-
-        assert_eq!(query.fts_query(), None);
+    /// Get all FTS queries in input order.
+    pub fn fts_queries(&self) -> Vec<&str> {
+        self.parts
+            .iter()
+            .filter_map(|p| match p {
+                QueryPart::Fts { query, .. } if !query.is_empty() => Some(query.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 }

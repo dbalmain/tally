@@ -47,7 +47,7 @@ impl Filter for AmountFilter {
         // Exact match
         match parse_amount(value) {
             Some(cents) => FilterResult::Valid {
-                sql: "ABS(amount_cents) = ?".to_string(),
+                sql: "ABS({amount_cents}) = ?".to_string(),
                 params: vec![Value::Integer(cents)],
             },
             None => FilterResult::Invalid(format!("Invalid amount: {}", value)),
@@ -59,7 +59,7 @@ impl AmountFilter {
     fn parse_comparison(&self, value: &str, op: &str) -> FilterResult {
         match parse_amount(value) {
             Some(cents) => {
-                let sql = format!("ABS(amount_cents) {} ?", op);
+                let sql = format!("ABS({{amount_cents}}) {} ?", op);
                 FilterResult::Valid {
                     sql,
                     params: vec![Value::Integer(cents)],
@@ -90,15 +90,15 @@ impl AmountFilter {
 
         match (from_cents, to_cents) {
             (Some(from), Some(to)) => FilterResult::Valid {
-                sql: "ABS(amount_cents) >= ? AND ABS(amount_cents) <= ?".to_string(),
+                sql: "ABS({amount_cents}) >= ? AND ABS({amount_cents}) <= ?".to_string(),
                 params: vec![Value::Integer(from), Value::Integer(to)],
             },
             (Some(from), None) => FilterResult::Valid {
-                sql: "ABS(amount_cents) >= ?".to_string(),
+                sql: "ABS({amount_cents}) >= ?".to_string(),
                 params: vec![Value::Integer(from)],
             },
             (None, Some(to)) => FilterResult::Valid {
-                sql: "ABS(amount_cents) <= ?".to_string(),
+                sql: "ABS({amount_cents}) <= ?".to_string(),
                 params: vec![Value::Integer(to)],
             },
             (None, None) => FilterResult::Empty,
@@ -143,7 +143,7 @@ mod tests {
     fn test_exact() {
         match parse("100") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS(amount_cents) = ?");
+                assert_eq!(sql, "ABS({amount_cents}) = ?");
                 assert_eq!(params, vec![Value::Integer(10000)]);
             }
             _ => panic!("Expected Valid"),
@@ -154,7 +154,7 @@ mod tests {
     fn test_exact_decimal() {
         match parse("100.50") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS(amount_cents) = ?");
+                assert_eq!(sql, "ABS({amount_cents}) = ?");
                 assert_eq!(params, vec![Value::Integer(10050)]);
             }
             _ => panic!("Expected Valid"),
@@ -165,7 +165,7 @@ mod tests {
     fn test_greater_than() {
         match parse(">100") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS(amount_cents) > ?");
+                assert_eq!(sql, "ABS({amount_cents}) > ?");
                 assert_eq!(params, vec![Value::Integer(10000)]);
             }
             _ => panic!("Expected Valid"),
@@ -176,7 +176,7 @@ mod tests {
     fn test_less_than() {
         match parse("<50") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS(amount_cents) < ?");
+                assert_eq!(sql, "ABS({amount_cents}) < ?");
                 assert_eq!(params, vec![Value::Integer(5000)]);
             }
             _ => panic!("Expected Valid"),
@@ -187,7 +187,7 @@ mod tests {
     fn test_range() {
         match parse("100..500") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS(amount_cents) >= ? AND ABS(amount_cents) <= ?");
+                assert_eq!(sql, "ABS({amount_cents}) >= ? AND ABS({amount_cents}) <= ?");
                 assert_eq!(params, vec![Value::Integer(10000), Value::Integer(50000)]);
             }
             _ => panic!("Expected Valid"),
@@ -198,7 +198,7 @@ mod tests {
     fn test_open_end_range() {
         match parse("100..") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS(amount_cents) >= ?");
+                assert_eq!(sql, "ABS({amount_cents}) >= ?");
                 assert_eq!(params, vec![Value::Integer(10000)]);
             }
             _ => panic!("Expected Valid"),
@@ -209,7 +209,7 @@ mod tests {
     fn test_open_start_range() {
         match parse("..100") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS(amount_cents) <= ?");
+                assert_eq!(sql, "ABS({amount_cents}) <= ?");
                 assert_eq!(params, vec![Value::Integer(10000)]);
             }
             _ => panic!("Expected Valid"),

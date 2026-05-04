@@ -38,7 +38,7 @@ impl Filter for DateFilter {
         // Single value - parse as date/month/year and expand to range
         match parse_date_spec(value) {
             Some((from, to)) => FilterResult::Valid {
-                sql: "date >= ? AND date <= ?".to_string(),
+                sql: "{date} >= ? AND {date} <= ?".to_string(),
                 params: vec![Value::Text(from.to_string()), Value::Text(to.to_string())],
             },
             None => FilterResult::Invalid(format!("Invalid date: {}", value)),
@@ -68,15 +68,15 @@ impl DateFilter {
 
         match (from_date, to_date) {
             (Some(from), Some(to)) => FilterResult::Valid {
-                sql: "date >= ? AND date <= ?".to_string(),
+                sql: "{date} >= ? AND {date} <= ?".to_string(),
                 params: vec![Value::Text(from.to_string()), Value::Text(to.to_string())],
             },
             (Some(from), None) => FilterResult::Valid {
-                sql: "date >= ?".to_string(),
+                sql: "{date} >= ?".to_string(),
                 params: vec![Value::Text(from.to_string())],
             },
             (None, Some(to)) => FilterResult::Valid {
-                sql: "date <= ?".to_string(),
+                sql: "{date} <= ?".to_string(),
                 params: vec![Value::Text(to.to_string())],
             },
             (None, None) => FilterResult::Empty,
@@ -139,7 +139,7 @@ mod tests {
     fn test_year() {
         match parse("2024") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "date >= ? AND date <= ?");
+                assert_eq!(sql, "{date} >= ? AND {date} <= ?");
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0], Value::Text("2024-01-01".to_string()));
                 assert_eq!(params[1], Value::Text("2024-12-31".to_string()));
@@ -152,7 +152,7 @@ mod tests {
     fn test_month() {
         match parse("2024-02") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "date >= ? AND date <= ?");
+                assert_eq!(sql, "{date} >= ? AND {date} <= ?");
                 assert_eq!(params[0], Value::Text("2024-02-01".to_string()));
                 assert_eq!(params[1], Value::Text("2024-02-29".to_string())); // leap year
             }
@@ -164,7 +164,7 @@ mod tests {
     fn test_exact_date() {
         match parse("2024-01-15") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "date >= ? AND date <= ?");
+                assert_eq!(sql, "{date} >= ? AND {date} <= ?");
                 assert_eq!(params[0], Value::Text("2024-01-15".to_string()));
                 assert_eq!(params[1], Value::Text("2024-01-15".to_string()));
             }
@@ -176,7 +176,7 @@ mod tests {
     fn test_range() {
         match parse("2024-01..2024-06") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "date >= ? AND date <= ?");
+                assert_eq!(sql, "{date} >= ? AND {date} <= ?");
                 assert_eq!(params[0], Value::Text("2024-01-01".to_string()));
                 assert_eq!(params[1], Value::Text("2024-06-30".to_string()));
             }
@@ -188,7 +188,7 @@ mod tests {
     fn test_open_end_range() {
         match parse("2024..") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "date >= ?");
+                assert_eq!(sql, "{date} >= ?");
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0], Value::Text("2024-01-01".to_string()));
             }
@@ -200,7 +200,7 @@ mod tests {
     fn test_open_start_range() {
         match parse("..2024") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "date <= ?");
+                assert_eq!(sql, "{date} <= ?");
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0], Value::Text("2024-12-31".to_string()));
             }

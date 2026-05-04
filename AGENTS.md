@@ -32,7 +32,16 @@ src/
 ├── db.rs                   # SQLite schema and initialization
 ├── store.rs                # TransactionStore: all database operations
 ├── import.rs               # Import script execution and file discovery
-├── search.rs               # Search query parser and fuzzy matcher
+├── search/                 # Search query system
+│   ├── mod.rs              # Module entry, public exports
+│   ├── tokenize.rs         # Raw token splitter (filter/regex/fts/whitespace)
+│   ├── parse.rs            # Token → ParsedQuery + cursor context
+│   ├── query.rs            # ParsedQuery / QueryPart / Span types
+│   ├── render.rs           # SqlContext + ParsedQuery::render → WHERE+params
+│   ├── filter.rs           # Filter trait
+│   ├── filters/            # Built-in filters (date, amount, account, category)
+│   ├── context.rs          # CursorContext for key handling
+│   └── fuzzy.rs            # Nucleo-based fuzzy matcher
 ├── error.rs                # Error types
 └── tui/
     ├── mod.rs              # TUI entry point, event loop, key handling
@@ -236,12 +245,17 @@ In-memory fuzzy matching on loaded results using nucleo. Type any characters and
 
 ## Common Store Operations
 
+All read methods take a `ParsedQuery` plus an optional `limit`. Build a query
+with `search::parse(&config, input, cursor).0`, or pass `ParsedQuery::empty()`
+for "no filters".
+
 ```rust
-// Querying
-store.query_transactions(&filter) -> Vec<Transaction>
-store.get_uncategorised_transactions(limit) -> Vec<Transaction>
-store.get_pending_ai_reviews(limit) -> Vec<TransactionWithEnrichment>
-store.get_pending_transfer_reviews(limit) -> Vec<Transfer>
+// Querying (all take &ParsedQuery + Option<usize> limit)
+store.query_transactions(&query, limit) -> Vec<Transaction>
+store.get_uncategorised_transactions(&query, limit) -> Vec<Transaction>
+store.get_pending_ai_reviews(&query, limit) -> Vec<TransactionWithEnrichment>
+store.get_pending_transfer_reviews(&query, limit) -> Vec<Transfer>
+store.list_transfers_with_transactions(confirmed_only, &query, limit) -> Vec<TransferWithTransactions>
 
 // Categories
 store.get_or_create_category(path) -> i64
@@ -253,6 +267,22 @@ store.find_matching_transfer_candidates(tx) -> Vec<Transaction>
 store.create_transfer(from_id, to_id, source, confirmed)
 store.get_transfer_for_transaction(tx_id) -> Option<Transfer>
 ```
+
+## Adding a New Search Filter
+
+1. Implement `Filter` in a new file under `src/search/filters/`. `parse(value)`
+   returns SQL with placeholders like `{date}`, `{bank_name}`, `{category_path}`
+   — never bare column references.
+2. Declare placeholder dependencies in `requires()` so the renderer knows which
+   contexts can apply the filter.
+3. Register in `src/search/filters/mod.rs` and any `SearchConfig` constructors
+   (currently `tui::app::App::new`).
+4. If the filter needs a column not yet in the standard contexts, add it to
+   `transaction_ctx()` / `transfer_side_ctx()` in `src/store.rs`. If the
+   placeholder requires a JOIN, extend `transaction_joins()` to splice it in
+   when `parsed.uses_placeholder("your_placeholder")`.
+
+That's it — store query methods don't change, the search bar UI is filter-agnostic.
 
 ## Import Script Contract
 

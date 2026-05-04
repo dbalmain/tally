@@ -71,58 +71,6 @@ pub struct RefreshReport {
     pub transactions_skipped: usize,
 }
 
-/// Pattern for matching bank/account combinations.
-/// Format: "Bank/Account" where either part can be empty.
-#[derive(Debug, Clone, Default)]
-pub struct AccountPattern {
-    /// Prefix match on bank name (empty matches any bank)
-    pub bank_prefix: String,
-    /// Prefix match on account name (None means no account filter)
-    pub account_prefix: Option<String>,
-}
-
-impl AccountPattern {
-    /// Parse "Bank/Account" format.
-    /// - "St" -> bank prefix "St", no account filter
-    /// - "ING/" -> bank prefix "ING", any account
-    /// - "ING/Orange" -> bank prefix "ING", account prefix "Orange"
-    /// - "/Savings" -> any bank, account prefix "Savings"
-    pub fn parse(s: &str) -> Self {
-        if let Some((bank, account)) = s.split_once('/') {
-            AccountPattern {
-                bank_prefix: bank.to_string(),
-                account_prefix: Some(account.to_string()),
-            }
-        } else {
-            AccountPattern {
-                bank_prefix: s.to_string(),
-                account_prefix: None,
-            }
-        }
-    }
-}
-
-/// Query filters for transactions.
-#[derive(Debug, Default, Clone)]
-pub struct TransactionFilter {
-    pub bank_id: Option<i64>,
-    pub account_id: Option<i64>,
-    pub from_date: Option<NaiveDate>,
-    pub to_date: Option<NaiveDate>,
-    pub amount_min: Option<i64>,
-    pub amount_max: Option<i64>,
-    /// Account patterns (OR'd together). Empty means no filter.
-    pub account_patterns: Vec<AccountPattern>,
-    /// Category patterns (OR'd together, contains match). Empty means no filter.
-    pub category_patterns: Vec<String>,
-    /// FTS5 query string for full-text search on description + metadata.
-    pub fts_query: Option<String>,
-    /// Regex pattern for description matching (fallback when FTS isn't suitable).
-    pub description_regex: Option<String>,
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
-}
-
 /// Hierarchical category (e.g., "Food/Groceries").
 #[derive(Debug, Clone)]
 pub struct Category {

@@ -51,10 +51,6 @@ pub enum KeyResult {
     Handled,
     /// Key was not handled, pass to parent.
     NotHandled,
-    /// Search was confirmed (Enter pressed).
-    Confirmed,
-    /// Search was cancelled (Esc pressed).
-    Cancelled,
     /// Transition to fuzzy search triggered.
     TransitionToFuzzy,
 }
@@ -92,7 +88,7 @@ impl SearchBar {
 
     /// Get the current cursor position (character index).
     pub fn cursor(&self) -> usize {
-        self.input.visual_cursor()
+        self.input.cursor()
     }
 
     /// Get the parsed query.
@@ -119,6 +115,14 @@ impl SearchBar {
     pub fn set_value(&mut self, value: &str) {
         self.input = Input::new(value.to_string());
         self.reparse();
+        self.update_autocomplete();
+    }
+
+    /// Replace the search configuration and reparse the current input.
+    pub fn set_config(&mut self, config: SearchConfig) {
+        self.config = config;
+        self.reparse();
+        self.update_autocomplete();
     }
 
     /// Reset the search bar to empty state.
@@ -177,11 +181,12 @@ impl SearchBar {
         };
 
         // Find the filter part that corresponds to this autocomplete
-        let filter_part = self
-            .parsed
-            .parts
-            .iter()
-            .find(|p| matches!(p, QueryPart::Filter { name, .. } if *name == ac.filter_name));
+        let filter_part = self.parsed.parts.iter().find(|p| {
+            matches!(p, QueryPart::Filter { name, value_span, .. }
+                    if *name == ac.filter_name
+                        && ac.anchor_offset >= value_span.start
+                        && ac.anchor_offset <= value_span.end)
+        });
 
         let Some(QueryPart::Filter {
             value_span, value, ..
@@ -196,11 +201,12 @@ impl SearchBar {
         let value_start = value_span.start;
         let segment_start_in_value = ac.anchor_offset.saturating_sub(value_start);
 
-        // Find end of segment (next | or end of value)
-        let segment_end_in_value = value[segment_start_in_value..]
-            .find('|')
-            .map(|i| segment_start_in_value + i)
-            .unwrap_or(value.len());
+        let segment_end_in_value = value
+            .chars()
+            .enumerate()
+            .skip(segment_start_in_value)
+            .find_map(|(idx, c)| (c == '|').then_some(idx))
+            .unwrap_or(char_len(value));
 
         // Build new value with replaced segment
         let old_input = self.input.value().to_string();
@@ -208,12 +214,12 @@ impl SearchBar {
         let segment_end = value_start + segment_end_in_value;
 
         let mut new_input = String::with_capacity(old_input.len() + selected.len());
-        new_input.push_str(&old_input[..segment_start]);
+        new_input.push_str(char_slice(&old_input, 0, segment_start));
         new_input.push_str(&selected);
-        new_input.push_str(&old_input[segment_end..]);
+        new_input.push_str(char_slice(&old_input, segment_end, char_len(&old_input)));
 
         self.input = Input::new(new_input);
-        self.set_cursor(segment_start + selected.len());
+        self.set_cursor(segment_start + char_len(&selected));
 
         self.reparse();
         true
@@ -233,7 +239,7 @@ impl SearchBar {
     /// Position cursor at the given character index.
     fn set_cursor(&mut self, cursor_pos: usize) {
         let value = self.input.value();
-        let tail = value.len().saturating_sub(cursor_pos);
+        let tail = char_len(value).saturating_sub(cursor_pos);
         for _ in 0..tail {
             self.input.handle(InputRequest::GoToPrevChar);
         }
@@ -242,7 +248,7 @@ impl SearchBar {
     /// Reparse the input and update context.
     fn reparse(&mut self) {
         let value = self.input.value();
-        let cursor = self.input.visual_cursor();
+        let cursor = self.cursor();
         let (parsed, context) = parse(&self.config, value, cursor);
         self.parsed = parsed;
         self.context = context;
@@ -263,11 +269,12 @@ impl SearchBar {
         };
 
         // Find the filter part to get the value
-        let filter_part = self
-            .parsed
-            .parts
-            .iter()
-            .find(|p| matches!(p, QueryPart::Filter { name: n, .. } if n == name));
+        let filter_part = self.parsed.parts.iter().find(|p| {
+            matches!(p, QueryPart::Filter { name: n, value_span, .. }
+                    if n == name
+                        && self.cursor() >= value_span.start
+                        && self.cursor() <= value_span.end)
+        });
 
         let Some(QueryPart::Filter {
             value, value_span, ..
@@ -278,7 +285,7 @@ impl SearchBar {
         };
 
         // Get completions from the filter
-        let Some((mut suggestions, anchor_in_value)) = filter.completions(value, *offset) else {
+        let Some((suggestions, anchor_in_value)) = filter.completions(value, *offset) else {
             self.autocomplete = None;
             return;
         };
@@ -287,9 +294,6 @@ impl SearchBar {
             self.autocomplete = None;
             return;
         }
-
-        // Make sure suggestions are sorted
-        suggestions.sort();
 
         // Calculate anchor offset in the full input
         let anchor_offset = value_span.start + anchor_in_value;
@@ -365,17 +369,13 @@ impl SearchBar {
         let cursor = self.cursor();
         let value = self.input.value().to_string();
 
-        // Find word before cursor (scan back for whitespace)
-        let word_start = value[..cursor]
-            .rfind(|c: char| c.is_whitespace())
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let word_start = word_start_before_cursor(&value, cursor);
 
         if word_start == cursor {
             return false; // No word before cursor
         }
 
-        let word = &value[word_start..cursor];
+        let word = char_slice(&value, word_start, cursor);
 
         // Resolve to canonical filter name
         let Some(canonical) = self.config.resolve_filter_name(word) else {
@@ -390,8 +390,8 @@ impl SearchBar {
             .any(|p| matches!(p, QueryPart::Filter { name, .. } if *name == canonical));
 
         // Remove the word from input, trimming surrounding whitespace
-        let before = value[..word_start].trim_end();
-        let after = value[cursor..].trim_start();
+        let before = char_slice(&value, 0, word_start).trim_end();
+        let after = char_slice(&value, cursor, char_len(&value)).trim_start();
         let cleaned = match (before.is_empty(), after.is_empty()) {
             (true, true) => String::new(),
             (true, false) => after.to_string(),
@@ -428,18 +428,20 @@ impl SearchBar {
             });
 
             let (new_value, cursor_pos) = if let Some(pos) = fts_start {
-                let prefix = cleaned[..pos].trim_end();
-                let suffix = cleaned[pos..].trim_start();
+                let prefix = char_slice(&cleaned, 0, pos).trim_end();
+                let suffix = char_slice(&cleaned, pos, char_len(&cleaned)).trim_start();
                 if prefix.is_empty() {
-                    (format!("{} {}", filter_text, suffix), filter_text.len())
+                    let cursor = char_len(&filter_text);
+                    (format!("{} {}", filter_text, suffix), cursor)
                 } else {
-                    let cursor = prefix.len() + 1 + filter_text.len();
+                    let cursor = char_len(prefix) + 1 + char_len(&filter_text);
                     (format!("{} {} {}", prefix, filter_text, suffix), cursor)
                 }
             } else if cleaned.is_empty() {
-                (filter_text.clone(), filter_text.len())
+                let cursor = char_len(&filter_text);
+                (filter_text.clone(), cursor)
             } else {
-                let cursor = cleaned.len() + 1 + filter_text.len();
+                let cursor = char_len(&cleaned) + 1 + char_len(&filter_text);
                 (format!("{} {}", cleaned, filter_text), cursor)
             };
 
@@ -502,9 +504,9 @@ impl SearchBar {
         let cursor = self.cursor();
 
         let mut new_value = String::with_capacity(value.len() + 2);
-        new_value.push_str(&value[..cursor]);
+        new_value.push_str(char_slice(&value, 0, cursor));
         new_value.push_str("//");
-        new_value.push_str(&value[cursor..]);
+        new_value.push_str(char_slice(&value, cursor, char_len(&value)));
 
         self.input = Input::new(new_value);
         self.set_cursor(cursor + 1);
@@ -545,17 +547,17 @@ impl SearchBar {
         // Delete entire regex
         let value = self.input.value();
         let mut new_value = String::with_capacity(value.len());
-        new_value.push_str(&value[..span.start]);
+        new_value.push_str(char_slice(value, 0, span.start));
 
         // Handle surrounding whitespace
-        let after = &value[span.end..];
+        let after = char_slice(value, span.end, char_len(value));
         let after = after.strip_prefix(' ').unwrap_or(after);
         if !new_value.is_empty() && !after.is_empty() && !new_value.ends_with(' ') {
             new_value.push(' ');
         }
         new_value.push_str(after);
 
-        let new_cursor = span.start.min(new_value.len());
+        let new_cursor = span.start.min(char_len(&new_value));
         self.input = Input::new(new_value);
         self.set_cursor(new_cursor);
 
@@ -580,8 +582,7 @@ impl SearchBar {
         f.render_widget(Paragraph::new(line), area);
 
         // Calculate cursor position
-        let (before_cursor, _) = split_at_char_index(value, cursor);
-        let cursor_x = area.x + prefix.len() as u16 + before_cursor.len() as u16;
+        let cursor_x = area.x + prefix.chars().count() as u16 + self.input.visual_cursor() as u16;
 
         (cursor_x, area.y)
     }
@@ -606,7 +607,7 @@ impl SearchBar {
 
         for (idx, part) in self.parsed.parts.iter().enumerate() {
             let span = part.span();
-            let text = &value[span.start..span.end];
+            let text = char_slice(value, span.start, span.end);
 
             let is_active = match active_part_idx {
                 Some(active_idx) => idx == active_idx,
@@ -623,8 +624,8 @@ impl SearchBar {
         // Handle trailing content not covered by parts
         if let Some(last) = self.parsed.parts.last() {
             let end = last.span().end;
-            if end < value.len() {
-                let text = &value[end..];
+            if end < char_len(value) {
+                let text = char_slice(value, end, char_len(value));
                 let color = if cursor.is_some() {
                     Color::Cyan
                 } else {
@@ -685,14 +686,31 @@ impl SearchBar {
     }
 }
 
-/// Split a string at a character index (handles multi-byte UTF-8).
-pub fn split_at_char_index(s: &str, char_idx: usize) -> (&str, &str) {
-    let byte_idx = s
-        .char_indices()
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn char_slice(s: &str, start: usize, end: usize) -> &str {
+    let start_byte = char_to_byte_index(s, start);
+    let end_byte = char_to_byte_index(s, end);
+    &s[start_byte..end_byte]
+}
+
+fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
         .nth(char_idx)
         .map(|(i, _)| i)
-        .unwrap_or(s.len());
-    s.split_at(byte_idx)
+        .unwrap_or(s.len())
+}
+
+fn word_start_before_cursor(s: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = s.chars().take(cursor).collect();
+    chars
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(idx, c)| c.is_whitespace().then_some(idx + 1))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -859,6 +877,29 @@ mod tests {
         );
         let ac = bar.autocomplete().unwrap();
         assert!(ac.suggestions.iter().any(|s| s.contains("ING")));
+    }
+
+    #[test]
+    fn test_unicode_input_uses_character_indices() {
+        let mut bar = SearchBar::new(SearchConfig::new(vec![
+            Box::new(DateFilter),
+            Box::new(CategoryFilter::with_options(vec![
+                "Food/Cafe".to_string(),
+                "Food/Café".to_string(),
+            ])),
+        ]));
+
+        for c in "café d".chars() {
+            bar.handle_input(InputRequest::InsertChar(c));
+        }
+        bar.handle_input(InputRequest::InsertChar(':'));
+        assert_eq!(bar.value(), "date: café");
+        assert_eq!(bar.cursor(), "date:".chars().count());
+
+        bar.set_value("category:Caf");
+        assert!(bar.autocomplete_active());
+        assert!(bar.autocomplete_select());
+        assert!(bar.value().starts_with("category:Food/Caf"));
     }
 
     #[test]

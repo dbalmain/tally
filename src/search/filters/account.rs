@@ -52,12 +52,10 @@ impl Filter for AccountFilter {
             return FilterResult::Empty;
         }
 
-        // Split by | for OR
-        let patterns: Vec<&str> = value.split('|').collect();
         let mut clauses = Vec::new();
         let mut params = Vec::new();
 
-        for pattern in patterns {
+        for pattern in value.split('|') {
             if pattern.is_empty() {
                 continue;
             }
@@ -66,22 +64,24 @@ impl Filter for AccountFilter {
                 // Bank/Account format
                 if bank.is_empty() {
                     // /Account - any bank, account prefix
-                    clauses.push("account_name LIKE ?".to_string());
-                    params.push(Value::Text(format!("{}%", account)));
+                    clauses.push("LOWER({account_name}) LIKE ?".to_string());
+                    params.push(Value::Text(format!("{}%", account.to_lowercase())));
                 } else if account.is_empty() {
                     // Bank/ - all accounts in bank
-                    clauses.push("bank_name LIKE ?".to_string());
-                    params.push(Value::Text(format!("{}%", bank)));
+                    clauses.push("LOWER({bank_name}) LIKE ?".to_string());
+                    params.push(Value::Text(format!("{}%", bank.to_lowercase())));
                 } else {
                     // Bank/Account - both prefixes
-                    clauses.push("(bank_name LIKE ? AND account_name LIKE ?)".to_string());
-                    params.push(Value::Text(format!("{}%", bank)));
-                    params.push(Value::Text(format!("{}%", account)));
+                    clauses.push(
+                        "(LOWER({bank_name}) LIKE ? AND LOWER({account_name}) LIKE ?)".to_string(),
+                    );
+                    params.push(Value::Text(format!("{}%", bank.to_lowercase())));
+                    params.push(Value::Text(format!("{}%", account.to_lowercase())));
                 }
             } else {
                 // Bank only (prefix match)
-                clauses.push("bank_name LIKE ?".to_string());
-                params.push(Value::Text(format!("{}%", pattern)));
+                clauses.push("LOWER({bank_name}) LIKE ?".to_string());
+                params.push(Value::Text(format!("{}%", pattern.to_lowercase())));
             }
         }
 
@@ -104,7 +104,7 @@ impl Filter for AccountFilter {
             .split('|')
             .scan(0, |pos, seg| {
                 let start = *pos;
-                *pos += seg.len() + 1; // +1 for the |
+                *pos += seg.chars().count() + 1; // +1 for the |
                 Some((start, seg))
             })
             .collect();
@@ -112,7 +112,7 @@ impl Filter for AccountFilter {
         // Find which segment the cursor is in
         let (anchor_offset, current_segment) = segments
             .iter()
-            .find(|(start, seg)| cursor >= *start && cursor <= start + seg.len())
+            .find(|(start, seg)| cursor >= *start && cursor <= start + seg.chars().count())
             .map(|(start, seg)| (*start, *seg))
             .unwrap_or((0, value));
 
@@ -183,8 +183,8 @@ mod tests {
     fn test_bank_only() {
         match parse("ING") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "bank_name LIKE ?");
-                assert_eq!(params, vec![Value::Text("ING%".to_string())]);
+                assert_eq!(sql, "LOWER({bank_name}) LIKE ?");
+                assert_eq!(params, vec![Value::Text("ing%".to_string())]);
             }
             _ => panic!("Expected Valid"),
         }
@@ -194,8 +194,8 @@ mod tests {
     fn test_bank_slash() {
         match parse("ING/") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "bank_name LIKE ?");
-                assert_eq!(params, vec![Value::Text("ING%".to_string())]);
+                assert_eq!(sql, "LOWER({bank_name}) LIKE ?");
+                assert_eq!(params, vec![Value::Text("ing%".to_string())]);
             }
             _ => panic!("Expected Valid"),
         }
@@ -205,12 +205,15 @@ mod tests {
     fn test_bank_account() {
         match parse("ING/Orange") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "(bank_name LIKE ? AND account_name LIKE ?)");
+                assert_eq!(
+                    sql,
+                    "(LOWER({bank_name}) LIKE ? AND LOWER({account_name}) LIKE ?)"
+                );
                 assert_eq!(
                     params,
                     vec![
-                        Value::Text("ING%".to_string()),
-                        Value::Text("Orange%".to_string())
+                        Value::Text("ing%".to_string()),
+                        Value::Text("orange%".to_string())
                     ]
                 );
             }
@@ -222,8 +225,8 @@ mod tests {
     fn test_account_only() {
         match parse("/Savings") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "account_name LIKE ?");
-                assert_eq!(params, vec![Value::Text("Savings%".to_string())]);
+                assert_eq!(sql, "LOWER({account_name}) LIKE ?");
+                assert_eq!(params, vec![Value::Text("savings%".to_string())]);
             }
             _ => panic!("Expected Valid"),
         }
@@ -233,12 +236,15 @@ mod tests {
     fn test_multiple_or() {
         match parse("ING|NAB") {
             FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "(bank_name LIKE ? OR bank_name LIKE ?)");
+                assert_eq!(
+                    sql,
+                    "(LOWER({bank_name}) LIKE ? OR LOWER({bank_name}) LIKE ?)"
+                );
                 assert_eq!(
                     params,
                     vec![
-                        Value::Text("ING%".to_string()),
-                        Value::Text("NAB%".to_string())
+                        Value::Text("ing%".to_string()),
+                        Value::Text("nab%".to_string())
                     ]
                 );
             }
