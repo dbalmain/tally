@@ -778,6 +778,25 @@ impl TransactionStore {
         Ok(count as usize)
     }
 
+    /// Get transaction counts for every category that has at least one
+    /// enrichment, in a single query. Categories with zero transactions
+    /// are absent from the returned map.
+    pub fn get_category_transaction_counts(&self) -> Result<std::collections::HashMap<i64, usize>> {
+        use std::collections::HashMap;
+        let mut stmt = self.conn.prepare(
+            "SELECT category_id, COUNT(*) FROM transaction_enrichments GROUP BY category_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            let (id, count) = row?;
+            counts.insert(id, count);
+        }
+        Ok(counts)
+    }
+
     // ==================== Transfers ====================
 
     /// Create a transfer linking two transactions.
@@ -1884,5 +1903,46 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
             .unwrap();
 
         assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn get_category_transaction_counts_groups_in_one_query() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        // No assignments yet — empty map (categories with zero transactions
+        // are omitted, not zeroed).
+        assert!(store.get_category_transaction_counts().unwrap().is_empty());
+
+        let food = store.get_or_create_category("Food").unwrap();
+        let transport = store.get_or_create_category("Transport").unwrap();
+        let unused = store.get_or_create_category("UnusedCategory").unwrap();
+
+        let tx = store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("fixture has one transaction");
+
+        // Categories with zero transactions stay out of the result.
+        store
+            .set_category(tx.id, food, CategorySource::Manual, true, None)
+            .unwrap();
+        let counts = store.get_category_transaction_counts().unwrap();
+        assert_eq!(counts.get(&food), Some(&1));
+        assert_eq!(counts.get(&transport), None);
+        assert_eq!(counts.get(&unused), None);
+        assert_eq!(counts.len(), 1);
+
+        // Reassigning the transaction moves the count, doesn't duplicate it.
+        store
+            .set_category(tx.id, transport, CategorySource::Manual, true, None)
+            .unwrap();
+        let counts = store.get_category_transaction_counts().unwrap();
+        assert_eq!(counts.get(&food), None);
+        assert_eq!(counts.get(&transport), Some(&1));
+        assert_eq!(counts.len(), 1);
     }
 }

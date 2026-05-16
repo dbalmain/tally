@@ -248,7 +248,8 @@ impl App {
             confirm_action: None,
             tab_search_state: HashMap::new(),
         };
-        app.rebuild_caches();
+        app.rebuild_tx_caches();
+        app.rebuild_category_counts();
         app
     }
 
@@ -329,8 +330,11 @@ impl App {
         }
     }
 
-    fn rebuild_caches(&mut self) {
-        // Build transaction lookup cache
+    /// Rebuild the per-transaction caches (`tx_by_id`, `category_by_tx_id`,
+    /// `transfer_by_tx_id`) from currently-loaded list contents. Cheap: no
+    /// per-row DB queries — at most one bulk lookup plus a few singletons for
+    /// transfer-review sides that aren't already in the loaded data.
+    fn rebuild_tx_caches(&mut self) {
         self.tx_by_id.clear();
         for tx in self.transactions.items() {
             self.tx_by_id.insert(tx.id, tx.clone());
@@ -365,14 +369,12 @@ impl App {
             }
         }
 
-        // Build category cache for all transactions
         self.category_by_tx_id.clear();
         let tx_ids: Vec<i64> = self.transactions.items().iter().map(|t| t.id).collect();
         if let Ok(categories) = self.store.get_categories_for_transactions(&tx_ids) {
             self.category_by_tx_id = categories;
         }
 
-        // Build transfer lookup cache
         self.transfer_by_tx_id.clear();
         for twt in self.linked_transfers.items() {
             self.transfer_by_tx_id
@@ -388,14 +390,15 @@ impl App {
                 .entry(tr.to_transaction_id)
                 .or_insert_with(|| tr.clone());
         }
+    }
 
-        // Build category transaction count cache
-        self.category_tx_count.clear();
-        for cat in &self.categories {
-            if let Ok(count) = self.store.count_transactions_in_category(cat.id) {
-                self.category_tx_count.insert(cat.id, count);
-            }
-        }
+    /// Rebuild the per-category transaction count cache in one bulk query.
+    /// Only needs to run when category assignments change.
+    fn rebuild_category_counts(&mut self) {
+        self.category_tx_count = self
+            .store
+            .get_category_transaction_counts()
+            .unwrap_or_default();
     }
 
     pub fn get_cached_transaction(&self, id: i64) -> Option<&Transaction> {
@@ -772,10 +775,13 @@ impl App {
     }
 
     pub fn refresh_data(&mut self) {
-        // Reload the current tab's data using its search state
+        // Reload the current tab's data using its search state. Called after
+        // mutations (categorisation, transfers) — both tx caches and category
+        // counts may have changed.
         self.categories = self.store.list_categories().unwrap_or_default();
         self.rebuild_search_configs();
         self.reload_current_tab();
+        self.rebuild_category_counts();
     }
 
     // ==================== Category Editing (Categories Tab) ====================
@@ -896,12 +902,7 @@ impl App {
     fn reload_categories(&mut self) {
         self.categories = self.store.list_categories().unwrap_or_default();
         self.rebuild_search_configs();
-        self.category_tx_count.clear();
-        for cat in &self.categories {
-            if let Ok(count) = self.store.count_transactions_in_category(cat.id) {
-                self.category_tx_count.insert(cat.id, count);
-            }
-        }
+        self.rebuild_category_counts();
     }
 
     pub fn category_transaction_count(&self, category_id: i64) -> usize {
@@ -1121,7 +1122,7 @@ impl App {
                 }
             },
         }
-        self.rebuild_caches();
+        self.rebuild_tx_caches();
         self.apply_fuzzy_filter();
     }
 
