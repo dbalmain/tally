@@ -852,53 +852,57 @@ impl TransactionStore {
     }
 
     /// Find potential matching transactions for a transfer.
+    ///
+    /// Prefers candidates in *other* accounts (the common transfer case). Only
+    /// if there are none does it fall back to the same account (rebates,
+    /// refunds, internal corrections).
     pub fn find_matching_transfer_candidates(&self, tx: &Transaction) -> Result<Vec<Transaction>> {
-        let opposite_amount = -tx.amount_cents;
+        let candidates = self.transfer_candidates(tx, true)?;
+        if candidates.is_empty() {
+            self.transfer_candidates(tx, false)
+        } else {
+            Ok(candidates)
+        }
+    }
 
-        // First try other accounts
-        let mut stmt = self.conn.prepare(
+    fn transfer_candidates(
+        &self,
+        tx: &Transaction,
+        exclude_same_account: bool,
+    ) -> Result<Vec<Transaction>> {
+        let opposite_amount = -tx.amount_cents;
+        let date_str = tx.date.to_string();
+        let same_account_clause = if exclude_same_account {
+            " AND t.account_id != ?"
+        } else {
+            ""
+        };
+        let sql = format!(
             "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
                     t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
              FROM transactions t
              JOIN accounts a ON t.account_id = a.id
              LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id
-             WHERE t.amount_cents = ? 
-               AND t.account_id != ?
+             WHERE t.amount_cents = ?{}
                AND t.id != ?
                AND tr.id IS NULL
                AND a.deleted_at IS NULL
              ORDER BY ABS(julianday(t.date) - julianday(?)), t.id",
-        )?;
-        let mut transactions: Vec<Transaction> = stmt
-            .query_map(
-                params![opposite_amount, tx.account_id, tx.id, tx.date.to_string()],
-                parse_transaction,
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            same_account_clause
+        );
 
-        // If no matches in other accounts, try same account (for rebates, etc.)
-        if transactions.is_empty() {
-            let mut stmt = self.conn.prepare(
-                "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
-                        t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
-                 FROM transactions t
-                 JOIN accounts a ON t.account_id = a.id
-                 LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id
-                 WHERE t.amount_cents = ? 
-                   AND t.id != ?
-                   AND tr.id IS NULL
-                   AND a.deleted_at IS NULL
-                 ORDER BY ABS(julianday(t.date) - julianday(?)), t.id",
-            )?;
-            transactions = stmt
-                .query_map(
-                    params![opposite_amount, tx.id, tx.date.to_string()],
-                    parse_transaction,
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&opposite_amount];
+        if exclude_same_account {
+            params.push(&tx.account_id);
         }
+        params.push(&tx.id);
+        params.push(&date_str);
 
-        Ok(transactions)
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params.as_slice(), parse_transaction)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ==================== Todo Queries ====================
@@ -1944,5 +1948,123 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         assert_eq!(counts.get(&food), None);
         assert_eq!(counts.get(&transport), Some(&1));
         assert_eq!(counts.len(), 1);
+    }
+
+    /// Build a small store with two accounts and a controllable set of
+    /// transactions, so transfer-candidate behavior can be exercised directly.
+    fn store_with_two_accounts() -> (TempDir, TransactionStore, i64, i64) {
+        let temp = TempDir::new().unwrap();
+        let store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store
+            .conn
+            .execute("INSERT INTO banks (name) VALUES ('TB')", [])
+            .unwrap();
+        let bank_id: i64 = store.conn.last_insert_rowid();
+        store
+            .conn
+            .execute(
+                "INSERT INTO accounts (bank_id, name) VALUES (?, 'A1')",
+                [bank_id],
+            )
+            .unwrap();
+        let a1: i64 = store.conn.last_insert_rowid();
+        store
+            .conn
+            .execute(
+                "INSERT INTO accounts (bank_id, name) VALUES (?, 'A2')",
+                [bank_id],
+            )
+            .unwrap();
+        let a2: i64 = store.conn.last_insert_rowid();
+        store
+            .conn
+            .execute(
+                "INSERT INTO import_batches (started_at) VALUES ('2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        (temp, store, a1, a2)
+    }
+
+    fn insert_tx(store: &TransactionStore, account_id: i64, date: &str, amount: i64) -> i64 {
+        let batch_id: i64 = store
+            .conn
+            .query_row("SELECT id FROM import_batches LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO transactions
+                 (account_id, date, description, amount_cents, balance_cents,
+                  hash, metadata, source_file, import_batch_id)
+                 VALUES (?, ?, 'tx', ?, 0, ?, '{}', '', ?)",
+                params![
+                    account_id,
+                    date,
+                    amount,
+                    format!("{}-{}-{}", account_id, date, amount),
+                    batch_id
+                ],
+            )
+            .unwrap();
+        store.conn.last_insert_rowid()
+    }
+
+    fn get_tx(store: &TransactionStore, id: i64) -> Transaction {
+        store.get_transaction_by_id(id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn transfer_candidates_prefer_other_accounts() {
+        let (_tmp, store, a1, a2) = store_with_two_accounts();
+        let source = insert_tx(&store, a1, "2024-03-10", -5000);
+        let same_account = insert_tx(&store, a1, "2024-03-09", 5000);
+        let other_account = insert_tx(&store, a2, "2024-03-12", 5000);
+
+        let candidates = store
+            .find_matching_transfer_candidates(&get_tx(&store, source))
+            .unwrap();
+
+        // Other-account match wins; same-account match is suppressed.
+        let ids: Vec<i64> = candidates.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![other_account]);
+        assert!(!ids.contains(&same_account));
+    }
+
+    #[test]
+    fn transfer_candidates_fall_back_to_same_account() {
+        let (_tmp, store, a1, _a2) = store_with_two_accounts();
+        let source = insert_tx(&store, a1, "2024-03-10", -5000);
+        let same_account = insert_tx(&store, a1, "2024-03-09", 5000);
+
+        let candidates = store
+            .find_matching_transfer_candidates(&get_tx(&store, source))
+            .unwrap();
+
+        // No other-account candidate exists, so fall through to same-account.
+        let ids: Vec<i64> = candidates.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![same_account]);
+    }
+
+    #[test]
+    fn transfer_candidates_exclude_already_linked() {
+        let (_tmp, mut store, a1, a2) = store_with_two_accounts();
+        let source = insert_tx(&store, a1, "2024-03-10", -5000);
+        let linked = insert_tx(&store, a2, "2024-03-11", 5000);
+        let unlinked = insert_tx(&store, a2, "2024-03-12", 5000);
+
+        // Link `linked` to a third transaction so it should be excluded.
+        let other = insert_tx(&store, a1, "2024-03-11", 9999);
+        store
+            .create_transfer(other, linked, TransferSource::Manual, true)
+            .unwrap();
+
+        let candidates = store
+            .find_matching_transfer_candidates(&get_tx(&store, source))
+            .unwrap();
+
+        let ids: Vec<i64> = candidates.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![unlinked]);
+        assert!(!ids.contains(&linked));
     }
 }
