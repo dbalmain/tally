@@ -122,7 +122,6 @@ impl TransactionStore {
                 let account_id = self.ensure_account(bank_id, account_name, report)?;
 
                 self.import_account_transactions(
-                    bank_id,
                     account_id,
                     bank_name,
                     account_name,
@@ -322,7 +321,6 @@ impl TransactionStore {
 
     fn import_account_transactions(
         &mut self,
-        _bank_id: i64,
         account_id: i64,
         bank_name: &str,
         account_name: &str,

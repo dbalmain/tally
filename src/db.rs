@@ -100,7 +100,7 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
 
 /// Build searchable text from description and metadata for FTS indexing.
 /// Flattens all string and number values from metadata.
-pub fn build_searchable_text(
+pub(crate) fn build_searchable_text(
     description: &str,
     metadata: &std::collections::HashMap<String, serde_json::Value>,
 ) -> String {

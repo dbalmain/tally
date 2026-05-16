@@ -37,7 +37,7 @@ pub use filter::{Filter, FilterResult};
 pub use filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
 pub use parse::{SearchConfig, parse};
 pub use query::{ParsedQuery, QueryPart, Span};
-pub use render::{Rendered, SqlContext};
+pub use render::SqlContext;
 pub use tokenize::{RawToken, tokenize};
 
 pub use fuzzy::FuzzyMatcher;

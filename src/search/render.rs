@@ -78,8 +78,11 @@ impl SqlContext {
 }
 
 /// Result of rendering a [`ParsedQuery`] against a [`SqlContext`].
+///
+/// Internal to the crate: store.rs consumes this directly via `and_prefix()`
+/// and `.params`; nothing outside the workspace needs to name it.
 #[derive(Debug, Clone, Default)]
-pub struct Rendered {
+pub(crate) struct Rendered {
     /// WHERE fragment, e.g. `"t.date >= ? AND t.date <= ?"`. Empty if there are
     /// no applicable clauses.
     pub(crate) where_clause: String,
@@ -88,13 +91,13 @@ pub struct Rendered {
 }
 
 impl Rendered {
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.where_clause.is_empty()
     }
 
     /// Return the WHERE clause prefixed with " AND " for splicing into an
     /// existing WHERE expression. Empty if there are no clauses.
-    pub fn and_prefix(&self) -> String {
+    pub(crate) fn and_prefix(&self) -> String {
         if self.where_clause.is_empty() {
             String::new()
         } else {
@@ -114,7 +117,7 @@ impl ParsedQuery {
     ///   it. The substituted SQL is expected to contain exactly one `?` for
     ///   the FTS pattern (e.g. `"transactions_fts MATCH ?"` for a single-table
     ///   query, or a side-scoped subquery for a join).
-    pub fn render(&self, ctx: &SqlContext) -> Rendered {
+    pub(crate) fn render(&self, ctx: &SqlContext) -> Rendered {
         let mut clauses = Vec::new();
         let mut params = Vec::new();
         self.render_into(ctx, &mut clauses, &mut params);
@@ -131,7 +134,7 @@ impl ParsedQuery {
     /// independently against its own table aliases; FTS uses the per-side
     /// `{fts_match}` form so the subquery scopes to that side. Parameters are
     /// appended in order: lhs then rhs.
-    pub fn render_transfers(&self, lhs: &SqlContext, rhs: &SqlContext) -> Rendered {
+    pub(crate) fn render_transfers(&self, lhs: &SqlContext, rhs: &SqlContext) -> Rendered {
         let l = self.render(lhs);
         let r = self.render(rhs);
         match (l.is_empty(), r.is_empty()) {
