@@ -1,4 +1,5 @@
 mod app;
+mod filtered_list;
 pub mod search_bar;
 mod ui;
 

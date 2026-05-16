@@ -158,16 +158,16 @@ fn draw_transactions(f: &mut Frame, app: &App, area: Rect) {
     let chunks =
         Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(area);
 
-    let transactions: Vec<_> = app.filtered_transactions().collect();
+    let transactions: Vec<_> = app.transactions.iter().collect();
     draw_transaction_table(f, app, &transactions, app.selected_index, chunks[0]);
 
-    if let Some(tx) = app.get_filtered_transaction(app.selected_index) {
+    if let Some(tx) = app.transactions.get(app.selected_index) {
         draw_transaction_details(f, app, tx, chunks[1]);
     }
 }
 
 fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
-    let transfers: Vec<_> = app.filtered_transfers().collect();
+    let transfers: Vec<_> = app.linked_transfers.iter().collect();
 
     if transfers.is_empty() {
         let text = Paragraph::new(vec![
@@ -232,7 +232,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(table, chunks[0]);
 
-    if let Some(twt) = app.get_filtered_transfer(app.selected_index) {
+    if let Some(twt) = app.linked_transfers.get(app.selected_index) {
         draw_transfer_details(f, app, twt, chunks[1]);
     }
 }
@@ -270,7 +270,7 @@ fn draw_todo(f: &mut Frame, app: &App, area: Rect, has_db_search: bool, has_fuzz
 
     match app.todo_subtab {
         TodoSubTab::Uncategorised => {
-            let uncategorised: Vec<_> = app.filtered_uncategorised().collect();
+            let uncategorised: Vec<_> = app.uncategorised.iter().collect();
             draw_transaction_table(
                 f,
                 app,
@@ -278,19 +278,19 @@ fn draw_todo(f: &mut Frame, app: &App, area: Rect, has_db_search: bool, has_fuzz
                 app.selected_index,
                 content_chunks[0],
             );
-            if let Some(tx) = app.get_filtered_uncategorised(app.selected_index) {
+            if let Some(tx) = app.uncategorised.get(app.selected_index) {
                 draw_transaction_details(f, app, tx, content_chunks[1]);
             }
         }
         TodoSubTab::AiReview => {
             draw_ai_review_table(f, app, content_chunks[0]);
-            if let Some(review) = app.get_filtered_ai_review(app.selected_index) {
+            if let Some(review) = app.ai_reviews.get(app.selected_index) {
                 draw_ai_review_details(f, app, review, content_chunks[1]);
             }
         }
         TodoSubTab::TransferReview => {
             draw_transfer_review_table(f, app, content_chunks[0]);
-            if let Some(transfer) = app.get_filtered_transfer_review(app.selected_index) {
+            if let Some(transfer) = app.transfer_reviews.get(app.selected_index) {
                 draw_pending_transfer_details(f, app, transfer, content_chunks[1]);
             }
         }
@@ -302,9 +302,9 @@ fn draw_todo_subtabs(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|t| {
             let count = match t {
-                TodoSubTab::Uncategorised => app.filtered_uncategorised_len(),
-                TodoSubTab::AiReview => app.filtered_ai_reviews_len(),
-                TodoSubTab::TransferReview => app.filtered_transfer_reviews_len(),
+                TodoSubTab::Uncategorised => app.uncategorised.len(),
+                TodoSubTab::AiReview => app.ai_reviews.len(),
+                TodoSubTab::TransferReview => app.transfer_reviews.len(),
             };
             Line::from(format!("{} ({})", t.title(), count))
         })
@@ -401,7 +401,7 @@ fn draw_transaction_table(
 }
 
 fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
-    let ai_reviews: Vec<_> = app.filtered_ai_reviews().collect();
+    let ai_reviews: Vec<_> = app.ai_reviews.iter().collect();
     let visible_height = area.height as usize;
     let total = ai_reviews.len();
     let offset = calculate_scroll_offset(app.selected_index, total, visible_height);
@@ -465,7 +465,7 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
-    let transfer_reviews: Vec<_> = app.filtered_transfer_reviews().collect();
+    let transfer_reviews: Vec<_> = app.transfer_reviews.iter().collect();
 
     if transfer_reviews.is_empty() {
         let text = Paragraph::new(vec![
