@@ -23,12 +23,15 @@ fn transaction_ctx() -> SqlContext {
         .with("bank_name", "b.name")
         .with("account_name", "a.name")
         .with("category_path", "c.path")
-        .with("fts", "transactions_fts")
+        .with("fts_match", "transactions_fts MATCH ?")
 }
 
-/// SQL context for transfer queries — same as transaction_ctx but with custom
-/// table aliases (so we can render once for from-side, once for to-side).
+/// SQL context for one side of a transfer query.
 ///
+/// Filters render against the given table aliases (so we can render once for
+/// the from-side, once for the to-side). The FTS clause uses a side-scoped
+/// subquery rather than a top-level JOIN, because each transfer pair has two
+/// transactions and we want a match on either side to qualify the row.
 fn transfer_side_ctx(tx_alias: &str, account_alias: &str, bank_alias: &str) -> SqlContext {
     SqlContext::new()
         .with("date", format!("{}.date", tx_alias))
@@ -36,6 +39,13 @@ fn transfer_side_ctx(tx_alias: &str, account_alias: &str, bank_alias: &str) -> S
         .with("description", format!("{}.description", tx_alias))
         .with("bank_name", format!("{}.name", bank_alias))
         .with("account_name", format!("{}.name", account_alias))
+        .with(
+            "fts_match",
+            format!(
+                "{}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
+                tx_alias
+            ),
+        )
 }
 
 /// Joins to splice into a transaction query based on what the parsed query needs.
@@ -51,45 +61,6 @@ fn transaction_joins(parsed: &ParsedQuery) -> String {
         );
     }
     joins
-}
-
-fn render_transfer_query(query: &ParsedQuery) -> crate::search::Rendered {
-    let mut lhs = query.render(&transfer_side_ctx("ft", "fa", "fb"));
-    add_transfer_side_fts(&mut lhs, "ft", query);
-
-    let mut rhs = query.render(&transfer_side_ctx("tt", "ta", "tb"));
-    add_transfer_side_fts(&mut rhs, "tt", query);
-
-    match (lhs.is_empty(), rhs.is_empty()) {
-        (true, true) => crate::search::Rendered::default(),
-        (false, true) => lhs,
-        (true, false) => rhs,
-        (false, false) => {
-            let mut params = lhs.params;
-            params.extend(rhs.params);
-            crate::search::Rendered {
-                where_clause: format!("(({}) OR ({}))", lhs.where_clause, rhs.where_clause),
-                params,
-            }
-        }
-    }
-}
-
-fn add_transfer_side_fts(
-    rendered: &mut crate::search::Rendered,
-    tx_alias: &str,
-    query: &ParsedQuery,
-) {
-    for fts_query in query.fts_queries() {
-        if !rendered.where_clause.is_empty() {
-            rendered.where_clause.push_str(" AND ");
-        }
-        rendered.where_clause.push_str(&format!(
-            "{}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
-            tx_alias
-        ));
-        rendered.params.push(Value::Text(fts_query.to_string()));
-    }
 }
 
 pub struct TransactionStore {
@@ -1062,7 +1033,10 @@ impl TransactionStore {
                AND fa.deleted_at IS NULL AND ta.deleted_at IS NULL",
         );
 
-        let rendered = render_transfer_query(query);
+        let rendered = query.render_transfers(
+            &transfer_side_ctx("ft", "fa", "fb"),
+            &transfer_side_ctx("tt", "ta", "tb"),
+        );
         sql.push_str(&rendered.and_prefix());
         let mut params = rendered.params;
 
@@ -1131,7 +1105,10 @@ impl TransactionStore {
             sql.push_str(" AND tr.confirmed = 1");
         }
 
-        let rendered = render_transfer_query(query);
+        let rendered = query.render_transfers(
+            &transfer_side_ctx("ft", "fa", "fb"),
+            &transfer_side_ctx("tt", "ta", "tb"),
+        );
         sql.push_str(&rendered.and_prefix());
         let mut params = rendered.params;
 

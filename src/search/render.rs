@@ -82,9 +82,9 @@ impl SqlContext {
 pub struct Rendered {
     /// WHERE fragment, e.g. `"t.date >= ? AND t.date <= ?"`. Empty if there are
     /// no applicable clauses.
-    pub where_clause: String,
+    pub(crate) where_clause: String,
     /// Bound parameters in order matching `?` placeholders in `where_clause`.
-    pub params: Vec<Value>,
+    pub(crate) params: Vec<Value>,
 }
 
 impl Rendered {
@@ -110,7 +110,10 @@ impl ParsedQuery {
     ///   placeholders are supported; otherwise dropped.
     /// - [`QueryPart::Regex`] (valid) renders as `regexp(?, {description})` if
     ///   `{description}` is supported.
-    /// - [`QueryPart::Fts`] renders as `{fts} MATCH ?` if `{fts}` is supported.
+    /// - [`QueryPart::Fts`] substitutes `{fts_match}` if the context provides
+    ///   it. The substituted SQL is expected to contain exactly one `?` for
+    ///   the FTS pattern (e.g. `"transactions_fts MATCH ?"` for a single-table
+    ///   query, or a side-scoped subquery for a join).
     pub fn render(&self, ctx: &SqlContext) -> Rendered {
         let mut clauses = Vec::new();
         let mut params = Vec::new();
@@ -121,11 +124,14 @@ impl ParsedQuery {
         }
     }
 
-    /// Render once for each context and OR the WHERE clauses together.
+    /// Render a transfer query: once against the from-side context, once
+    /// against the to-side context, OR the results together.
     ///
-    /// Used for transfer queries that should match if EITHER the from or to
-    /// transaction matches. Parameters are appended in order: lhs then rhs.
-    pub fn render_either(&self, lhs: &SqlContext, rhs: &SqlContext) -> Rendered {
+    /// A transfer matches if EITHER side satisfies the query. Each side renders
+    /// independently against its own table aliases; FTS uses the per-side
+    /// `{fts_match}` form so the subquery scopes to that side. Parameters are
+    /// appended in order: lhs then rhs.
+    pub fn render_transfers(&self, lhs: &SqlContext, rhs: &SqlContext) -> Rendered {
         let l = self.render(lhs);
         let r = self.render(rhs);
         match (l.is_empty(), r.is_empty()) {
@@ -172,7 +178,7 @@ impl ParsedQuery {
                     params.push(Value::Text(pattern.clone()));
                 }
                 QueryPart::Fts { query, .. } if !query.is_empty() => {
-                    let Some(rendered) = ctx.render_template("{fts} MATCH ?") else {
+                    let Some(rendered) = ctx.render_template("{fts_match}") else {
                         continue;
                     };
                     clauses.push(rendered);
@@ -193,7 +199,7 @@ impl ParsedQuery {
                 ..
             } => template_uses(sql, placeholder),
             QueryPart::Regex { valid: true, .. } => placeholder == "description",
-            QueryPart::Fts { query, .. } if !query.is_empty() => placeholder == "fts",
+            QueryPart::Fts { query, .. } if !query.is_empty() => placeholder == "fts_match",
             _ => false,
         })
     }
@@ -225,7 +231,7 @@ mod tests {
             .with("bank_name", "b.name")
             .with("account_name", "a.name")
             .with("category_path", "c.path")
-            .with("fts", "transactions_fts")
+            .with("fts_match", "transactions_fts MATCH ?")
     }
 
     fn make_filter(sql: &str, params: Vec<Value>) -> QueryPart {
@@ -348,7 +354,7 @@ mod tests {
 
     #[test]
     fn render_fts_emits_match() {
-        let ctx = SqlContext::new().with("fts", "transactions_fts");
+        let ctx = SqlContext::new().with("fts_match", "transactions_fts MATCH ?");
         let query = ParsedQuery {
             parts: vec![QueryPart::Fts {
                 original: "coffee".into(),
@@ -376,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn render_either_combines_with_or() {
+    fn render_transfers_combines_with_or() {
         let lhs = SqlContext::new().with("date", "ft.date");
         let rhs = SqlContext::new().with("date", "tt.date");
         let query = ParsedQuery {
@@ -385,7 +391,7 @@ mod tests {
                 vec![Value::Text("2024-01-01".into())],
             )],
         };
-        let r = query.render_either(&lhs, &rhs);
+        let r = query.render_transfers(&lhs, &rhs);
         assert_eq!(r.where_clause, "((ft.date >= ?) OR (tt.date >= ?))");
         assert_eq!(r.params.len(), 2);
         assert_eq!(r.params[0], Value::Text("2024-01-01".into()));
@@ -393,15 +399,15 @@ mod tests {
     }
 
     #[test]
-    fn render_either_empty_yields_empty() {
+    fn render_transfers_empty_yields_empty() {
         let lhs = SqlContext::new();
         let rhs = SqlContext::new();
-        let r = ParsedQuery::empty().render_either(&lhs, &rhs);
+        let r = ParsedQuery::empty().render_transfers(&lhs, &rhs);
         assert!(r.is_empty());
     }
 
     #[test]
-    fn render_either_falls_back_when_one_side_empty() {
+    fn render_transfers_falls_back_when_one_side_empty() {
         // If only the lhs supports the placeholder, result is just the lhs clause
         // (no spurious OR with empty side).
         let lhs = SqlContext::new().with("date", "t.date");
@@ -412,9 +418,41 @@ mod tests {
                 vec![Value::Text("2024-01-01".into())],
             )],
         };
-        let r = query.render_either(&lhs, &rhs);
+        let r = query.render_transfers(&lhs, &rhs);
         assert_eq!(r.where_clause, "t.date >= ?");
         assert_eq!(r.params.len(), 1);
+    }
+
+    #[test]
+    fn render_transfers_uses_side_scoped_fts() {
+        // Each side's context provides its own FTS predicate (typically a
+        // subquery scoped to that side's transactions). render_transfers should
+        // OR those two side-scoped predicates without any special-casing here.
+        let lhs = SqlContext::new().with(
+            "fts_match",
+            "ft.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
+        );
+        let rhs = SqlContext::new().with(
+            "fts_match",
+            "tt.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
+        );
+        let query = ParsedQuery {
+            parts: vec![QueryPart::Fts {
+                original: "coffee".into(),
+                query: "coffee*".into(),
+                span: Span::new(0, 0),
+            }],
+        };
+        let r = query.render_transfers(&lhs, &rhs);
+        assert_eq!(
+            r.where_clause,
+            "((ft.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)) \
+             OR (tt.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)))"
+        );
+        assert_eq!(
+            r.params,
+            vec![Value::Text("coffee*".into()), Value::Text("coffee*".into())]
+        );
     }
 
     #[test]
@@ -443,7 +481,7 @@ mod tests {
                 },
             ],
         };
-        assert!(query.uses_placeholder("fts"));
+        assert!(query.uses_placeholder("fts_match"));
         assert!(query.uses_placeholder("description"));
     }
 
