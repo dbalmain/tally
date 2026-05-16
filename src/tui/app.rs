@@ -5,7 +5,9 @@ use tui_input::Input;
 use crate::{
     Account, Bank, Category, CategorySource, FuzzyMatcher, Transaction, TransactionStore,
     TransactionWithEnrichment, Transfer, TransferSource, TransferWithTransactions,
-    search::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, ParsedQuery, SearchConfig},
+    search::{
+        AccountFilter, AmountFilter, CategoryFilter, DateFilter, Filter, ParsedQuery, SearchConfig,
+    },
 };
 
 use super::filtered_list::FilteredList;
@@ -271,8 +273,10 @@ impl App {
         self.tab_search_state.get_mut(&key).unwrap()
     }
 
-    /// Build SearchConfig for a given TabKey.
-    fn build_search_config(&self, key: TabKey) -> SearchConfig {
+    /// The standard filter set used by every transaction-oriented tab. The
+    /// category filter is omitted on tabs whose rows have no category
+    /// (Uncategorised) or where the filter is meaningless (raw transfer lists).
+    fn standard_filters(&self, with_category: bool) -> Vec<Box<dyn Filter>> {
         let account_options: Vec<String> = self
             .accounts
             .values()
@@ -282,41 +286,30 @@ impl App {
                     .map(|b| format!("{}/{}", b.name, a.name))
             })
             .collect();
-        let category_options: Vec<String> =
-            self.categories.iter().map(|c| c.path.clone()).collect();
 
+        let mut filters: Vec<Box<dyn Filter>> = vec![
+            Box::new(DateFilter),
+            Box::new(AmountFilter),
+            Box::new(AccountFilter::with_options(account_options)),
+        ];
+        if with_category {
+            let category_options: Vec<String> =
+                self.categories.iter().map(|c| c.path.clone()).collect();
+            filters.push(Box::new(CategoryFilter::with_options(category_options)));
+        }
+        filters
+    }
+
+    /// Build SearchConfig for a given TabKey.
+    fn build_search_config(&self, key: TabKey) -> SearchConfig {
         match key {
-            TabKey::Transactions => SearchConfig::new(vec![
-                Box::new(DateFilter),
-                Box::new(AmountFilter),
-                Box::new(AccountFilter::with_options(account_options)),
-                Box::new(CategoryFilter::with_options(category_options)),
-            ]),
-            TabKey::Transfers => SearchConfig::new(vec![
-                Box::new(DateFilter),
-                Box::new(AmountFilter),
-                Box::new(AccountFilter::with_options(account_options)),
-            ]),
-            TabKey::Categories => SearchConfig::new(vec![
-                // Categories tab doesn't need transaction search filters
-            ]),
-            TabKey::TodoUncategorised => SearchConfig::new(vec![
-                Box::new(DateFilter),
-                Box::new(AmountFilter),
-                Box::new(AccountFilter::with_options(account_options)),
-                // No CategoryFilter for uncategorised - they have no category
-            ]),
-            TabKey::TodoAiReview => SearchConfig::new(vec![
-                Box::new(DateFilter),
-                Box::new(AmountFilter),
-                Box::new(AccountFilter::with_options(account_options)),
-                Box::new(CategoryFilter::with_options(category_options)),
-            ]),
-            TabKey::TodoTransferReview => SearchConfig::new(vec![
-                Box::new(DateFilter),
-                Box::new(AmountFilter),
-                Box::new(AccountFilter::with_options(account_options)),
-            ]),
+            TabKey::Categories => SearchConfig::new(Vec::new()),
+            TabKey::Transactions | TabKey::TodoAiReview => {
+                SearchConfig::new(self.standard_filters(true))
+            }
+            TabKey::Transfers | TabKey::TodoUncategorised | TabKey::TodoTransferReview => {
+                SearchConfig::new(self.standard_filters(false))
+            }
         }
     }
 
