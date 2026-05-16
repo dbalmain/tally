@@ -48,30 +48,16 @@ pub enum TodoSubTab {
     TransferReview,
 }
 
-/// Key for per-tab search state storage.
-/// Todo subtabs each get their own state; other tabs use None.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TabKey {
-    Transactions,
-    Transfers,
-    Categories,
-    TodoUncategorised,
-    TodoAiReview,
-    TodoTransferReview,
-}
+/// Key for per-tab search state storage. The subtab is only meaningful on the
+/// Todo tab (where each subtab gets its own state); all other tabs use `None`
+/// so that switching the Todo subtab while on, say, Transactions doesn't
+/// silently fork the saved search state.
+pub type TabKey = (Tab, Option<TodoSubTab>);
 
-impl TabKey {
-    pub fn from_tab(tab: Tab, subtab: TodoSubTab) -> Self {
-        match tab {
-            Tab::Transactions => TabKey::Transactions,
-            Tab::Transfers => TabKey::Transfers,
-            Tab::Categories => TabKey::Categories,
-            Tab::Todo => match subtab {
-                TodoSubTab::Uncategorised => TabKey::TodoUncategorised,
-                TodoSubTab::AiReview => TabKey::TodoAiReview,
-                TodoSubTab::TransferReview => TabKey::TodoTransferReview,
-            },
-        }
+fn tab_key(tab: Tab, subtab: TodoSubTab) -> TabKey {
+    match tab {
+        Tab::Todo => (Tab::Todo, Some(subtab)),
+        other => (other, None),
     }
 }
 
@@ -256,7 +242,7 @@ impl App {
     }
 
     fn current_tab_key(&self) -> TabKey {
-        TabKey::from_tab(self.current_tab, self.todo_subtab)
+        tab_key(self.current_tab, self.todo_subtab)
     }
 
     pub fn current_search_state(&self) -> Option<&TabSearchState> {
@@ -302,15 +288,14 @@ impl App {
 
     /// Build SearchConfig for a given TabKey.
     fn build_search_config(&self, key: TabKey) -> SearchConfig {
-        match key {
-            TabKey::Categories => SearchConfig::new(Vec::new()),
-            TabKey::Transactions | TabKey::TodoAiReview => {
-                SearchConfig::new(self.standard_filters(true))
-            }
-            TabKey::Transfers | TabKey::TodoUncategorised | TabKey::TodoTransferReview => {
-                SearchConfig::new(self.standard_filters(false))
-            }
+        if matches!(key, (Tab::Categories, _)) {
+            return SearchConfig::new(Vec::new());
         }
+        let with_category = matches!(
+            key,
+            (Tab::Transactions, _) | (Tab::Todo, Some(TodoSubTab::AiReview))
+        );
+        SearchConfig::new(self.standard_filters(with_category))
     }
 
     fn rebuild_search_configs(&mut self) {
