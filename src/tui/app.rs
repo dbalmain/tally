@@ -251,6 +251,25 @@ impl App {
         }
     }
 
+    /// Run a store mutation; surface failures via `error_message` and return
+    /// `false`. Callers gate follow-up work (refresh_data, cursor adjustment)
+    /// on the returned bool so we don't refresh after a no-op. Closure form
+    /// lets a single call chain multiple store operations with `?` while
+    /// sharing one `&mut TransactionStore` borrow.
+    fn try_mutation(
+        &mut self,
+        what: &str,
+        f: impl FnOnce(&mut TransactionStore) -> Result<()>,
+    ) -> bool {
+        match f(&mut self.store) {
+            Ok(()) => true,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to {}: {}", what, e));
+                false
+            }
+        }
+    }
+
     fn current_tab_key(&self) -> TabKey {
         tab_key(self.current_tab, self.todo_subtab)
     }
@@ -662,10 +681,11 @@ impl App {
             return;
         };
 
-        if let Ok(category_id) = self.store.get_or_create_category(&category_path) {
-            let _ = self
-                .store
-                .set_category(tx.id, category_id, CategorySource::Manual, true, None);
+        let saved = self.try_mutation("set category", |s| {
+            let category_id = s.get_or_create_category(&category_path)?;
+            s.set_category(tx.id, category_id, CategorySource::Manual, true, None)
+        });
+        if saved {
             self.refresh_data();
         }
 
@@ -1197,9 +1217,14 @@ impl App {
         if self.current_tab != Tab::Todo || self.todo_subtab != TodoSubTab::AiReview {
             return;
         }
-        if let Some(review) = self.ai_reviews.get(self.selected_index) {
-            let tx_id = review.transaction.id;
-            let _ = self.store.confirm_category(tx_id);
+        let Some(tx_id) = self
+            .ai_reviews
+            .get(self.selected_index)
+            .map(|r| r.transaction.id)
+        else {
+            return;
+        };
+        if self.try_mutation("confirm AI category", |s| s.confirm_category(tx_id)) {
             self.refresh_data();
         }
     }
@@ -1208,8 +1233,10 @@ impl App {
         if self.current_tab != Tab::Todo || self.todo_subtab != TodoSubTab::TransferReview {
             return;
         }
-        if let Some(transfer) = self.transfer_reviews.get(self.selected_index) {
-            let _ = self.store.confirm_transfer(transfer.id);
+        let Some(transfer_id) = self.transfer_reviews.get(self.selected_index).map(|t| t.id) else {
+            return;
+        };
+        if self.try_mutation("confirm transfer", |s| s.confirm_transfer(transfer_id)) {
             self.refresh_data();
         }
     }
@@ -1225,7 +1252,9 @@ impl App {
         else {
             return;
         };
-        let _ = self.store.delete_transfer(transfer_id);
+        if !self.try_mutation("delete transfer", |s| s.delete_transfer(transfer_id)) {
+            return;
+        }
         self.refresh_data();
         if self.selected_index >= self.linked_transfers.len() && self.selected_index > 0 {
             self.selected_index -= 1;
