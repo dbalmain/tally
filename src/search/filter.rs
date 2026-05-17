@@ -28,7 +28,12 @@ pub trait Filter: Send + Sync {
 
     /// Parse the value and return SQL if valid.
     ///
-    /// The returned SQL should be a WHERE clause fragment (e.g., `date >= ? AND date <= ?`).
+    /// The returned SQL should be a WHERE clause fragment using named
+    /// placeholders that map to columns in a [`SqlContext`](super::SqlContext)
+    /// — e.g., `{date} >= ? AND {date} <= ?`. The renderer substitutes
+    /// `{date}` with the right column reference (`t.date`, `ft.date`, etc.)
+    /// depending on the calling context, and silently drops clauses whose
+    /// placeholders the context doesn't supply.
     fn parse(&self, value: &str) -> FilterResult;
 
     /// Provide completions for dropdown-style filters.
