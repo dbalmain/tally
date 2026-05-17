@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tui_input::Input;
 
 use crate::{
-    Account, Bank, Category, CategorySource, FuzzyMatcher, Transaction, TransactionStore,
+    Account, Bank, Category, CategorySource, FuzzyMatcher, Result, Transaction, TransactionStore,
     TransactionWithEnrichment, Transfer, TransferSource, TransferWithTransactions,
     search::{
         AccountFilter, AmountFilter, CategoryFilter, DateFilter, Filter, ParsedQuery, SearchConfig,
@@ -165,45 +165,36 @@ pub enum ConfirmAction {
 }
 
 impl App {
-    pub fn new(store: TransactionStore) -> Self {
+    /// Build the application state, doing initial loads of every tab's data
+    /// plus banks/accounts/categories. Returns Err if any of the startup
+    /// queries fails — the TUI hasn't drawn anything yet, so a hard failure
+    /// here is the right behaviour (the alternative is a half-populated UI
+    /// that silently lies about what's in the database).
+    pub fn new(store: TransactionStore) -> Result<Self> {
         let empty_query = ParsedQuery::empty();
-        let transactions = FilteredList::new(
-            store
-                .query_transactions(&empty_query, Some(500))
-                .unwrap_or_default(),
-        );
-        let uncategorised = FilteredList::new(
-            store
-                .get_uncategorised_transactions(&empty_query, Some(500))
-                .unwrap_or_default(),
-        );
-        let ai_reviews = FilteredList::new(
-            store
-                .get_pending_ai_reviews(&empty_query, Some(500))
-                .unwrap_or_default(),
-        );
-        let transfer_reviews = FilteredList::new(
-            store
-                .get_pending_transfer_reviews(&empty_query, Some(500))
-                .unwrap_or_default(),
-        );
-        let linked_transfers = FilteredList::new(
-            store
-                .list_transfers_with_transactions(true, &empty_query, Some(500))
-                .unwrap_or_default(),
-        );
+        let transactions = FilteredList::new(store.query_transactions(&empty_query, Some(500))?);
+        let uncategorised =
+            FilteredList::new(store.get_uncategorised_transactions(&empty_query, Some(500))?);
+        let ai_reviews = FilteredList::new(store.get_pending_ai_reviews(&empty_query, Some(500))?);
+        let transfer_reviews =
+            FilteredList::new(store.get_pending_transfer_reviews(&empty_query, Some(500))?);
+        let linked_transfers = FilteredList::new(store.list_transfers_with_transactions(
+            true,
+            &empty_query,
+            Some(500),
+        )?);
 
-        let bank_list = store.list_banks().unwrap_or_default();
+        let bank_list = store.list_banks()?;
         let banks: HashMap<i64, Bank> = bank_list.iter().cloned().map(|b| (b.id, b)).collect();
 
         let mut accounts = HashMap::new();
         for bank in &bank_list {
-            for account in store.list_accounts(bank.id).unwrap_or_default() {
+            for account in store.list_accounts(bank.id)? {
                 accounts.insert(account.id, account);
             }
         }
 
-        let categories = store.list_categories().unwrap_or_default();
+        let categories = store.list_categories()?;
 
         let mut app = Self {
             transactions,
@@ -238,7 +229,26 @@ impl App {
         };
         app.rebuild_tx_caches();
         app.rebuild_category_counts();
-        app
+        Ok(app)
+    }
+
+    /// Run a store load whose failure shouldn't tear down the UI: on error,
+    /// surface a message via `error_message` and return `T::default()` so
+    /// callers keep the existing list state coherent. Used for mid-flight
+    /// loads (reload_current_tab, cache rebuilds, popup data) where a stack
+    /// trace would lose the user their typed input.
+    fn load_or_show<T: Default>(
+        &mut self,
+        what: &str,
+        f: impl FnOnce(&TransactionStore) -> Result<T>,
+    ) -> T {
+        match f(&self.store) {
+            Ok(v) => v,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to {}: {}", what, e));
+                T::default()
+            }
+        }
     }
 
     fn current_tab_key(&self) -> TabKey {
@@ -351,9 +361,9 @@ impl App {
 
         self.category_by_tx_id.clear();
         let tx_ids: Vec<i64> = self.transactions.items().iter().map(|t| t.id).collect();
-        if let Ok(categories) = self.store.get_categories_for_transactions(&tx_ids) {
-            self.category_by_tx_id = categories;
-        }
+        self.category_by_tx_id = self.load_or_show("load transaction categories", |s| {
+            s.get_categories_for_transactions(&tx_ids)
+        });
 
         self.transfer_by_tx_id.clear();
         for twt in self.linked_transfers.items() {
@@ -375,10 +385,9 @@ impl App {
     /// Rebuild the per-category transaction count cache in one bulk query.
     /// Only needs to run when category assignments change.
     fn rebuild_category_counts(&mut self) {
-        self.category_tx_count = self
-            .store
-            .get_category_transaction_counts()
-            .unwrap_or_default();
+        self.category_tx_count = self.load_or_show("load category counts", |s| {
+            s.get_category_transaction_counts()
+        });
     }
 
     pub fn get_cached_transaction(&self, id: i64) -> Option<&Transaction> {
@@ -596,7 +605,8 @@ impl App {
         if self.selected_transaction().is_some() {
             self.input_mode = InputMode::Category;
             self.category_input.clear();
-            self.category_suggestions = self.store.list_categories().unwrap_or_default();
+            self.category_suggestions =
+                self.load_or_show("load categories", |s| s.list_categories());
             self.category_selected = 0;
         }
     }
@@ -613,12 +623,12 @@ impl App {
 
     fn update_category_suggestions(&mut self) {
         if self.category_input.is_empty() {
-            self.category_suggestions = self.store.list_categories().unwrap_or_default();
+            self.category_suggestions =
+                self.load_or_show("load categories", |s| s.list_categories());
         } else {
-            self.category_suggestions = self
-                .store
-                .find_categories(&self.category_input)
-                .unwrap_or_default();
+            let input = self.category_input.clone();
+            self.category_suggestions =
+                self.load_or_show("search categories", |s| s.find_categories(&input));
         }
         self.category_selected = 0;
     }
@@ -667,10 +677,9 @@ impl App {
             return;
         };
 
-        let candidates = self
-            .store
-            .find_matching_transfer_candidates(&tx)
-            .unwrap_or_default();
+        let candidates = self.load_or_show("find transfer candidates", |s| {
+            s.find_matching_transfer_candidates(&tx)
+        });
 
         if candidates.is_empty() {
             self.input_mode = InputMode::TransferNoMatch;
@@ -755,7 +764,7 @@ impl App {
         // Reload the current tab's data using its search state. Called after
         // mutations (categorisation, transfers) — both tx caches and category
         // counts may have changed.
-        self.categories = self.store.list_categories().unwrap_or_default();
+        self.categories = self.load_or_show("load categories", |s| s.list_categories());
         self.rebuild_search_configs();
         self.reload_current_tab();
         self.rebuild_category_counts();
@@ -877,7 +886,7 @@ impl App {
     }
 
     fn reload_categories(&mut self) {
-        self.categories = self.store.list_categories().unwrap_or_default();
+        self.categories = self.load_or_show("load categories", |s| s.list_categories());
         self.rebuild_search_configs();
         self.rebuild_category_counts();
     }
@@ -1059,43 +1068,38 @@ impl App {
 
         match self.current_tab {
             Tab::Transactions => {
-                self.transactions.set_items(
-                    self.store
-                        .query_transactions(&parsed, limit)
-                        .unwrap_or_default(),
-                );
+                let items = self.load_or_show("load transactions", |s| {
+                    s.query_transactions(&parsed, limit)
+                });
+                self.transactions.set_items(items);
             }
             Tab::Transfers => {
-                self.linked_transfers.set_items(
-                    self.store
-                        .list_transfers_with_transactions(true, &parsed, limit)
-                        .unwrap_or_default(),
-                );
+                let items = self.load_or_show("load transfers", |s| {
+                    s.list_transfers_with_transactions(true, &parsed, limit)
+                });
+                self.linked_transfers.set_items(items);
             }
             Tab::Categories => {
                 // Categories don't use transaction filters
             }
             Tab::Todo => match self.todo_subtab {
                 TodoSubTab::Uncategorised => {
-                    self.uncategorised.set_items(
-                        self.store
-                            .get_uncategorised_transactions(&parsed, limit)
-                            .unwrap_or_default(),
-                    );
+                    let items = self.load_or_show("load uncategorised transactions", |s| {
+                        s.get_uncategorised_transactions(&parsed, limit)
+                    });
+                    self.uncategorised.set_items(items);
                 }
                 TodoSubTab::AiReview => {
-                    self.ai_reviews.set_items(
-                        self.store
-                            .get_pending_ai_reviews(&parsed, limit)
-                            .unwrap_or_default(),
-                    );
+                    let items = self.load_or_show("load AI reviews", |s| {
+                        s.get_pending_ai_reviews(&parsed, limit)
+                    });
+                    self.ai_reviews.set_items(items);
                 }
                 TodoSubTab::TransferReview => {
-                    self.transfer_reviews.set_items(
-                        self.store
-                            .get_pending_transfer_reviews(&parsed, limit)
-                            .unwrap_or_default(),
-                    );
+                    let items = self.load_or_show("load pending transfers", |s| {
+                        s.get_pending_transfer_reviews(&parsed, limit)
+                    });
+                    self.transfer_reviews.set_items(items);
                 }
             },
         }

@@ -29,7 +29,7 @@ pub fn run(store: TransactionStore) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store);
+    let mut app = App::new(store)?;
     let res = run_app(&mut terminal, &mut app);
 
     disable_raw_mode()?;
