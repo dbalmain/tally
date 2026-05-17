@@ -251,12 +251,14 @@ impl App {
 
     fn current_search_state_mut(&mut self) -> &mut TabSearchState {
         let key = self.current_tab_key();
-        if !self.tab_search_state.contains_key(&key) {
-            let config = self.build_search_config(key);
-            self.tab_search_state
-                .insert(key, TabSearchState::new(config));
-        }
-        self.tab_search_state.get_mut(&key).unwrap()
+        // Build the config up-front: build_search_config borrows &self, which
+        // can't co-exist with the &mut self.tab_search_state that entry() needs.
+        // The config is cheap (a handful of small allocations), so paying for it
+        // on each hit is fine.
+        let config = self.build_search_config(key);
+        self.tab_search_state
+            .entry(key)
+            .or_insert_with(|| TabSearchState::new(config))
     }
 
     /// The standard filter set used by every transaction-oriented tab. The
@@ -459,16 +461,13 @@ impl App {
 
     /// Save current state to the tab's search state before switching away
     fn save_tab_state(&mut self) {
-        let key = self.current_tab_key();
-        if !self.tab_search_state.contains_key(&key) {
-            let config = self.build_search_config(key);
-            self.tab_search_state
-                .insert(key, TabSearchState::new(config));
-        }
-        let state = self.tab_search_state.get_mut(&key).unwrap();
-        state.selected_index = self.selected_index;
-        state.editing_db_search = self.input_mode == InputMode::DbSearch;
-        state.editing_fuzzy_search = self.input_mode == InputMode::FuzzySearch;
+        let selected_index = self.selected_index;
+        let editing_db = self.input_mode == InputMode::DbSearch;
+        let editing_fuzzy = self.input_mode == InputMode::FuzzySearch;
+        let state = self.current_search_state_mut();
+        state.selected_index = selected_index;
+        state.editing_db_search = editing_db;
+        state.editing_fuzzy_search = editing_fuzzy;
     }
 
     /// Restore state from the new tab's search state
