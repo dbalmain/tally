@@ -108,6 +108,10 @@ impl AmountFilter {
 
 /// Parse an amount string to cents.
 /// Supports: 100, 100.50, 100.5
+///
+/// Rejects inputs with more than 2 decimal places (e.g. "100.999"): cents are
+/// the smallest unit, and silently truncating sub-cent precision tends to
+/// mask data-entry mistakes rather than fix them.
 pub(crate) fn parse_amount(s: &str) -> Option<i64> {
     if s.is_empty() {
         return None;
@@ -115,10 +119,13 @@ pub(crate) fn parse_amount(s: &str) -> Option<i64> {
 
     // Handle decimal amounts
     if let Some((dollars, cents_str)) = s.split_once('.') {
+        if cents_str.len() > 2 {
+            return None;
+        }
         let dollars: i64 = dollars.parse().ok()?;
         // Normalize cents to 2 digits
         let cents_str = format!("{:0<2}", cents_str);
-        let cents: i64 = cents_str[..2].parse().ok()?;
+        let cents: i64 = cents_str.parse().ok()?;
         Some(dollars * 100 + cents)
     } else {
         let dollars: i64 = s.parse().ok()?;
@@ -230,5 +237,14 @@ mod tests {
         assert_eq!(parse_amount("0.99"), Some(99));
         assert_eq!(parse_amount(""), None);
         assert_eq!(parse_amount("abc"), None);
+    }
+
+    #[test]
+    fn test_parse_amount_rejects_sub_cent_precision() {
+        // Cents are the smallest unit; reject rather than truncate so typos
+        // surface instead of silently losing the trailing digits.
+        assert_eq!(parse_amount("100.999"), None);
+        assert_eq!(parse_amount("0.001"), None);
+        assert_eq!(parse_amount("1.234567"), None);
     }
 }
