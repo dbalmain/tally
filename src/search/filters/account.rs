@@ -60,6 +60,16 @@ impl Filter for AccountFilter {
                 continue;
             }
 
+            // Validate against the loaded bank/account list when one exists.
+            // We skip validation when options is empty (e.g. a fresh DB before
+            // any imports) so the filter doesn't render red on every keystroke
+            // when there's nothing to match against in the first place.
+            if !self.options.is_empty()
+                && let Err(msg) = validate_pattern(pattern, &self.options)
+            {
+                return FilterResult::Invalid(msg);
+            }
+
             if let Some((bank, account)) = pattern.split_once('/') {
                 // Bank/Account format
                 if bank.is_empty() {
@@ -157,6 +167,76 @@ impl Filter for AccountFilter {
     }
 }
 
+/// Check whether a single `Bank`, `Bank/`, `Bank/Account`, or `/Account`
+/// pattern matches at least one option in the loaded list.
+///
+/// Returns `Err(message)` describing which side of the slash failed, so the
+/// user can tell "no such bank" from "no such account in that bank". Match
+/// semantics match the SQL the filter emits: case-insensitive prefix on each
+/// side of the `/`. The degenerate `/` pattern (both sides empty) returns
+/// `Ok(())` because `parse` already discards it as a no-op.
+fn validate_pattern(pattern: &str, options: &[String]) -> Result<(), String> {
+    let (bank_part, account_part) = match pattern.split_once('/') {
+        Some((b, a)) => (b, a),
+        None => (pattern, ""),
+    };
+
+    // Pre-split options once. Anything missing a `/` is malformed and ignored.
+    let split_options: Vec<(&str, &str)> = options
+        .iter()
+        .filter_map(|opt| opt.split_once('/'))
+        .collect();
+
+    let bank_lower = bank_part.to_lowercase();
+    let account_lower = account_part.to_lowercase();
+
+    if bank_part.is_empty() {
+        if account_part.is_empty() {
+            // "/" — both sides empty; parse() treats this as a no-op.
+            return Ok(());
+        }
+        let any = split_options
+            .iter()
+            .any(|(_, a)| a.to_lowercase().starts_with(&account_lower));
+        return if any {
+            Ok(())
+        } else {
+            Err(format!("Unknown account: {}", account_part))
+        };
+    }
+
+    // Bank or Bank/ or Bank/Account — bank prefix must match something.
+    let bank_matches: Vec<&(&str, &str)> = split_options
+        .iter()
+        .filter(|(b, _)| b.to_lowercase().starts_with(&bank_lower))
+        .collect();
+
+    if bank_matches.is_empty() {
+        return Err(format!("Unknown bank: {}", bank_part));
+    }
+
+    // Bank-only pattern: the bank prefix alone is enough.
+    if account_part.is_empty() {
+        return Ok(());
+    }
+
+    // Bank/Account — at least one bank-matching option must also have the
+    // account prefix. (The same option must satisfy both — otherwise
+    // "ING/Classic" would validate just because ING exists and NAB has a
+    // Classic.)
+    let any = bank_matches
+        .iter()
+        .any(|(_, a)| a.to_lowercase().starts_with(&account_lower));
+    if any {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unknown account: {} in {}",
+            account_part, bank_part
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +329,62 @@ mod tests {
                 );
             }
             _ => panic!("Expected Valid"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_bank_returns_invalid() {
+        match parse("NotABank") {
+            FilterResult::Invalid(msg) => assert_eq!(msg, "Unknown bank: NotABank"),
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unknown_account_in_known_bank_returns_invalid() {
+        match parse("ING/NotReal") {
+            FilterResult::Invalid(msg) => assert_eq!(msg, "Unknown account: NotReal in ING"),
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unknown_account_only_returns_invalid() {
+        match parse("/NotReal") {
+            FilterResult::Invalid(msg) => assert_eq!(msg, "Unknown account: NotReal"),
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_partial_bank_prefix_is_valid() {
+        // "I" should still match "ING" — prefix semantics must survive.
+        assert!(matches!(parse("I"), FilterResult::Valid { .. }));
+    }
+
+    #[test]
+    fn test_case_insensitive_validation() {
+        // Options use "ING"/"NAB" caps; user-typed "ing/orange" should validate.
+        assert!(matches!(parse("ing/orange"), FilterResult::Valid { .. }));
+    }
+
+    #[test]
+    fn test_empty_options_skips_validation() {
+        // Fresh DB with no banks yet: don't paint every filter red.
+        let f = AccountFilter::with_options(vec![]);
+        assert!(matches!(
+            f.parse("Anything/AtAll"),
+            FilterResult::Valid { .. }
+        ));
+    }
+
+    #[test]
+    fn test_multi_pattern_first_invalid_fails_whole() {
+        // "ING" is valid, "NotABank" is not — the whole filter fails with the
+        // bad pattern's message.
+        match parse("ING|NotABank") {
+            FilterResult::Invalid(msg) => assert_eq!(msg, "Unknown bank: NotABank"),
+            other => panic!("Expected Invalid, got {:?}", other),
         }
     }
 
