@@ -920,9 +920,35 @@ fn draw_transaction_details(f: &mut Frame, app: &App, tx: &Transaction, area: Re
 }
 
 fn draw_transfer_details(f: &mut Frame, app: &App, twt: &TransferWithTransactions, area: Rect) {
-    let from = &twt.from_transaction;
-    let to = &twt.to_transaction;
+    let footer = Line::from(vec![
+        Span::styled("Created: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(twt.transfer.created_at.format("%Y-%m-%d %H:%M").to_string()),
+        Span::raw("  "),
+        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(twt.transfer.source.as_str()),
+    ]);
+    draw_transfer_pair(
+        f,
+        app,
+        &twt.from_transaction,
+        &twt.to_transaction,
+        footer,
+        area,
+    );
+}
 
+/// Render the shared "From: ... / To: ... / <footer>" block used by both the
+/// confirmed-transfer detail panel and the pending-review one. The only
+/// difference between the two panels is what goes on the footer line, so it's
+/// the caller's responsibility to construct that.
+fn draw_transfer_pair(
+    f: &mut Frame,
+    app: &App,
+    from: &crate::Transaction,
+    to: &crate::Transaction,
+    footer: Line<'_>,
+    area: Rect,
+) {
     let from_bank = app.bank_name(from.bank_id);
     let from_account = app.account_name(from.account_id);
     let to_bank = app.bank_name(to.bank_id);
@@ -952,13 +978,7 @@ fn draw_transfer_details(f: &mut Frame, app: &App, twt: &TransferWithTransaction
                 &to.description,
             )),
         ]),
-        Line::from(vec![
-            Span::styled("Created: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(twt.transfer.created_at.format("%Y-%m-%d %H:%M").to_string()),
-            Span::raw("  "),
-            Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(twt.transfer.source.as_str()),
-        ]),
+        footer,
     ];
 
     let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
@@ -1047,44 +1067,12 @@ fn draw_pending_transfer_details(f: &mut Frame, app: &App, transfer: &crate::Tra
         }
     };
 
-    let from_bank = app.bank_name(from_tx.bank_id);
-    let from_account = app.account_name(from_tx.account_id);
-    let to_bank = app.bank_name(to_tx.bank_id);
-    let to_account = app.account_name(to_tx.account_id);
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("From: ", Style::default().fg(Color::Red)),
-            Span::raw(format!(
-                "{} / {} — {} — {} — {}",
-                from_bank,
-                from_account,
-                from_tx.date,
-                format_cents(from_tx.amount_cents),
-                &from_tx.description,
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("To:   ", Style::default().fg(Color::Green)),
-            Span::raw(format!(
-                "{} / {} — {} — {} — {}",
-                to_bank,
-                to_account,
-                to_tx.date,
-                format_cents(to_tx.amount_cents),
-                &to_tx.description,
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(transfer.source.as_str()),
-            Span::raw("  "),
-            Span::styled("Status: ", Style::default().fg(Color::Yellow)),
-            Span::raw("Pending review"),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(paragraph, area);
+    let footer = Line::from(vec![
+        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(transfer.source.as_str()),
+        Span::raw("  "),
+        Span::styled("Status: ", Style::default().fg(Color::Yellow)),
+        Span::raw("Pending review"),
+    ]);
+    draw_transfer_pair(f, app, from_tx, to_tx, footer, area);
 }
