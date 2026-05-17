@@ -119,4 +119,141 @@ impl ParsedQuery {
             })
             .collect()
     }
+
+    /// First validation error to show the user, with cursor priority.
+    ///
+    /// Returns the message of an invalid filter or regex containing the
+    /// cursor; if no invalid part is under the cursor, returns the leftmost
+    /// invalid part's message. Returns `None` if everything parses cleanly.
+    pub fn error_at_cursor(&self, cursor: usize) -> Option<&str> {
+        // Cursor-priority pass.
+        for part in &self.parts {
+            if !part_span_contains_cursor(part, cursor) {
+                continue;
+            }
+            if let Some(msg) = part_error_message(part) {
+                return Some(msg);
+            }
+        }
+        // Fall back to the leftmost invalid part.
+        self.parts.iter().find_map(part_error_message)
+    }
+}
+
+fn part_span_contains_cursor(part: &QueryPart, cursor: usize) -> bool {
+    let span = part.span();
+    span.contains(cursor) || span.at_end(cursor)
+}
+
+fn part_error_message(part: &QueryPart) -> Option<&str> {
+    match part {
+        QueryPart::Filter {
+            result: FilterResult::Invalid(msg),
+            ..
+        } => Some(msg.as_str()),
+        QueryPart::Regex { valid: false, .. } => Some("Invalid regex pattern"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filter(name: &'static str, value: &str, result: FilterResult, start: usize) -> QueryPart {
+        let end = start + name.len() + 1 + value.len();
+        let value_start = start + name.len() + 1;
+        QueryPart::Filter {
+            name,
+            value: value.to_string(),
+            result,
+            span: Span::new(start, end),
+            value_span: Span::new(value_start, end),
+        }
+    }
+
+    fn regex(text: &str, valid: bool, start: usize) -> QueryPart {
+        QueryPart::Regex {
+            original: text.to_string(),
+            pattern: text.trim_matches('/').to_string(),
+            valid,
+            span: Span::new(start, start + text.len()),
+        }
+    }
+
+    fn ws(start: usize, end: usize) -> QueryPart {
+        QueryPart::Whitespace {
+            span: Span::new(start, end),
+        }
+    }
+
+    #[test]
+    fn error_at_cursor_returns_none_when_all_valid() {
+        let q = ParsedQuery {
+            parts: vec![filter(
+                "date",
+                "2024",
+                FilterResult::Valid {
+                    sql: String::new(),
+                    params: vec![],
+                },
+                0,
+            )],
+        };
+        assert_eq!(q.error_at_cursor(0), None);
+        assert_eq!(q.error_at_cursor(5), None);
+    }
+
+    #[test]
+    fn error_at_cursor_prefers_cursor_position_over_leftmost() {
+        // Two invalid filters; cursor is inside the second one.
+        let q = ParsedQuery {
+            parts: vec![
+                filter("date", "x", FilterResult::Invalid("bad date".into()), 0),
+                ws(6, 7),
+                filter("amount", "y", FilterResult::Invalid("bad amount".into()), 7),
+            ],
+        };
+        // Cursor in second filter's span returns its message.
+        assert_eq!(q.error_at_cursor(10), Some("bad amount"));
+        // Cursor in first filter's span returns its message.
+        assert_eq!(q.error_at_cursor(2), Some("bad date"));
+        // Cursor in whitespace falls back to the leftmost invalid.
+        assert_eq!(q.error_at_cursor(6), Some("bad date"));
+    }
+
+    #[test]
+    fn error_at_cursor_reports_invalid_regex() {
+        let q = ParsedQuery {
+            parts: vec![regex("/[/", false, 0)],
+        };
+        assert_eq!(q.error_at_cursor(1), Some("Invalid regex pattern"));
+    }
+
+    #[test]
+    fn error_at_cursor_skips_valid_parts_under_cursor() {
+        // Cursor inside the valid filter; falls back to the leftmost
+        // invalid part further along.
+        let q = ParsedQuery {
+            parts: vec![
+                filter(
+                    "date",
+                    "2024",
+                    FilterResult::Valid {
+                        sql: String::new(),
+                        params: vec![],
+                    },
+                    0,
+                ),
+                ws(9, 10),
+                filter(
+                    "amount",
+                    "x",
+                    FilterResult::Invalid("bad amount".into()),
+                    10,
+                ),
+            ],
+        };
+        assert_eq!(q.error_at_cursor(3), Some("bad amount"));
+    }
 }

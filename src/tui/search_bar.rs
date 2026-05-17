@@ -101,6 +101,13 @@ impl SearchBar {
         &self.context
     }
 
+    /// First validation error relevant to the cursor (invalid filter or
+    /// regex), prioritising the part containing the cursor and falling back
+    /// to the leftmost invalid part. `None` when everything parses cleanly.
+    pub fn error_message(&self) -> Option<&str> {
+        self.parsed.error_at_cursor(self.cursor())
+    }
+
     /// Get the autocomplete state if active.
     pub fn autocomplete(&self) -> Option<&AutocompleteState> {
         self.autocomplete.as_ref()
@@ -580,6 +587,30 @@ impl SearchBar {
 
         let line = Line::from(spans);
         f.render_widget(Paragraph::new(line), area);
+
+        // Right-aligned error hint, only when there's enough room without
+        // covering the user's input. When the input gets wide enough to
+        // collide, the red token colouring inside the bar is the only signal
+        // — better that than overwriting what the user is typing.
+        if active && let Some(err) = self.error_message() {
+            let err_text = format!(" ⚠ {}", err);
+            let err_w = char_len(&err_text) as u16;
+            let used_w = (prefix.chars().count() + char_len(value)) as u16;
+            if area.width > used_w + err_w + 1 {
+                let err_area = Rect {
+                    x: area.x + area.width - err_w,
+                    width: err_w,
+                    ..area
+                };
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        err_text,
+                        Style::default().fg(Color::Red),
+                    ))),
+                    err_area,
+                );
+            }
+        }
 
         // Calculate cursor position
         let cursor_x = area.x + prefix.chars().count() as u16 + self.input.visual_cursor() as u16;
