@@ -203,9 +203,11 @@ Filters are pushed to SQL for efficient querying. Syntax:
 - `date:2024` — Entire year
 - `date:2024-01..2024-06` — Date range
 - `date:>2024-01` / `date:<2024-06` — After/before
-- `amount:100` — Exact amount ($100.00)
-- `amount:>100` / `amount:<100` — Greater/less than
-- `amount:50..200` — Amount range
+- `amount:100` — Any $100-something ($100.00–$100.99), precision-aware
+- `amount:7.5` — Any $7.5x ($7.50–$7.59)
+- `amount:7.50` — Exactly $7.50 (two decimals = exact cents)
+- `amount:>100` / `amount:<100` — Greater/less than $100.00 (cent-exact)
+- `amount:50..200` — Amount range, endpoints cent-exact
 - `category:Food` — Category contains
 - `category:Food|Transport` — Multiple categories (OR)
 
