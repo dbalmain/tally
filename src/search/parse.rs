@@ -23,6 +23,27 @@ impl SearchConfig {
         Self { filters }
     }
 
+    /// The standard filter set used by every transaction-oriented search:
+    /// date, amount, account, and (optionally) category. This is the single
+    /// registration point for built-in filters — new filters get added here
+    /// and every search bar picks them up.
+    ///
+    /// `category_options` is `None` for contexts where a category filter is
+    /// meaningless (e.g. lists of uncategorised transactions).
+    pub fn standard(account_options: Vec<String>, category_options: Option<Vec<String>>) -> Self {
+        use super::filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
+
+        let mut filters: Vec<Box<dyn Filter>> = vec![
+            Box::new(DateFilter),
+            Box::new(AmountFilter),
+            Box::new(AccountFilter::with_options(account_options)),
+        ];
+        if let Some(options) = category_options {
+            filters.push(Box::new(CategoryFilter::with_options(options)));
+        }
+        Self::new(filters)
+    }
+
     /// Find a filter by name or alias (internal use).
     fn find_filter(&self, name: &str) -> Option<&dyn Filter> {
         self.filters.iter().find_map(|f| {

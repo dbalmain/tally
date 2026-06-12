@@ -90,6 +90,25 @@ CREATE VIRTUAL TABLE IF NOT EXISTS transactions_fts USING fts5(
     content='',
     contentless_delete=1
 );
+
+-- Read-side view: a transaction joined to its account and bank. All store
+-- read queries go through this view so the join (and the bank/account name
+-- columns search filters rely on) is defined in exactly one place.
+-- Dropped and recreated on every open so definition changes take effect
+-- without migrations. The leading columns (id..import_batch_id) must stay in
+-- the order store::parse_transaction_at_offset expects.
+DROP VIEW IF EXISTS transactions_view;
+CREATE VIEW transactions_view AS
+SELECT
+    t.id, a.bank_id, t.account_id, t.date, t.description,
+    t.amount_cents, t.balance_cents, t.hash, t.metadata,
+    t.source_file, t.import_batch_id,
+    b.name AS bank_name,
+    a.name AS account_name,
+    a.deleted_at AS account_deleted_at
+FROM transactions t
+JOIN accounts a ON t.account_id = a.id
+JOIN banks b ON a.bank_id = b.id;
 "#;
 
 pub(crate) fn init_db(conn: &Connection) -> Result<()> {

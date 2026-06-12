@@ -13,37 +13,79 @@ use crate::{
     TransferWithTransactions,
 };
 
-/// SQL context for queries rooted at the `transactions t` / `accounts a` /
-/// `banks b` aliases (with optional `categories c` and `transactions_fts fts`).
+/// Column list for selecting a full `Transaction` from `transactions_view`
+/// under `alias`. Order must match `parse_transaction_at_offset`.
+fn tx_cols(alias: &str) -> String {
+    [
+        "id",
+        "bank_id",
+        "account_id",
+        "date",
+        "description",
+        "amount_cents",
+        "balance_cents",
+        "hash",
+        "metadata",
+        "source_file",
+        "import_batch_id",
+    ]
+    .map(|c| format!("{alias}.{c}"))
+    .join(", ")
+}
+
+/// Column list for selecting a full `TransactionEnrichment` under `alias`.
+/// Order must match `parse_enrichment_at_offset`.
+fn enrichment_cols(alias: &str) -> String {
+    [
+        "id",
+        "transaction_id",
+        "category_id",
+        "category_source",
+        "category_confirmed",
+        "ai_confidence",
+        "created_at",
+        "updated_at",
+    ]
+    .map(|c| format!("{alias}.{c}"))
+    .join(", ")
+}
+
+/// Column list for selecting a full `Transfer` from `transfers tr`.
+/// Order must match `parse_transfer`.
+const TRANSFER_COLS: &str =
+    "tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at";
+
+/// SQL context for queries rooted at `transactions_view t` (with optional
+/// `categories c` and `transactions_fts fts` joins).
 fn transaction_ctx() -> SqlContext {
     SqlContext::new()
         .with("date", "t.date")
         .with("amount_cents", "t.amount_cents")
         .with("description", "t.description")
-        .with("bank_name", "b.name")
-        .with("account_name", "a.name")
+        .with("bank_name", "t.bank_name")
+        .with("account_name", "t.account_name")
         .with("category_path", "c.path")
         .with("fts_match", "transactions_fts MATCH ?")
 }
 
-/// SQL context for one side of a transfer query.
+/// SQL context for one side of a transfer query, rooted at
+/// `transactions_view <alias>`.
 ///
-/// Filters render against the given table aliases (so we can render once for
-/// the from-side, once for the to-side). The FTS clause uses a side-scoped
+/// Filters render against the given alias (so we can render once for the
+/// from-side, once for the to-side). The FTS clause uses a side-scoped
 /// subquery rather than a top-level JOIN, because each transfer pair has two
 /// transactions and we want a match on either side to qualify the row.
-fn transfer_side_ctx(tx_alias: &str, account_alias: &str, bank_alias: &str) -> SqlContext {
+fn transfer_side_ctx(alias: &str) -> SqlContext {
     SqlContext::new()
-        .with("date", format!("{}.date", tx_alias))
-        .with("amount_cents", format!("{}.amount_cents", tx_alias))
-        .with("description", format!("{}.description", tx_alias))
-        .with("bank_name", format!("{}.name", bank_alias))
-        .with("account_name", format!("{}.name", account_alias))
+        .with("date", format!("{alias}.date"))
+        .with("amount_cents", format!("{alias}.amount_cents"))
+        .with("description", format!("{alias}.description"))
+        .with("bank_name", format!("{alias}.bank_name"))
+        .with("account_name", format!("{alias}.account_name"))
         .with(
             "fts_match",
             format!(
-                "{}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
-                tx_alias
+                "{alias}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)"
             ),
         )
 }
@@ -61,6 +103,14 @@ fn transaction_joins(parsed: &ParsedQuery) -> String {
         );
     }
     joins
+}
+
+/// Append `LIMIT ?` and its parameter when a limit is requested.
+fn push_limit(sql: &mut String, params: &mut Vec<Value>, limit: Option<usize>) {
+    if let Some(limit) = limit {
+        sql.push_str(" LIMIT ?");
+        params.push(Value::Integer(limit as i64));
+    }
 }
 
 pub struct TransactionStore {
@@ -189,26 +239,16 @@ impl TransactionStore {
         query: &ParsedQuery,
         limit: Option<usize>,
     ) -> Result<Vec<Transaction>> {
-        let mut sql = String::from(
-            "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
-                    t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
-             FROM transactions t
-             JOIN accounts a ON t.account_id = a.id
-             JOIN banks b ON a.bank_id = b.id",
-        );
+        let mut sql = format!("SELECT {} FROM transactions_view t", tx_cols("t"));
         sql.push_str(&transaction_joins(query));
-        sql.push_str(" WHERE a.deleted_at IS NULL");
+        sql.push_str(" WHERE t.account_deleted_at IS NULL");
 
         let rendered = query.render(&transaction_ctx());
         sql.push_str(&rendered.and_prefix());
         let mut params = rendered.params;
 
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
-
-        if let Some(limit) = limit {
-            sql.push_str(" LIMIT ?");
-            params.push(Value::Integer(limit as i64));
-        }
+        push_limit(&mut sql, &mut params, limit);
 
         log::debug!("query_transactions SQL: {} params: {:?}", sql, params);
 
@@ -554,7 +594,7 @@ impl TransactionStore {
             .into_iter()
             .filter_map(|cat| matcher.score(query, &cat.path).map(|score| (score, cat)))
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
         Ok(scored.into_iter().map(|(_, cat)| cat).collect())
     }
 
@@ -876,16 +916,15 @@ impl TransactionStore {
             ""
         };
         let sql = format!(
-            "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
-                    t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
-             FROM transactions t
-             JOIN accounts a ON t.account_id = a.id
+            "SELECT {}
+             FROM transactions_view t
              LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id
              WHERE t.amount_cents = ?{}
                AND t.id != ?
                AND tr.id IS NULL
-               AND a.deleted_at IS NULL
+               AND t.account_deleted_at IS NULL
              ORDER BY ABS(julianday(t.date) - julianday(?)), t.id",
+            tx_cols("t"),
             same_account_clause
         );
 
@@ -911,13 +950,7 @@ impl TransactionStore {
         query: &ParsedQuery,
         limit: Option<usize>,
     ) -> Result<Vec<Transaction>> {
-        let mut sql = String::from(
-            "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
-                    t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
-             FROM transactions t
-             JOIN accounts a ON t.account_id = a.id
-             JOIN banks b ON a.bank_id = b.id",
-        );
+        let mut sql = format!("SELECT {} FROM transactions_view t", tx_cols("t"));
         // FTS join (conditional on the parsed query)
         if query.fts_query().is_some() {
             sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
@@ -934,7 +967,7 @@ impl TransactionStore {
             sql.push_str(" LEFT JOIN categories c ON e.category_id = c.id");
         }
         sql.push_str(
-            " WHERE a.deleted_at IS NULL
+            " WHERE t.account_deleted_at IS NULL
                AND (e.category_id IS NULL OR e.id IS NULL)
                AND tr.id IS NULL",
         );
@@ -944,11 +977,7 @@ impl TransactionStore {
         let mut params = rendered.params;
 
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
-
-        if let Some(limit) = limit {
-            sql.push_str(" LIMIT ?");
-            params.push(Value::Integer(limit as i64));
-        }
+        push_limit(&mut sql, &mut params, limit);
 
         log::debug!(
             "get_uncategorised_transactions SQL: {} params: {:?}",
@@ -969,15 +998,10 @@ impl TransactionStore {
         query: &ParsedQuery,
         limit: Option<usize>,
     ) -> Result<Vec<TransactionWithEnrichment>> {
-        let mut sql = String::from(
-            "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
-                    t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id,
-                    e.id, e.transaction_id, e.category_id, e.category_source, e.category_confirmed,
-                    e.ai_confidence, e.created_at, e.updated_at,
-                    c.id, c.path, c.created_at
-             FROM transactions t
-             JOIN accounts a ON t.account_id = a.id
-             JOIN banks b ON a.bank_id = b.id",
+        let mut sql = format!(
+            "SELECT {}, {}, c.id, c.path, c.created_at FROM transactions_view t",
+            tx_cols("t"),
+            enrichment_cols("e"),
         );
         if query.fts_query().is_some() {
             sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
@@ -988,7 +1012,7 @@ impl TransactionStore {
              LEFT JOIN categories c ON e.category_id = c.id",
         );
         sql.push_str(
-            " WHERE a.deleted_at IS NULL
+            " WHERE t.account_deleted_at IS NULL
                AND e.category_source = 'ai'
                AND e.category_confirmed = 0",
         );
@@ -998,11 +1022,7 @@ impl TransactionStore {
         let mut params = rendered.params;
 
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
-
-        if let Some(limit) = limit {
-            sql.push_str(" LIMIT ?");
-            params.push(Value::Integer(limit as i64));
-        }
+        push_limit(&mut sql, &mut params, limit);
 
         log::debug!("get_pending_ai_reviews SQL: {} params: {:?}", sql, params);
 
@@ -1037,36 +1057,24 @@ impl TransactionStore {
         query: &ParsedQuery,
         limit: Option<usize>,
     ) -> Result<Vec<Transfer>> {
-        let mut sql = String::from(
-            "SELECT tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at
+        let mut sql = format!(
+            "SELECT {TRANSFER_COLS}
              FROM transfers tr
-             JOIN transactions ft ON ft.id = tr.from_transaction_id
-             JOIN accounts fa ON fa.id = ft.account_id
-             JOIN banks fb ON fb.id = fa.bank_id
-             JOIN transactions tt ON tt.id = tr.to_transaction_id
-             JOIN accounts ta ON ta.id = tt.account_id
-             JOIN banks tb ON tb.id = ta.bank_id
-            ",
+             JOIN transactions_view ft ON ft.id = tr.from_transaction_id
+             JOIN transactions_view tt ON tt.id = tr.to_transaction_id",
         );
 
         sql.push_str(
             " WHERE tr.confirmed = 0
-               AND fa.deleted_at IS NULL AND ta.deleted_at IS NULL",
+               AND ft.account_deleted_at IS NULL AND tt.account_deleted_at IS NULL",
         );
 
-        let rendered = query.render_transfers(
-            &transfer_side_ctx("ft", "fa", "fb"),
-            &transfer_side_ctx("tt", "ta", "tb"),
-        );
+        let rendered = query.render_transfers(&transfer_side_ctx("ft"), &transfer_side_ctx("tt"));
         sql.push_str(&rendered.and_prefix());
         let mut params = rendered.params;
 
         sql.push_str(" ORDER BY tr.created_at DESC");
-
-        if let Some(limit) = limit {
-            sql.push_str(" LIMIT ?");
-            params.push(Value::Integer(limit as i64));
-        }
+        push_limit(&mut sql, &mut params, limit);
 
         log::debug!(
             "get_pending_transfer_reviews SQL: {} params: {:?}",
@@ -1085,11 +1093,10 @@ impl TransactionStore {
     pub fn get_transaction_by_id(&self, id: i64) -> Result<Option<Transaction>> {
         self.conn
             .query_row(
-                "SELECT t.id, a.bank_id, t.account_id, t.date, t.description,
-                        t.amount_cents, t.balance_cents, t.hash, t.metadata, t.source_file, t.import_batch_id
-                 FROM transactions t
-                 JOIN accounts a ON t.account_id = a.id
-                 WHERE t.id = ?",
+                &format!(
+                    "SELECT {} FROM transactions_view t WHERE t.id = ?",
+                    tx_cols("t")
+                ),
                 [id],
                 parse_transaction,
             )
@@ -1105,40 +1112,27 @@ impl TransactionStore {
         query: &ParsedQuery,
         limit: Option<usize>,
     ) -> Result<Vec<TransferWithTransactions>> {
-        let mut sql = String::from(
-            "SELECT
-                tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at,
-                ft.id, fb.id, ft.account_id, ft.date, ft.description, ft.amount_cents, ft.balance_cents, ft.hash, ft.metadata, ft.source_file, ft.import_batch_id,
-                tt.id, tb.id, tt.account_id, tt.date, tt.description, tt.amount_cents, tt.balance_cents, tt.hash, tt.metadata, tt.source_file, tt.import_batch_id
+        let mut sql = format!(
+            "SELECT {TRANSFER_COLS}, {}, {}
              FROM transfers tr
-             JOIN transactions ft ON ft.id = tr.from_transaction_id
-             JOIN accounts fa ON fa.id = ft.account_id
-             JOIN banks fb ON fb.id = fa.bank_id
-             JOIN transactions tt ON tt.id = tr.to_transaction_id
-             JOIN accounts ta ON ta.id = tt.account_id
-             JOIN banks tb ON tb.id = ta.bank_id
-            ",
+             JOIN transactions_view ft ON ft.id = tr.from_transaction_id
+             JOIN transactions_view tt ON tt.id = tr.to_transaction_id",
+            tx_cols("ft"),
+            tx_cols("tt"),
         );
 
-        sql.push_str(" WHERE fa.deleted_at IS NULL AND ta.deleted_at IS NULL");
+        sql.push_str(" WHERE ft.account_deleted_at IS NULL AND tt.account_deleted_at IS NULL");
 
         if confirmed_only {
             sql.push_str(" AND tr.confirmed = 1");
         }
 
-        let rendered = query.render_transfers(
-            &transfer_side_ctx("ft", "fa", "fb"),
-            &transfer_side_ctx("tt", "ta", "tb"),
-        );
+        let rendered = query.render_transfers(&transfer_side_ctx("ft"), &transfer_side_ctx("tt"));
         sql.push_str(&rendered.and_prefix());
         let mut params = rendered.params;
 
         sql.push_str(" ORDER BY tr.created_at DESC");
-
-        if let Some(limit) = limit {
-            sql.push_str(" LIMIT ?");
-            params.push(Value::Integer(limit as i64));
-        }
+        push_limit(&mut sql, &mut params, limit);
 
         log::debug!(
             "list_transfers_with_transactions SQL: {} params: {:?}",
@@ -1258,20 +1252,13 @@ fn parse_date(date_str: &str) -> Result<NaiveDate> {
 mod tests {
     use super::*;
     use crate::TransferSource;
-    use crate::search::{
-        AccountFilter, AmountFilter, CategoryFilter, DateFilter, SearchConfig, parse,
-    };
+    use crate::search::{SearchConfig, parse};
     use std::fs;
     use tempfile::TempDir;
 
     /// Build a SearchConfig with all standard filters and no completion options.
     fn search_config() -> SearchConfig {
-        SearchConfig::new(vec![
-            Box::new(DateFilter),
-            Box::new(AmountFilter),
-            Box::new(AccountFilter::with_options(vec![])),
-            Box::new(CategoryFilter::with_options(vec![])),
-        ])
+        SearchConfig::standard(vec![], Some(vec![]))
     }
 
     /// Convenience: parse a query string with the standard search config.

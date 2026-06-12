@@ -5,23 +5,42 @@
 //! - Trait-based pluggable filters that return SQL directly
 //! - Context-aware key handling based on cursor position
 //!
+//! This doc comment is the canonical reference for the query syntax —
+//! CLAUDE.md carries only a summary.
+//!
 //! # Query Syntax
 //!
-//! - **Filters**: `name:value` where value has no whitespace
-//!   - `date:2024`, `date:2024-01`, `date:2024-01..2024-06`
-//!   - `amount:100`, `amount:>100`, `amount:50..200`
-//!   - `account:ING/Orange`, `account:ING|NAB`
-//!   - `category:Food`, `category:Food|Transport`
+//! **Filters** — `name:value` where the value has no unquoted whitespace:
 //!
-//! - **Regex**: `/pattern/flags` (e.g., `/coffee.*/i`)
+//! - `date:2024-01-15` — exact date; `date:2024-01` — entire month;
+//!   `date:2024` — entire year
+//! - `date:2024-01..2024-06` — range; `date:>2024-01` / `date:<2024-06` —
+//!   after/before
+//! - `amount:100` — precision-aware: any $100-something ($100.00–$100.99);
+//!   `amount:7.5` — any $7.5x; `amount:7.50` — exactly $7.50 (two decimals =
+//!   exact cents). Matches either sign.
+//! - `amount:>100` / `amount:<100` — cent-exact comparison;
+//!   `amount:50..200` — range with cent-exact endpoints
+//! - `account:St` — bank prefix; `account:ING/` — all accounts in a bank;
+//!   `account:ING/Orange` — bank + account prefix; `account:/Savings` — any
+//!   bank, account prefix; `account:"ING/Orange"|"St George/Sav"` — OR
+//! - `category:Food` — category contains; `category:Food|Transport` — OR
+//! - Quoting for values with spaces: `account:"ING/Orange Everyday"` or
+//!   `account:ING/Orange\ Everyday`
 //!
-//! - **FTS**: Everything else is full-text search
-//!   - `groceries` - simple term
-//!   - `coffee shop` - implicit AND
-//!   - `coffee OR tea` - native FTS5 OR
-//!   - `"exact phrase"` - phrase match
+//! **Regex** — `/pattern/flags` (e.g., `/coffee.*/i` for case-insensitive)
 //!
-//! - **Transition**: Type `~` at a word boundary to switch to fuzzy mode
+//! **FTS** — everything else is FTS5 full-text search:
+//! - `groceries` — simple term (matches word stems)
+//! - `coffee shop` — implicit AND
+//! - `coffee OR tea` — native FTS5 OR; `(coffee OR tea) breakfast` — grouping
+//! - `"exact phrase"` — phrase match; `coff*` — explicit prefix
+//! - Live typing adds an implicit `*` at the cursor for prefix matching
+//!
+//! **Transition** — end with ` ~` at a word boundary to switch to fuzzy mode
+//! while keeping the DB filters.
+//!
+//! Combined example: `date:2024-01 amount:>100 account:Chase/ groceries`
 
 mod context;
 mod filter;
