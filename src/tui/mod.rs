@@ -8,7 +8,8 @@ pub use search_bar::SearchBar;
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -41,6 +42,26 @@ pub fn run(store: TransactionStore) -> Result<()> {
     terminal.show_cursor()?;
 
     res
+}
+
+/// Translate a key event into the text-editing request shared by every
+/// text-input mode (DB search, fuzzy search, category rename). Mode-specific
+/// keys (Esc, Enter, Tab, arrows-as-navigation) are handled before falling
+/// back to this.
+fn text_edit_request(key: &KeyEvent) -> Option<InputRequest> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char(c) => Some(InputRequest::InsertChar(c)),
+        KeyCode::Backspace => Some(InputRequest::DeletePrevChar),
+        KeyCode::Delete => Some(InputRequest::DeleteNextChar),
+        KeyCode::Left if ctrl => Some(InputRequest::GoToPrevWord),
+        KeyCode::Left => Some(InputRequest::GoToPrevChar),
+        KeyCode::Right if ctrl => Some(InputRequest::GoToNextWord),
+        KeyCode::Right => Some(InputRequest::GoToNextChar),
+        KeyCode::Home => Some(InputRequest::GoToStart),
+        KeyCode::End => Some(InputRequest::GoToEnd),
+        _ => None,
+    }
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
@@ -90,10 +111,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                                 app.filter_autocomplete_prev();
                                 continue;
                             }
-                            KeyCode::Tab | KeyCode::Enter => {
-                                if app.filter_autocomplete_select() {
-                                    continue;
-                                }
+                            KeyCode::Tab | KeyCode::Enter if app.filter_autocomplete_select() => {
+                                continue;
                                 // If no selection made, fall through to normal behavior
                             }
                             KeyCode::Esc => {
@@ -120,36 +139,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         KeyCode::BackTab => app.previous_tab(),
                         KeyCode::Down => app.next(),
                         KeyCode::Up => app.previous(),
-                        KeyCode::Char(c) => {
-                            app.handle_db_search_input(InputRequest::InsertChar(c));
-                        }
-                        KeyCode::Backspace => {
-                            app.handle_db_search_input(InputRequest::DeletePrevChar);
-                        }
-                        KeyCode::Delete => {
-                            app.handle_db_search_input(InputRequest::DeleteNextChar);
-                        }
-                        KeyCode::Left => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_db_search_input(InputRequest::GoToPrevWord);
-                            } else {
-                                app.handle_db_search_input(InputRequest::GoToPrevChar);
+                        _ => {
+                            if let Some(req) = text_edit_request(&key) {
+                                app.handle_db_search_input(req);
                             }
                         }
-                        KeyCode::Right => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.handle_db_search_input(InputRequest::GoToNextWord);
-                            } else {
-                                app.handle_db_search_input(InputRequest::GoToNextChar);
-                            }
-                        }
-                        KeyCode::Home => {
-                            app.handle_db_search_input(InputRequest::GoToStart);
-                        }
-                        KeyCode::End => {
-                            app.handle_db_search_input(InputRequest::GoToEnd);
-                        }
-                        _ => {}
                     }
                 }
                 InputMode::FuzzySearch => match key.code {
@@ -165,36 +159,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     KeyCode::BackTab => app.previous_tab(),
                     KeyCode::Down => app.next(),
                     KeyCode::Up => app.previous(),
-                    KeyCode::Char(c) => {
-                        app.handle_fuzzy_search_input(InputRequest::InsertChar(c));
-                    }
-                    KeyCode::Backspace => {
-                        app.handle_fuzzy_search_input(InputRequest::DeletePrevChar);
-                    }
-                    KeyCode::Delete => {
-                        app.handle_fuzzy_search_input(InputRequest::DeleteNextChar);
-                    }
-                    KeyCode::Left => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            app.handle_fuzzy_search_input(InputRequest::GoToPrevWord);
-                        } else {
-                            app.handle_fuzzy_search_input(InputRequest::GoToPrevChar);
+                    _ => {
+                        if let Some(req) = text_edit_request(&key) {
+                            app.handle_fuzzy_search_input(req);
                         }
                     }
-                    KeyCode::Right => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            app.handle_fuzzy_search_input(InputRequest::GoToNextWord);
-                        } else {
-                            app.handle_fuzzy_search_input(InputRequest::GoToNextChar);
-                        }
-                    }
-                    KeyCode::Home => {
-                        app.handle_fuzzy_search_input(InputRequest::GoToStart);
-                    }
-                    KeyCode::End => {
-                        app.handle_fuzzy_search_input(InputRequest::GoToEnd);
-                    }
-                    _ => {}
                 },
                 InputMode::Category => match key.code {
                     KeyCode::Esc => app.cancel_input(),
@@ -208,36 +177,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 InputMode::CategoryEdit => match key.code {
                     KeyCode::Esc => app.cancel_input(),
                     KeyCode::Enter => app.confirm_category_rename(),
-                    KeyCode::Char(c) => {
-                        app.handle_category_edit_input(InputRequest::InsertChar(c));
-                    }
-                    KeyCode::Backspace => {
-                        app.handle_category_edit_input(InputRequest::DeletePrevChar);
-                    }
-                    KeyCode::Delete => {
-                        app.handle_category_edit_input(InputRequest::DeleteNextChar);
-                    }
-                    KeyCode::Left => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            app.handle_category_edit_input(InputRequest::GoToPrevWord);
-                        } else {
-                            app.handle_category_edit_input(InputRequest::GoToPrevChar);
+                    _ => {
+                        if let Some(req) = text_edit_request(&key) {
+                            app.handle_category_edit_input(req);
                         }
                     }
-                    KeyCode::Right => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            app.handle_category_edit_input(InputRequest::GoToNextWord);
-                        } else {
-                            app.handle_category_edit_input(InputRequest::GoToNextChar);
-                        }
-                    }
-                    KeyCode::Home => {
-                        app.handle_category_edit_input(InputRequest::GoToStart);
-                    }
-                    KeyCode::End => {
-                        app.handle_category_edit_input(InputRequest::GoToEnd);
-                    }
-                    _ => {}
                 },
                 InputMode::ConfirmMerge => match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
