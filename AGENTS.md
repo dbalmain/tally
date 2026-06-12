@@ -4,6 +4,11 @@ This document helps AI agents understand the codebase structure, conventions, an
 
 **Keep this file up-to-date.** When you add features, change architecture, or modify conventions, update this document before committing.
 
+**This file is a router, not a mirror.** Detailed reference docs live in module
+doc comments (single source of truth); this file tells you where to look and
+what conventions to follow. When you find a discrepancy, the code is right —
+fix this file.
+
 ## Commands
 
 ```bash
@@ -22,6 +27,25 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 - **Minimal UI** — TUI uses whitespace over borders, context over labels
 - **AI-assisted** — Categories and transfers can be suggested by AI, confirmed by user
 
+## Where to Make Changes
+
+| You want to change… | Look in |
+|---|---|
+| Colors, layout, table columns, details panels, popups | `src/tui/ui.rs` |
+| What a key does | `src/tui/mod.rs` (one match per `InputMode`; text editing shared via `text_edit_request`) |
+| App state, actions, data loading, caches | `src/tui/app/mod.rs` |
+| Tab definitions / per-tab data & dispatch | `src/tui/app/tabs.rs` |
+| DB-search / fuzzy-search behaviour in the app | `src/tui/app/search.rs` |
+| Category actions (assign, rename, merge, AI review) | `src/tui/app/categories.rs` |
+| Transfer actions (mark, confirm, delete) | `src/tui/app/transfers.rs` |
+| Search-bar widget (rendering, cursor-context keys, autocomplete) | `src/tui/search_bar.rs` |
+| SQL queries / store methods | `src/store.rs` |
+| Schema, FTS index, `transactions_view` | `src/db.rs` |
+| Search syntax, parsing, SQL rendering | `src/search/` (syntax reference: `src/search/mod.rs` doc comment) |
+| A single filter's behaviour (date, amount, account, category) | `src/search/filters/<name>.rs` |
+| Import script discovery/execution | `src/import.rs` |
+| Core data structures | `src/types.rs` |
+
 ## Architecture
 
 ```
@@ -29,24 +53,32 @@ src/
 ├── main.rs                 # CLI entry point, argument parsing
 ├── lib.rs                  # Public API exports
 ├── types.rs                # Core data structures
-├── db.rs                   # SQLite schema and initialization
+├── db.rs                   # SQLite schema, transactions_view, FTS index
 ├── store.rs                # TransactionStore: all database operations
 ├── import.rs               # Import script execution and file discovery
+├── logging.rs              # File logger (TALLY_LOG=debug, ~/.local/share/tally/)
+├── error.rs                # Error types
 ├── search/                 # Search query system
-│   ├── mod.rs              # Module entry, public exports
+│   ├── mod.rs              # Module entry + CANONICAL QUERY SYNTAX REFERENCE
 │   ├── tokenize.rs         # Raw token splitter (filter/regex/fts/whitespace)
-│   ├── parse.rs            # Token → ParsedQuery + cursor context
+│   ├── parse.rs            # Token → ParsedQuery + SearchConfig (filter registry)
 │   ├── query.rs            # ParsedQuery / QueryPart / Span types
 │   ├── render.rs           # SqlContext + ParsedQuery::render → WHERE+params
 │   ├── filter.rs           # Filter trait
 │   ├── filters/            # Built-in filters (date, amount, account, category)
 │   ├── context.rs          # CursorContext for key handling
 │   └── fuzzy.rs            # Nucleo-based fuzzy matcher
-├── error.rs                # Error types
 └── tui/
-    ├── mod.rs              # TUI entry point, event loop, key handling
-    ├── app.rs              # Application state, actions, data loading
-    └── ui.rs               # Rendering functions for all views
+    ├── mod.rs              # TUI entry point, event loop, key dispatch
+    ├── ui.rs               # Rendering: layout, tables, details, popups
+    ├── search_bar.rs       # Search bar widget (context-aware keys, autocomplete)
+    ├── filtered_list.rs    # FilteredList<T>: items + fuzzy-filtered view
+    └── app/
+        ├── mod.rs          # App struct, construction, caches, navigation
+        ├── tabs.rs         # Tab/TodoSubTab enums + TabLists (per-tab dispatch)
+        ├── search.rs       # TabSearchState + search/autocomplete actions
+        ├── categories.rs   # Category popup, AI review, rename/merge
+        └── transfers.rs    # Transfer marking, confirmation, deletion
 
 exports/                    # Bank export files (user data, gitignored)
 ├── {BankName}/
@@ -102,6 +134,13 @@ Transaction {
 - `imported_files` — `id, account_id, path, content_hash, imported_at, import_batch_id`
 - `import_batches` — `id, started_at, completed_at`
 
+**Read-side view:**
+- `transactions_view` — a transaction joined to its account and bank
+  (`bank_id, bank_name, account_name, account_deleted_at` extra columns). All
+  store read queries go through this view so the join exists in one place.
+  It's dropped and recreated on every open, so changing it in `db.rs` needs no
+  migration.
+
 ## Design Decisions
 
 ### Money as Cents (i64)
@@ -118,40 +157,98 @@ All monetary values are integers in cents to avoid floating-point errors.
 Banks/accounts that disappear from `exports/` are soft-deleted (`deleted_at` timestamp) to preserve historical data.
 
 ### No Migrations
-Schema changes require deleting `tally.db` and re-importing. This keeps the codebase simple for a personal tool.
+Schema changes require deleting `tally.db` and re-importing. This keeps the
+codebase simple for a personal tool. (Views are exempt: they're recreated on
+every open.)
 
-## TUI Architecture
+## TUI Conventions
 
-### State (app.rs)
-- `App` holds all UI state: current tab, selected index, input mode, cached data
-- Data is loaded on startup and refreshed after mutations
-- `banks` and `accounts` are cached as HashMaps for O(1) name lookups
+These are the patterns every TUI change should follow — they exist so error
+handling and data flow stay uniform:
 
-### Rendering (ui.rs)
-- `draw()` is the entry point, dispatches to tab-specific functions
-- Each list view has a corresponding details panel at the bottom
-- Details panels show contextual info (transfer partner OR category, not both)
-- Popups rendered last to overlay content
+- **Mutations go through `App::try_mutation`** — it surfaces DB errors via the
+  error popup and returns `bool` so callers can gate `refresh_data()` on
+  success. Never call a mutating store method directly and ignore the result.
+- **Mid-flight loads go through `App::load_or_show`** — same error surfacing,
+  returns `T::default()` on failure.
+- **After any mutation, call `app.refresh_data()`** — reloads the current
+  tab, rebuilds caches and category counts.
+- **Lists are `FilteredList<T>`** — the DB query result is the item set; the
+  fuzzy filter is a view over it (`refilter`/`show_all`). Indices the user
+  sees are *visible* indices.
+- **Per-tab anything goes through `TabLists`** (`app/tabs.rs`) — don't add
+  `match app.current_tab` to other files; add a method to `TabLists` instead.
+- **Rendering never queries the DB** — `ui.rs` reads `App` state and the
+  caches (`get_cached_transaction/category/transfer`).
+- **Tables use `draw_scrolled_table`** (`ui.rs`) — it owns scroll-offset math;
+  the per-view closure owns row content and styling.
 
-### Key Handling (mod.rs)
-- `InputMode` enum controls which keys are active
-- Normal mode: navigation, tab switching, action triggers
-- Category mode: text input with fuzzy-matched suggestions
-- Transfer modes: candidate selection and confirmation
-
-## TUI Aesthetics
+### Aesthetics
 
 - **Whitespace over borders** — No box borders on tables or panels
 - **Context over labels** — Tab names provide context, no redundant headers
 - **Row-level styling** — Use `Row::style()` for backgrounds, not per-cell `.bg()`
-- **Color coding:**
-  - Red: negative amounts, "from" in transfers
-  - Green: positive amounts, "to" in transfers
-  - Yellow: categories, pending items
-  - Cyan: transfer indicators, confidence scores
-  - DarkGray: labels, disabled items
+- **Color coding:** Red = negative amounts / transfer "from"; Green = positive
+  amounts / transfer "to"; Yellow = categories, pending items; Cyan = transfer
+  indicators, confidence scores; DarkGray = labels, disabled items
+
+## Recipes
+
+### Adding a New Search Filter
+
+1. Implement `Filter` in a new file under `src/search/filters/`. `parse(value)`
+   returns SQL with placeholders like `{date}`, `{bank_name}`, `{category_path}`
+   — never bare column references.
+2. Declare placeholder dependencies in `requires()` so the renderer knows which
+   contexts can apply the filter.
+3. Register in `src/search/filters/mod.rs` and in `SearchConfig::standard`
+   (`src/search/parse.rs`) — the single registration point; every search bar
+   picks it up from there.
+4. If the filter needs a column not yet in the standard contexts, add it to
+   `transactions_view` in `src/db.rs` and to `transaction_ctx()` /
+   `transfer_side_ctx()` in `src/store.rs`. If the placeholder requires a
+   JOIN, extend `transaction_joins()` to splice it in when
+   `parsed.uses_placeholder("your_placeholder")`.
+5. Document the syntax in the `src/search/mod.rs` doc comment.
+
+Store query methods don't change; the search bar UI is filter-agnostic.
+
+### Adding a New Tab (or Todo Subtab)
+
+1. `src/tui/app/tabs.rs` — add the enum variant (+ `all()`/`title()`), add a
+   `FilteredList` field to `TabLists`, and extend each `TabLists` method:
+   `load`, `reload`, `len`, `apply_fuzzy`, and (only if the tab's rows are
+   plain transactions) `transaction_at` / `position_of_tx`.
+2. `src/tui/app/search.rs` — decide the tab's filters in
+   `build_search_config`.
+3. `src/tui/ui.rs` — add a `draw_…` function (use `draw_scrolled_table`) and
+   dispatch to it from `draw()`.
+4. If new data feeds the caches, extend `rebuild_tx_caches` in
+   `src/tui/app/mod.rs`.
+5. Update the key-binding/tab docs in this file.
+
+### Adding a Column to Transactions
+
+1. `src/db.rs` — add the column to the `transactions` table and to
+   `transactions_view` (keep the view's leading columns in
+   `parse_transaction_at_offset` order).
+2. `src/types.rs` — add the field to `Transaction`.
+3. `src/store.rs` — add the column name to `tx_cols()` and parse it in
+   `parse_transaction_at_offset` (order matters); extend `insert_transaction`.
+4. Delete `tally.db` and re-import (no migrations).
+
+### Adding a Key Binding
+
+1. `src/tui/mod.rs` — add to the right `InputMode` arm. Text-editing keys are
+   shared via `text_edit_request`; only add mode-specific keys.
+2. Implement the action as an `App` method in the matching feature file
+   (`app/categories.rs`, `app/transfers.rs`, `app/search.rs`, or `app/mod.rs`).
+3. Update the key-binding tables below.
 
 ## TUI Key Bindings
+
+These tables document intent; `src/tui/mod.rs` is the implementation. Update
+both together.
 
 ### Global (Normal Mode)
 | Key | Action |
@@ -192,64 +289,25 @@ Schema changes require deleting `tally.db` and re-importing. This keeps the code
 | `y` / `Enter` | Confirm |
 | `n` / `Esc` | Cancel |
 
-## Search Syntax
+## Search Syntax (summary)
 
-### DB Search (`/`)
-Filters are pushed to SQL for efficient querying. Syntax:
+Full reference: the `src/search/mod.rs` doc comment (canonical).
 
-**Filters:**
-- `date:2024-01-15` — Exact date
-- `date:2024-01` — Entire month
-- `date:2024` — Entire year
-- `date:2024-01..2024-06` — Date range
-- `date:>2024-01` / `date:<2024-06` — After/before
-- `amount:100` — Any $100-something ($100.00–$100.99), precision-aware
-- `amount:7.5` — Any $7.5x ($7.50–$7.59)
-- `amount:7.50` — Exactly $7.50 (two decimals = exact cents)
-- `amount:>100` / `amount:<100` — Greater/less than $100.00 (cent-exact)
-- `amount:50..200` — Amount range, endpoints cent-exact
-- `category:Food` — Category contains
-- `category:Food|Transport` — Multiple categories (OR)
-
-**Account filter (Bank/Account format):**
-- `account:St` — Bank prefix "St" (matches "St George", "Street Financial")
-- `account:ING/` — All accounts in ING bank
-- `account:ING/Orange` — ING accounts starting with "Orange"
-- `account:/Savings` — Any bank, account prefix "Savings"
-- `account:"ING/Orange"|"St George/Sav"` — Multiple patterns (OR)
-
-**Text search (FTS5 passthrough):**
-- `groceries` — FTS5 full-text search (matches word stems)
-- `coffee shop` — Implicit AND (both terms must match)
-- `coffee OR tea` — Native FTS5 OR syntax
-- `(coffee OR tea) breakfast` — Grouping with OR
-- `"coffee shop"` — Exact phrase match
-- `coff*` — Explicit prefix match
-- Live typing adds implicit `*` at cursor for prefix matching
-
-**Regex matching:**
-- `/coffee.*/i` — Regex (case-insensitive with `i` flag)
-- `/Coffee/` — Regex (case-sensitive)
-
-**Quoting (for values with spaces):**
-- `account:"ING/Orange Everyday"`
-- `account:ING/Orange\ Everyday`
-
-**Combined example:**
-```
-date:2024-01 amount:>100 account:Chase/ groceries
-```
-
-**Transition to fuzzy:** End with ` ~` to switch to fuzzy mode while keeping DB filters.
-
-### Fuzzy Search (`~`)
-In-memory fuzzy matching on loaded results using nucleo. Type any characters and matches are scored by how well they match (not just substring).
+- **DB search (`/`)** pushes filters to SQL: `date:2024-01..2024-06`,
+  `amount:>100` (precision-aware for bare values), `account:ING/Orange`
+  (Bank/Account prefixes, `|` for OR), `category:Food|Transport`. Bare words
+  are FTS5 full-text search (`coffee OR tea`, `"exact phrase"`, `coff*`);
+  `/pattern/i` is regex. End with ` ~` to switch to fuzzy mode keeping the
+  DB filters.
+- **Fuzzy search (`~`)** is in-memory nucleo scoring over the loaded rows.
 
 ## Common Store Operations
 
 All read methods take a `ParsedQuery` plus an optional `limit`. Build a query
 with `search::parse(&config, input, cursor).0`, or pass `ParsedQuery::empty()`
-for "no filters".
+for "no filters". Read queries run against `transactions_view`; the column
+lists come from `tx_cols(alias)` / `enrichment_cols(alias)` / `TRANSFER_COLS`,
+whose order must match the `parse_*_at_offset` row parsers.
 
 ```rust
 // Querying (all take &ParsedQuery + Option<usize> limit)
@@ -269,22 +327,6 @@ store.find_matching_transfer_candidates(tx) -> Vec<Transaction>
 store.create_transfer(from_id, to_id, source, confirmed)
 store.get_transfer_for_transaction(tx_id) -> Option<Transfer>
 ```
-
-## Adding a New Search Filter
-
-1. Implement `Filter` in a new file under `src/search/filters/`. `parse(value)`
-   returns SQL with placeholders like `{date}`, `{bank_name}`, `{category_path}`
-   — never bare column references.
-2. Declare placeholder dependencies in `requires()` so the renderer knows which
-   contexts can apply the filter.
-3. Register in `src/search/filters/mod.rs` and any `SearchConfig` constructors
-   (currently `tui::app::App::new`).
-4. If the filter needs a column not yet in the standard contexts, add it to
-   `transaction_ctx()` / `transfer_side_ctx()` in `src/store.rs`. If the
-   placeholder requires a JOIN, extend `transaction_joins()` to splice it in
-   when `parsed.uses_placeholder("your_placeholder")`.
-
-That's it — store query methods don't change, the search bar UI is filter-agnostic.
 
 ## Import Script Contract
 
