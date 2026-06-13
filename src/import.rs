@@ -48,6 +48,57 @@ pub(crate) fn run_import_script(
     Ok(transactions)
 }
 
+/// Locate an executable `pull` script for an account.
+///
+/// A pull script fetches transactions from an external source (e.g. an API)
+/// rather than parsing a dropped CSV. Account-level scripts override
+/// bank-level ones, mirroring [`find_import_script`].
+pub(crate) fn find_pull_script(
+    exports_dir: &Path,
+    bank: &str,
+    account: &str,
+) -> Option<std::path::PathBuf> {
+    let account_script = exports_dir.join(bank).join(account).join("pull");
+    if account_script.exists() {
+        return Some(account_script);
+    }
+
+    let bank_script = exports_dir.join(bank).join("pull");
+    if bank_script.exists() {
+        return Some(bank_script);
+    }
+
+    None
+}
+
+/// Run a `pull` script with no CSV argument, returning the transactions it
+/// emits as JSON on stdout.
+///
+/// The script runs with its account directory as the working directory so it
+/// can read/write any per-account state (e.g. an incremental-pull log) there.
+pub(crate) fn run_pull_script(
+    script_path: &Path,
+    account_dir: &Path,
+) -> Result<Vec<RawTransaction>> {
+    let abs_script = std::fs::canonicalize(script_path)?;
+    let abs_dir = std::fs::canonicalize(account_dir)?;
+
+    let output = Command::new(&abs_script).current_dir(&abs_dir).output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::ImportFailed(format!(
+            "Pull script {} failed with status {}: {}",
+            script_path.display(),
+            output.status,
+            stderr
+        )));
+    }
+
+    let transactions: Vec<RawTransaction> = serde_json::from_slice(&output.stdout)?;
+    Ok(transactions)
+}
+
 pub(crate) fn compute_hash(
     date: &str,
     description: &str,

@@ -82,12 +82,17 @@ src/
         ├── categories.rs   # Category popup, AI review, rename/merge
         └── transfers.rs    # Transfer marking, confirmation, deletion
 
+tools/                      # Generic, checked-in helper tools (no user data)
+└── pocketsmith-pull        # PocketSmith → Tally puller (see Import Sources)
+
 exports/                    # Bank export files (user data, gitignored)
 ├── {BankName}/
 │   ├── import              # Bank-level import script
 │   └── {AccountName}/
 │       ├── import          # Account-level import script (overrides bank)
-│       └── *.csv           # Raw bank exports
+│       ├── *.csv           # Raw bank exports (CSV-drop import)
+│       ├── pull            # Account-level pull script (API-fetch import)
+│       └── pull.log        # Per-account incremental-pull log (generated)
 
 tally.db                    # SQLite database (gitignored)
 ```
@@ -330,9 +335,18 @@ store.create_transfer(from_id, to_id, source, confirmed)
 store.get_transfer_for_transaction(tx_id) -> Option<Transfer>
 ```
 
-## Import Script Contract
+## Import Sources
 
-Scripts receive CSV path as argument, output JSON to stdout:
+An account folder under `exports/` is fed by either (or both) of two
+mechanisms, both discovered and run by `refresh()` in `src/store.rs`
+(`import_account_transactions`). Both emit the same JSON; dedup is by
+`(account_id, hash)`, so re-runs are idempotent.
+
+### CSV-drop (`import` script)
+
+`import` receives a CSV path as its argument and outputs a JSON array on
+stdout. Each CSV is content-hashed and skipped once imported
+(`imported_files`). Account-level scripts override bank-level.
 
 ```json
 [{
@@ -344,6 +358,31 @@ Scripts receive CSV path as argument, output JSON to stdout:
   "metadata": {}
 }]
 ```
+
+### API-pull (`pull` script)
+
+`pull` takes **no argument** and outputs the same JSON array on stdout. It runs
+with the account folder as its working directory, so it owns its own
+incremental state. There is no file-hash skip — overlap is expected and deduped
+by `hash`, so pulls should set a stable `hash` (e.g. the source row's id).
+Account-level overrides bank-level (`find_pull_script` / `run_pull_script` in
+`src/import.rs`).
+
+**PocketSmith** is wired up via `tools/pocketsmith-pull` (generic, checked-in,
+no account data — safe to publish; needs `POCKETSMITH_KEY`):
+
+- `tools/pocketsmith-pull sync` — lists your accounts and creates
+  `exports/<Bank>/<Account>/` folders, each with a generated `pull` shim that
+  calls `pocketsmith-pull account <id>`. Folders can be freely renamed
+  afterwards: the shim keys off the account id, not the folder name, and
+  re-running `sync` skips any account whose id already has a shim anywhere
+  under `exports/` (so renames survive a re-sync).
+- `pull account <id>` — fetches transactions, emits Tally JSON, and appends a
+  `<timestamp>\t<from>\t<to>\t<count>` line to `pull.log`. The next pull reads
+  the last `to` date and re-fetches from `to − 14 days` (overlap for
+  out-of-order rows). First run (no log) fetches full history.
+- PocketSmith's category is parked in `metadata.pocketsmith_category` as an
+  autocategorisation hint — it is **not** applied to Tally's category system.
 
 ## Planned Features
 

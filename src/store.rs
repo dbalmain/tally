@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 use crate::db::{build_searchable_text, init_db};
 use crate::import::{
-    compute_hash, find_csv_files, find_import_script, hash_file, run_import_script,
+    compute_hash, find_csv_files, find_import_script, find_pull_script, hash_file,
+    run_import_script, run_pull_script,
 };
 use crate::search::{ParsedQuery, SqlContext};
 use crate::{
-    Account, Bank, Category, CategorySource, Error, FuzzyMatcher, RefreshReport, Result,
-    Transaction, TransactionEnrichment, TransactionWithEnrichment, Transfer, TransferSource,
+    Account, Bank, Category, CategorySource, Error, FuzzyMatcher, RawTransaction, RefreshReport,
+    Result, Transaction, TransactionEnrichment, TransactionWithEnrichment, Transfer, TransferSource,
     TransferWithTransactions,
 };
 
@@ -367,64 +368,101 @@ impl TransactionStore {
         batch_id: i64,
         report: &mut RefreshReport,
     ) -> Result<()> {
-        let script = find_import_script(&self.exports_dir, bank_name, account_name);
-        let script = match script {
-            Some(s) => s,
-            None => {
-                return Ok(());
-            }
-        };
-
         let account_dir = self.exports_dir.join(bank_name).join(account_name);
-        let csv_files = find_csv_files(&account_dir)?;
 
-        for csv_file in csv_files {
-            let relative_path = csv_file
+        // CSV drop import: parse each unseen CSV with the account's import script.
+        if let Some(script) = find_import_script(&self.exports_dir, bank_name, account_name) {
+            let csv_files = find_csv_files(&account_dir)?;
+
+            for csv_file in csv_files {
+                let relative_path = csv_file
+                    .strip_prefix(&self.exports_dir)
+                    .unwrap_or(&csv_file)
+                    .to_string_lossy()
+                    .to_string();
+
+                let content_hash = hash_file(&csv_file)?;
+
+                if self.is_file_imported(account_id, &content_hash)? {
+                    continue;
+                }
+
+                let transactions = run_import_script(&script, &csv_file)?;
+                report.files_processed += 1;
+                self.insert_raw_transactions(
+                    account_id,
+                    transactions,
+                    &relative_path,
+                    batch_id,
+                    report,
+                )?;
+
+                self.mark_file_imported(account_id, &relative_path, &content_hash, batch_id)?;
+            }
+        }
+
+        // Pull import: fetch transactions directly from an external source. The
+        // pull script owns incremental windowing; we rely on the
+        // (account_id, hash) uniqueness constraint to dedupe re-pulled overlap.
+        if let Some(script) = find_pull_script(&self.exports_dir, bank_name, account_name) {
+            let relative_path = script
                 .strip_prefix(&self.exports_dir)
-                .unwrap_or(&csv_file)
+                .unwrap_or(&script)
                 .to_string_lossy()
                 .to_string();
 
-            let content_hash = hash_file(&csv_file)?;
-
-            if self.is_file_imported(account_id, &content_hash)? {
-                continue;
-            }
-
-            let transactions = run_import_script(&script, &csv_file)?;
+            let transactions = run_pull_script(&script, &account_dir)?;
             report.files_processed += 1;
+            self.insert_raw_transactions(
+                account_id,
+                transactions,
+                &relative_path,
+                batch_id,
+                report,
+            )?;
+        }
 
-            for raw_tx in transactions {
-                let date = parse_date(&raw_tx.date)?;
-                let hash = raw_tx.hash.clone().unwrap_or_else(|| {
-                    compute_hash(
-                        &raw_tx.date,
-                        &raw_tx.description,
-                        raw_tx.amount_cents,
-                        raw_tx.balance_cents,
-                    )
-                });
+        Ok(())
+    }
 
-                let inserted = self.insert_transaction(
-                    account_id,
-                    &date,
+    /// Insert a batch of raw transactions, computing a fallback hash and
+    /// tallying added/skipped counts in `report`.
+    fn insert_raw_transactions(
+        &self,
+        account_id: i64,
+        transactions: Vec<RawTransaction>,
+        source_file: &str,
+        batch_id: i64,
+        report: &mut RefreshReport,
+    ) -> Result<()> {
+        for raw_tx in transactions {
+            let date = parse_date(&raw_tx.date)?;
+            let hash = raw_tx.hash.clone().unwrap_or_else(|| {
+                compute_hash(
+                    &raw_tx.date,
                     &raw_tx.description,
                     raw_tx.amount_cents,
                     raw_tx.balance_cents,
-                    &hash,
-                    &raw_tx.metadata,
-                    &relative_path,
-                    batch_id,
-                )?;
+                )
+            });
 
-                if inserted {
-                    report.transactions_added += 1;
-                } else {
-                    report.transactions_skipped += 1;
-                }
+            let inserted = self.insert_transaction(
+                account_id,
+                &date,
+                &raw_tx.description,
+                raw_tx.amount_cents,
+                raw_tx.balance_cents,
+                &hash,
+                &raw_tx.metadata,
+                source_file,
+                batch_id,
+            )?;
+
+            if inserted {
+                report.transactions_added += 1;
+            } else {
+                report.transactions_skipped += 1;
             }
-
-            self.mark_file_imported(account_id, &relative_path, &content_hash, batch_id)?;
         }
 
         Ok(())
