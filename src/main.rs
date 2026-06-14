@@ -1,6 +1,11 @@
 use std::path::{Path, PathBuf};
 use tally::TransactionStore;
 
+struct CliArgs {
+    collection: Option<PathBuf>,
+    command: Option<String>,
+}
+
 fn main() {
     // Initialize file logging: TALLY_LOG=debug cargo run -- tui
     // Logs to ~/.local/share/tally/tally.<date>.log
@@ -9,15 +14,41 @@ fn main() {
         Err(e) => eprintln!("Warning: failed to initialize logging: {}", e),
     }
 
-    let args: Vec<String> = std::env::args().collect();
-    let command = args.get(1).map(|s| s.as_str());
+    let args = parse_cli_args(std::env::args().skip(1));
+    let collection_root = args
+        .collection
+        .or_else(|| std::env::var_os("FM_COLLECTION").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
 
-    let exports_dir = PathBuf::from("exports");
-    let db_path = PathBuf::from("tally.db");
+    let exports_dir = collection_root.join("exports");
+    let db_path = collection_root.join("tally.db");
 
-    match command {
+    match args.command.as_deref() {
         Some("tui") | Some("--tui") => run_tui(&db_path, &exports_dir),
         _ => run_refresh(&db_path, &exports_dir),
+    }
+}
+
+fn parse_cli_args(args: impl IntoIterator<Item = String>) -> CliArgs {
+    let mut args = args.into_iter();
+    let mut collection = None;
+    let mut command = None;
+
+    while let Some(arg) = args.next() {
+        if arg == "--collection" {
+            collection = Some(PathBuf::from(
+                args.next().expect("--collection requires a path"),
+            ));
+        } else if let Some(path) = arg.strip_prefix("--collection=") {
+            collection = Some(PathBuf::from(path));
+        } else if command.is_none() {
+            command = Some(arg);
+        }
+    }
+
+    CliArgs {
+        collection,
+        command,
     }
 }
 
@@ -58,5 +89,34 @@ fn run_tui(db_path: &Path, exports_dir: &Path) {
     if let Err(e) = tally::tui::run(store) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_collection_before_command() {
+        let args = parse_cli_args(["--collection", "/tmp/finances", "tui"].map(String::from));
+
+        assert_eq!(args.collection, Some(PathBuf::from("/tmp/finances")));
+        assert_eq!(args.command.as_deref(), Some("tui"));
+    }
+
+    #[test]
+    fn parses_collection_after_command() {
+        let args = parse_cli_args(["--tui", "--collection=finances"].map(String::from));
+
+        assert_eq!(args.collection, Some(PathBuf::from("finances")));
+        assert_eq!(args.command.as_deref(), Some("--tui"));
+    }
+
+    #[test]
+    fn collection_flag_does_not_change_unknown_command_behavior() {
+        let args = parse_cli_args(["refresh", "--collection", "finances"].map(String::from));
+
+        assert_eq!(args.collection, Some(PathBuf::from("finances")));
+        assert_eq!(args.command.as_deref(), Some("refresh"));
     }
 }

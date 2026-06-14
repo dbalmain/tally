@@ -18,6 +18,7 @@ cargo build           # Build
 cargo test            # Run tests
 cargo run             # Refresh transactions from exports/
 cargo run -- tui      # Launch terminal UI (--tui also accepted)
+cargo run -- --collection PATH  # Use PATH as the collection root (or set FM_COLLECTION)
 ```
 
 ## Project Goals

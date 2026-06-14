@@ -10,8 +10,8 @@ use crate::import::{
 use crate::search::{ParsedQuery, SqlContext};
 use crate::{
     Account, Bank, Category, CategorySource, Error, FuzzyMatcher, RawTransaction, RefreshReport,
-    Result, Transaction, TransactionEnrichment, TransactionWithEnrichment, Transfer, TransferSource,
-    TransferWithTransactions,
+    Result, Transaction, TransactionEnrichment, TransactionWithEnrichment, Transfer,
+    TransferSource, TransferWithTransactions,
 };
 
 /// Column list for selecting a full `Transaction` from `transactions_view`

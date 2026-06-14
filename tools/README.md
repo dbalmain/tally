@@ -1,8 +1,8 @@
 # tools
 
 Generic, checked-in helper tools for Tally. Nothing here contains
-account-specific data — all per-account state (folders, scripts, logs) lives
-under the gitignored `exports/` directory.
+account-specific data — all per-account state (folders, scripts, logs) lives in
+the separate collection repository configured by `FM_ROOT`.
 
 ## pocketsmith-pull
 
@@ -19,28 +19,59 @@ Tally's import format.
    export POCKETSMITH_KEY=your_key_here
    ```
 
+3. Set `FM_ROOT` to the root of the private repository containing your finance
+   collections:
+
+   ```bash
+   export FM_ROOT="$HOME/fm"
+   ```
+
+4. Add a `pocketsmith.toml` whitelist to each collection that should receive
+   PocketSmith accounts. Collections are immediate subdirectories of
+   `FM_ROOT`:
+
+   ```toml
+   # $FM_ROOT/personal/pocketsmith.toml
+   accounts = [
+     123456,
+     789012,
+   ]
+   ```
+
+   Account ids may appear in only one collection. The parser accepts integer
+   ids, comments, multi-line arrays, and trailing commas; no TOML gem is
+   required.
+
 ### Usage
 
 ```bash
-# Discover your accounts and scaffold exports/<Bank>/<Account>/ folders,
-# each with a generated `pull` shim. Safe to re-run: accounts already wired
-# up (under any folder name) are skipped.
+# Show PocketSmith account ids and their whitelist assignments.
+tools/pocketsmith-pull list
+
+# Scaffold a generated pull shim for each whitelisted account at
+# $FM_ROOT/<collection>/exports/<Bank>/<Account>/pull. Safe to re-run:
+# accounts already wired up anywhere under FM_ROOT are skipped.
 tools/pocketsmith-pull sync
 
-# Import everything into tally.db. Tally runs each folder's `pull` shim
-# during refresh.
-cargo run
+# Import one collection. Tally runs each account folder's `pull` shim.
+cargo run -- --collection "$FM_ROOT/personal"
 ```
 
 You can rename the generated folders however you like — the shims key off the
 PocketSmith account id, not the folder name, and a re-`sync` won't recreate a
-renamed folder.
+renamed folder. Accounts not listed in any `pocketsmith.toml` are reported and
+skipped.
 
 ### How it works
 
-- `sync` lists your accounts via the API and writes a `pull` shim into each
-  `exports/<Bank>/<Account>/` folder. Duplicate account names are
-  disambiguated with the account id.
+- `list` lists accounts from the API as
+  `<id>  <bank> / <account name>  -> <collection or (unassigned)>`, making it
+  easy to find ids for the collection whitelists.
+- `sync` lists accounts via the API and writes a `pull` shim for each
+  whitelisted id into
+  `$FM_ROOT/<collection>/exports/<Bank>/<Account>/`. Duplicate account names
+  are disambiguated with the account id. An id assigned to multiple
+  collections is an error.
 - Each `pull` shim calls `pocketsmith-pull account <id>`, which Tally executes
   during refresh. It emits Tally-import JSON on stdout and appends a line to
   `pull.log` in the folder:

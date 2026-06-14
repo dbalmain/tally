@@ -6,15 +6,16 @@
 #
 # This tool is GENERIC and contains no account-specific data, so it is safe to
 # check in / publish. All per-account state (folders, pull shims, logs) is
-# created under exports/, which Tally keeps gitignored.
+# created under collections in FM_ROOT.
 #
 # Authentication: set POCKETSMITH_KEY to a PocketSmith developer key
 # (Profile → Security & integrations → Manage developer keys).
 #
 # Usage:
-#   tools/pocketsmith-pull sync          Discover accounts, create
-#                                        exports/<Bank>/<Account>/ folders, and
-#                                        drop a `pull` shim into each.
+#   tools/pocketsmith-pull list          List PocketSmith accounts and their
+#                                        configured FM_ROOT collection.
+#   tools/pocketsmith-pull sync          Discover accounts and create a `pull`
+#                                        shim for each whitelisted account.
 #   tools/pocketsmith-pull account <ID>  Emit Tally-import JSON for one
 #                                        PocketSmith transaction-account id on
 #                                        stdout. Run from the account folder;
@@ -96,6 +97,52 @@ def fetch_accounts
   api_get_all("#{API_BASE}/users/#{me['id']}/accounts")
 end
 
+def fm_root
+  root = ENV['FM_ROOT']
+  if root.nil? || root.strip.empty?
+    abort 'FM_ROOT is not set (finance collection root required).'
+  end
+
+  root = File.expand_path(root)
+  abort "FM_ROOT is not a directory: #{root}" unless File.directory?(root)
+
+  root
+end
+
+def collections(root)
+  Dir.children(root).sort.filter_map do |name|
+    dir = File.join(root, name)
+    config = File.join(dir, 'pocketsmith.toml')
+    [name, config] if File.directory?(dir) && File.file?(config)
+  end
+end
+
+def parse_account_ids(path)
+  contents = File.read(path).gsub(/#.*$/, '')
+  match = contents.match(/^\s*accounts\s*=\s*\[(.*?)\]/m)
+  abort "#{path}: missing accounts = [...]" unless match
+
+  list = match[1]
+  unless list.gsub(/\d+|[\s,]/, '').empty?
+    abort "#{path}: accounts must contain only integer ids"
+  end
+
+  list.scan(/\d+/).map(&:to_i)
+end
+
+def account_collections(root)
+  collections(root).each_with_object({}) do |(collection, config), account_map|
+    parse_account_ids(config).each do |id|
+      existing = account_map[id]
+      if existing && existing != collection
+        abort "account #{id} appears in both #{existing}/pocketsmith.toml " \
+              "and #{collection}/pocketsmith.toml"
+      end
+      account_map[id] = collection
+    end
+  end
+end
+
 # Build [bank_folder, account_folder, txn_account_id] for every account,
 # disambiguating duplicate names with the (unique, stable) txn-account id.
 def account_targets(accounts)
@@ -115,9 +162,9 @@ def account_targets(accounts)
 end
 
 # Transaction-account ids that already have a pull shim somewhere under
-# exports/, regardless of folder name — so renamed folders survive a re-sync.
-def synced_ids(exports)
-  Dir.glob(File.join(exports, '**', 'pull')).each_with_object({}) do |shim, ids|
+# FM_ROOT, regardless of folder name — so renamed folders survive a re-sync.
+def synced_ids(root)
+  Dir.glob(File.join(root, '**', 'pull')).each_with_object({}) do |shim, ids|
     next unless File.file?(shim)
 
     id = File.read(shim)[/\baccount\s+(\d+)\b/, 1]
@@ -125,20 +172,37 @@ def synced_ids(exports)
   end
 end
 
+def cmd_list
+  root = fm_root
+  configured = account_collections(root)
+
+  account_targets(fetch_accounts).each do |bank, name, id|
+    collection = configured[id] || '(unassigned)'
+    puts "#{id}  #{bank} / #{name}  -> #{collection}"
+  end
+end
+
 def cmd_sync
-  exports = File.expand_path('exports', repo_root)
+  root = fm_root
+  configured = account_collections(root)
   tool = File.expand_path(__FILE__)
-  existing = synced_ids(exports)
+  existing = synced_ids(root)
 
   account_targets(fetch_accounts).each do |bank, name, id|
     next if id.nil?
 
-    if (shim = existing[id])
-      warn "skipped #{relative(shim, exports)} (account #{id} already synced)"
+    collection = configured[id]
+    unless collection
+      warn "account #{id} (#{bank}/#{name}) not in any pocketsmith.toml; skipping"
       next
     end
 
-    dir = File.join(exports, bank, name)
+    if (shim = existing[id])
+      warn "skipped #{relative(shim, root)} (account #{id} already synced)"
+      next
+    end
+
+    dir = File.join(root, collection, 'exports', bank, name)
     FileUtils.mkdir_p(dir)
 
     shim = File.join(dir, 'pull')
@@ -148,18 +212,14 @@ def cmd_sync
       exec ruby "#{tool}" account #{id}
     SH
     File.chmod(0o755, shim)
+    existing[id] = shim
 
-    warn "synced #{bank}/#{name} (transaction account #{id})"
+    warn "synced #{collection}/exports/#{bank}/#{name} (transaction account #{id})"
   end
 end
 
 def relative(path, base)
   path.sub(%r{\A#{Regexp.escape(base)}/}, '')
-end
-
-def repo_root
-  # tools/ sits at the repo root next to exports/.
-  File.expand_path('..', File.dirname(File.expand_path(__FILE__)))
 end
 
 LOG_FILE = 'pull.log'
@@ -237,12 +297,16 @@ def cmd_account(id)
   end
 end
 
-case ARGV[0]
-when 'sync'
-  cmd_sync
-when 'account'
-  cmd_account(ARGV[1])
-else
-  warn 'usage: pocketsmith-pull {sync | account <transaction_account_id>}'
-  exit 1
+if $PROGRAM_NAME == __FILE__
+  case ARGV[0]
+  when 'list'
+    cmd_list
+  when 'sync'
+    cmd_sync
+  when 'account'
+    cmd_account(ARGV[1])
+  else
+    warn 'usage: pocketsmith-pull {list | sync | account <transaction_account_id>}'
+    exit 1
+  end
 end
