@@ -11,6 +11,15 @@ pub enum Error {
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("TOML parse error: {0}")]
+    Toml(#[from] toml::de::Error),
+
+    #[error("HTTP error: {0}")]
+    Http(String),
+
+    #[error("Invalid embedding: {0}")]
+    InvalidEmbedding(String),
+
     #[error("Import script failed: {0}")]
     ImportFailed(String),
 

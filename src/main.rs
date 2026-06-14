@@ -25,6 +25,7 @@ fn main() {
 
     match args.command.as_deref() {
         Some("tui") | Some("--tui") => run_tui(&db_path, &exports_dir),
+        Some("classify") => run_classify(&collection_root, &db_path, &exports_dir),
         _ => run_refresh(&db_path, &exports_dir),
     }
 }
@@ -90,6 +91,18 @@ fn run_tui(db_path: &Path, exports_dir: &Path) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
     }
+}
+
+fn run_classify(collection_root: &Path, db_path: &Path, exports_dir: &Path) {
+    let mut store =
+        TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
+    let report =
+        tally::classify::classify(&mut store, collection_root).expect("Failed to classify");
+
+    println!("Classification complete:");
+    println!("  Tier 0 suggestions: {}", report.tier0);
+    println!("  Tier 1 suggestions: {}", report.tier1);
+    println!("  Unclassified: {}", report.unclassified);
 }
 
 #[cfg(test)]

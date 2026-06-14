@@ -18,6 +18,7 @@ cargo build           # Build
 cargo test            # Run tests
 cargo run             # Refresh transactions from exports/
 cargo run -- tui      # Launch terminal UI (--tui also accepted)
+cargo run -- classify # Suggest categories with local Tier 0/1 classification
 cargo run -- --collection PATH  # Use PATH as the collection root (or set FM_COLLECTION)
 ```
 
@@ -55,6 +56,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 src/
 ├── main.rs                 # CLI entry point, argument parsing
 ├── lib.rs                  # Public API exports
+├── classify.rs             # Local Tier 0/1 category classification
 ├── types.rs                # Core data structures
 ├── db.rs                   # SQLite schema, transactions_view, FTS index
 ├── store.rs                # TransactionStore: all database operations
@@ -136,6 +138,7 @@ Transaction {
 **Enrichment tables:**
 - `categories` — `id, path, created_at`
 - `transaction_enrichments` — `id, transaction_id, category_id, category_source, category_confirmed, ai_confidence, created_at, updated_at`
+- `description_embeddings` — persistent `(normalised description, model)` embedding cache
 - `transfers` — `id, from_transaction_id, to_transaction_id, source, confirmed, created_at`
 
 **Import tracking:**
@@ -150,6 +153,20 @@ Transaction {
   migration.
 
 ## Design Decisions
+
+### AI Classification Pipeline
+
+`tally classify` trains only from confirmed category enrichments in the active
+collection. Tier 0 reuses the majority category for an exact normalized
+description match. Tier 1 embeds remaining descriptions with the collection's
+configured Ollama model and applies the nearest confirmed example when cosine
+similarity meets `tier1_min_similarity`. Suggestions use source `ai`, remain
+unconfirmed, and never replace an existing enrichment.
+
+Configuration comes from `[classify]` in `<collection_root>/collection.toml`.
+This phase uses `embed_model`, `ollama_url`, and `tier1_min_similarity`; missing
+files use `embeddinggemma`, `http://localhost:11434`, and `0.80`. Embeddings are
+cached in SQLite by normalized description and model.
 
 ### Money as Cents (i64)
 All monetary values are integers in cents to avoid floating-point errors.
@@ -166,8 +183,9 @@ Banks/accounts that disappear from `exports/` are soft-deleted (`deleted_at` tim
 
 ### No Migrations
 Schema changes require deleting `tally.db` and re-importing. This keeps the
-codebase simple for a personal tool. (Views are exempt: they're recreated on
-every open.)
+codebase simple for a personal tool. Views and additive cache tables are
+exempt: views are recreated on every open, and caches use
+`CREATE TABLE IF NOT EXISTS` because they do not change core stored data.
 
 ## TUI Conventions
 
@@ -324,11 +342,16 @@ store.get_uncategorised_transactions(&query, limit) -> Vec<Transaction>
 store.get_pending_ai_reviews(&query, limit) -> Vec<TransactionWithEnrichment>
 store.get_pending_transfer_reviews(&query, limit) -> Vec<Transfer>
 store.list_transfers_with_transactions(confirmed_only, &query, limit) -> Vec<TransferWithTransactions>
+store.get_confirmed_examples() -> Vec<ConfirmedCategoryExample>
 
 // Categories
 store.get_or_create_category(path) -> i64
 store.set_category(tx_id, cat_id, source, confirmed, confidence)
 store.get_transaction_category(tx_id) -> Option<Category>
+
+// Embedding cache
+store.get_cached_embedding(norm, model) -> Option<Vec<f32>>
+store.put_cached_embedding(norm, model, embedding)
 
 // Transfers
 store.find_matching_transfer_candidates(tx) -> Vec<Transaction>

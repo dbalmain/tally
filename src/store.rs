@@ -1,5 +1,6 @@
 use chrono::{NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params, types::Value};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use crate::db::{build_searchable_text, init_db};
@@ -9,9 +10,9 @@ use crate::import::{
 };
 use crate::search::{ParsedQuery, SqlContext};
 use crate::{
-    Account, Bank, Category, CategorySource, Error, FuzzyMatcher, RawTransaction, RefreshReport,
-    Result, Transaction, TransactionEnrichment, TransactionWithEnrichment, Transfer,
-    TransferSource, TransferWithTransactions,
+    Account, Bank, Category, CategorySource, ConfirmedCategoryExample, Error, FuzzyMatcher,
+    RawTransaction, RefreshReport, Result, Transaction, TransactionEnrichment,
+    TransactionWithEnrichment, Transfer, TransferSource, TransferWithTransactions,
 };
 
 /// Column list for selecting a full `Transaction` from `transactions_view`
@@ -779,6 +780,82 @@ impl TransactionStore {
         self.conn.execute(
             "UPDATE transaction_enrichments SET category_confirmed = 1, updated_at = ? WHERE transaction_id = ?",
             params![Utc::now().to_rfc3339(), transaction_id],
+        )?;
+        Ok(())
+    }
+
+    /// Return all user-confirmed category assignments as classifier examples.
+    pub fn get_confirmed_examples(&self) -> Result<Vec<ConfirmedCategoryExample>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.description, c.id, c.path
+             FROM transactions_view t
+             JOIN transaction_enrichments e ON t.id = e.transaction_id
+             JOIN categories c ON c.id = e.category_id
+             WHERE e.category_confirmed = 1
+             ORDER BY t.id",
+        )?;
+        let examples = stmt
+            .query_map([], |row| {
+                Ok(ConfirmedCategoryExample {
+                    description: row.get(0)?,
+                    category_id: row.get(1)?,
+                    category_path: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(examples)
+    }
+
+    /// Load a cached embedding encoded as little-endian f32 values.
+    pub fn get_cached_embedding(&self, norm: &str, model: &str) -> Result<Option<Vec<f32>>> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT vec FROM description_embeddings WHERE norm = ? AND model = ?",
+                params![norm, model],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        if bytes.is_empty() || bytes.len() % size_of::<f32>() != 0 {
+            return Err(Error::InvalidEmbedding(format!(
+                "cached vector for model {model:?} has {} bytes",
+                bytes.len()
+            )));
+        }
+
+        let embedding = bytes
+            .chunks_exact(size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        Ok(Some(embedding))
+    }
+
+    /// Store an embedding as little-endian f32 values.
+    pub fn put_cached_embedding(
+        &mut self,
+        norm: &str,
+        model: &str,
+        embedding: &[f32],
+    ) -> Result<()> {
+        if embedding.is_empty() {
+            return Err(Error::InvalidEmbedding(
+                "cannot cache an empty vector".to_string(),
+            ));
+        }
+
+        let bytes: Vec<u8> = embedding
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        self.conn.execute(
+            "INSERT INTO description_embeddings (norm, model, vec)
+             VALUES (?, ?, ?)
+             ON CONFLICT(norm, model) DO UPDATE SET vec = excluded.vec",
+            params![norm, model, bytes],
         )?;
         Ok(())
     }
@@ -1767,6 +1844,45 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
             .get_uncategorised_transactions(&q("date:2025"), None)
             .unwrap();
         assert!(txs.is_empty());
+    }
+
+    #[test]
+    fn confirmed_examples_include_only_confirmed_assignments() {
+        let (_t, store) = setup_rich_fixture();
+        let examples = store.get_confirmed_examples().unwrap();
+
+        assert_eq!(examples.len(), 3);
+        assert!(examples.iter().any(|example| {
+            example.description == "Grocery Store" && example.category_path == "Food/Groceries"
+        }));
+        assert!(
+            !examples
+                .iter()
+                .any(|example| example.description == "Coffee Bean")
+        );
+    }
+
+    #[test]
+    fn embedding_cache_round_trips_by_norm_and_model() {
+        let temp = TempDir::new().unwrap();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+
+        store
+            .put_cached_embedding("coffee shop", "model-a", &[1.0, -2.5, 3.25])
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_cached_embedding("coffee shop", "model-a")
+                .unwrap(),
+            Some(vec![1.0, -2.5, 3.25])
+        );
+        assert_eq!(
+            store
+                .get_cached_embedding("coffee shop", "model-b")
+                .unwrap(),
+            None
+        );
     }
 
     // ----- get_pending_ai_reviews -----

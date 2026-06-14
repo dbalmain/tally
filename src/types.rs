@@ -71,6 +71,14 @@ pub struct RefreshReport {
     pub transactions_skipped: usize,
 }
 
+/// Confirmed category training example used by the local classifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedCategoryExample {
+    pub description: String,
+    pub category_id: i64,
+    pub category_path: String,
+}
+
 /// Hierarchical category (e.g., "Food/Groceries").
 #[derive(Debug, Clone)]
 pub struct Category {
