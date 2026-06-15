@@ -15,11 +15,9 @@ sha2 = "0.10.9"
 thiserror = "2.0.18"
 nucleo-matcher = "0.3"
 regex = "1"
-toml = "0.8"
 tui-input = "0.11"
 log = { version = "0.4", features = ["std"] }
 tracing-appender = "0.2"
-ureq = { version = "2.12", features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"

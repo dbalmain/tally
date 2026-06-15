@@ -75,6 +75,8 @@ pub struct RefreshReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmedCategoryExample {
     pub description: String,
+    pub amount_cents: i64,
+    pub date: NaiveDate,
     pub category_id: i64,
     pub category_path: String,
 }

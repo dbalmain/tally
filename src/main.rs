@@ -100,8 +100,9 @@ fn run_classify(collection_root: &Path, db_path: &Path, exports_dir: &Path) {
         tally::classify::classify(&mut store, collection_root).expect("Failed to classify");
 
     println!("Classification complete:");
-    println!("  Tier 0 suggestions: {}", report.tier0);
-    println!("  Tier 1 suggestions: {}", report.tier1);
+    println!("  Exact-amount suggestions: {}", report.exact);
+    println!("  Recurring-biller suggestions: {}", report.recurring);
+    println!("  Model suggestions: {}", report.model);
     println!("  Unclassified: {}", report.unclassified);
 }
 

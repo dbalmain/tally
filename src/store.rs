@@ -1,6 +1,5 @@
 use chrono::{NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params, types::Value};
-use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use crate::db::{build_searchable_text, init_db};
@@ -787,77 +786,40 @@ impl TransactionStore {
     /// Return all user-confirmed category assignments as classifier examples.
     pub fn get_confirmed_examples(&self) -> Result<Vec<ConfirmedCategoryExample>> {
         let mut stmt = self.conn.prepare(
-            "SELECT t.description, c.id, c.path
+            "SELECT t.description, t.amount_cents, t.date, c.id, c.path
              FROM transactions_view t
              JOIN transaction_enrichments e ON t.id = e.transaction_id
              JOIN categories c ON c.id = e.category_id
              WHERE e.category_confirmed = 1
              ORDER BY t.id",
         )?;
-        let examples = stmt
+        let rows = stmt
             .query_map([], |row| {
-                Ok(ConfirmedCategoryExample {
-                    description: row.get(0)?,
-                    category_id: row.get(1)?,
-                    category_path: row.get(2)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(examples)
-    }
-
-    /// Load a cached embedding encoded as little-endian f32 values.
-    pub fn get_cached_embedding(&self, norm: &str, model: &str) -> Result<Option<Vec<f32>>> {
-        let bytes = self
-            .conn
-            .query_row(
-                "SELECT vec FROM description_embeddings WHERE norm = ? AND model = ?",
-                params![norm, model],
-                |row| row.get::<_, Vec<u8>>(0),
+        let examples = rows
+            .into_iter()
+            .map(
+                |(description, amount_cents, date, category_id, category_path)| {
+                    Ok(ConfirmedCategoryExample {
+                        description,
+                        amount_cents,
+                        date: NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                            .map_err(|_| Error::InvalidDate(date))?,
+                        category_id,
+                        category_path,
+                    })
+                },
             )
-            .optional()?;
-
-        let Some(bytes) = bytes else {
-            return Ok(None);
-        };
-        if bytes.is_empty() || bytes.len() % size_of::<f32>() != 0 {
-            return Err(Error::InvalidEmbedding(format!(
-                "cached vector for model {model:?} has {} bytes",
-                bytes.len()
-            )));
-        }
-
-        let embedding = bytes
-            .chunks_exact(size_of::<f32>())
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
-        Ok(Some(embedding))
-    }
-
-    /// Store an embedding as little-endian f32 values.
-    pub fn put_cached_embedding(
-        &mut self,
-        norm: &str,
-        model: &str,
-        embedding: &[f32],
-    ) -> Result<()> {
-        if embedding.is_empty() {
-            return Err(Error::InvalidEmbedding(
-                "cannot cache an empty vector".to_string(),
-            ));
-        }
-
-        let bytes: Vec<u8> = embedding
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect();
-        self.conn.execute(
-            "INSERT INTO description_embeddings (norm, model, vec)
-             VALUES (?, ?, ?)
-             ON CONFLICT(norm, model) DO UPDATE SET vec = excluded.vec",
-            params![norm, model, bytes],
-        )?;
-        Ok(())
+            .collect::<Result<Vec<_>>>()?;
+        Ok(examples)
     }
 
     /// Rename a category. Returns error if new name already exists.
@@ -1853,35 +1815,15 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
 
         assert_eq!(examples.len(), 3);
         assert!(examples.iter().any(|example| {
-            example.description == "Grocery Store" && example.category_path == "Food/Groceries"
+            example.description == "Grocery Store"
+                && example.amount_cents == -8500
+                && example.date == NaiveDate::from_ymd_opt(2024, 2, 20).unwrap()
+                && example.category_path == "Food/Groceries"
         }));
         assert!(
             !examples
                 .iter()
                 .any(|example| example.description == "Coffee Bean")
-        );
-    }
-
-    #[test]
-    fn embedding_cache_round_trips_by_norm_and_model() {
-        let temp = TempDir::new().unwrap();
-        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
-
-        store
-            .put_cached_embedding("coffee shop", "model-a", &[1.0, -2.5, 3.25])
-            .unwrap();
-
-        assert_eq!(
-            store
-                .get_cached_embedding("coffee shop", "model-a")
-                .unwrap(),
-            Some(vec![1.0, -2.5, 3.25])
-        );
-        assert_eq!(
-            store
-                .get_cached_embedding("coffee shop", "model-b")
-                .unwrap(),
-            None
         );
     }
 

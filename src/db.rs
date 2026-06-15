@@ -66,13 +66,6 @@ CREATE TABLE IF NOT EXISTS transaction_enrichments (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS description_embeddings (
-    norm TEXT NOT NULL,
-    model TEXT NOT NULL,
-    vec BLOB NOT NULL,
-    PRIMARY KEY(norm, model)
-);
-
 CREATE TABLE IF NOT EXISTS transfers (
     id INTEGER PRIMARY KEY,
     from_transaction_id INTEGER NOT NULL UNIQUE REFERENCES transactions(id),
@@ -193,7 +186,6 @@ mod tests {
         assert!(tables.contains(&"banks".to_string()));
         assert!(tables.contains(&"accounts".to_string()));
         assert!(tables.contains(&"transactions".to_string()));
-        assert!(tables.contains(&"description_embeddings".to_string()));
         assert!(tables.contains(&"imported_files".to_string()));
         assert!(tables.contains(&"transactions_fts".to_string()));
     }
