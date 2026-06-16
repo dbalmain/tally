@@ -5,12 +5,19 @@
 - vim-style navigation
   - number transactions and go to transaction
   - repeat command. e.g. 10j to go down 10 rows
+  - leap navigation would be even better
 - delete any part of `date:` and the whole query part goes
 - error indication in search. Highlight bad search query parts red
 - you need to close and re-open tally to load new categories
-- show sum it debit/credit column
-- MCP server
+- show sum in debit/credit column
 - filters
 - add `filter:` to query
 - export as CSV or JSON
 - range grammar should utilise `..` and `..=` only. 
+
+- fix search in category view
+- give a nicer error when running tally in an empty/non-compatible directory
+- better transfer identification
+- when categorising a transaction, if the matching algorithm matches a number of other unconfirmed transactions, offer to apply it
+- in the category view, toggle transaction view on the right
+- Bug it search - type "searchterm~"

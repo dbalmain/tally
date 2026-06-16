@@ -296,6 +296,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `t` | Mark as transfer |
 | `d` | Delete transfer |
 | `Enter` | Confirm (AI review, transfer review) |
+| `Esc` | Clear active search (fuzzy first, then DB) |
 | `?` | Show keybind popover |
 | `Alt-?` | Toggle bottom key-hint bar |
 

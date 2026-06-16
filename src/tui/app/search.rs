@@ -133,14 +133,29 @@ impl App {
         self.selected_index = 0;
     }
 
-    pub fn clear_db_search(&mut self) {
+    /// Clear the DB-search state without touching the input mode.
+    fn clear_db_state(&mut self) {
         let state = self.current_search_state_mut();
         state.search_bar.reset();
         state.db_search_active = false;
         state.selected_index = 0;
         self.selected_index = 0;
         self.reload_current_tab();
+    }
+
+    pub fn clear_db_search(&mut self) {
+        self.clear_db_state();
         self.input_mode = InputMode::Normal;
+    }
+
+    /// Clear whichever search is active from Normal mode, staying in Normal.
+    /// Fuzzy clears first so a second Esc clears the DB search beneath it.
+    pub fn clear_search(&mut self) {
+        if self.fuzzy_search_active() {
+            self.clear_fuzzy_state();
+        } else if self.db_search_active() {
+            self.clear_db_state();
+        }
     }
 
     pub fn confirm_db_search(&mut self) {
@@ -219,8 +234,8 @@ impl App {
         self.apply_fuzzy_filter();
     }
 
-    pub fn clear_fuzzy_search(&mut self) {
-        let db_search_active = self.db_search_active();
+    /// Clear the fuzzy-search state without touching the input mode.
+    fn clear_fuzzy_state(&mut self) {
         let state = self.current_search_state_mut();
         state.fuzzy_search_input.reset();
         state.fuzzy_pattern.clear();
@@ -228,6 +243,11 @@ impl App {
         state.selected_index = 0;
         self.selected_index = 0;
         self.apply_fuzzy_filter();
+    }
+
+    pub fn clear_fuzzy_search(&mut self) {
+        let db_search_active = self.db_search_active();
+        self.clear_fuzzy_state();
         // Return to DB search mode if it's still active, else normal
         if db_search_active {
             self.input_mode = InputMode::DbSearch;

@@ -44,6 +44,7 @@ pub enum Act {
     MarkTransfer,
     DeleteTransfer,
     Confirm,
+    ClearSearch,
 }
 
 #[derive(Debug)]
@@ -86,6 +87,17 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     use Trigger::*;
 
     let mut out = Vec::new();
+
+    if app.db_search_active() || app.fuzzy_search_active() {
+        out.push(b(
+            &[Code(KeyCode::Esc)],
+            "Esc",
+            "clear search",
+            true,
+            true,
+            ClearSearch,
+        ));
+    }
 
     if app.selected_transaction().is_some() {
         out.push(b(&[Char('c')], "c", "categorise", true, true, Categorise));
@@ -236,6 +248,7 @@ fn run_normal(app: &mut App, act: Act) {
             app.confirm_ai_category();
             app.confirm_transfer_review();
         }
+        Act::ClearSearch => app.clear_search(),
     }
 }
 
