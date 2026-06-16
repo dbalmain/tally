@@ -61,13 +61,22 @@ fn run_refresh(db_path: &Path, exports_dir: &Path) {
     let report = store.refresh().expect("Failed to refresh");
 
     println!("Refresh complete:");
-    println!("  Banks added: {}", report.banks_added);
-    println!("  Banks deleted: {}", report.banks_deleted);
-    println!("  Accounts added: {}", report.accounts_added);
-    println!("  Accounts deleted: {}", report.accounts_deleted);
-    println!("  Files processed: {}", report.files_processed);
-    println!("  Transactions added: {}", report.transactions_added);
-    println!("  Transactions skipped: {}", report.transactions_skipped);
+    let mut shown = false;
+    for (label, count) in [
+        ("Banks added", report.banks_added),
+        ("Banks deleted", report.banks_deleted),
+        ("Accounts added", report.accounts_added),
+        ("Accounts deleted", report.accounts_deleted),
+        ("Transactions added", report.transactions_added),
+    ] {
+        if count > 0 {
+            println!("  {label}: {count}");
+            shown = true;
+        }
+    }
+    if !shown {
+        println!("  Nothing new.");
+    }
 
     println!("\nBanks:");
     for bank in store.list_banks().unwrap() {
