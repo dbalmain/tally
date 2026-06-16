@@ -1,5 +1,6 @@
 mod app;
 mod filtered_list;
+mod keymap;
 pub mod search_bar;
 mod ui;
 
@@ -66,39 +67,47 @@ fn text_edit_request(key: &KeyEvent) -> Option<InputRequest> {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
+        if app.should_quit {
+            return Ok(());
+        }
+
         terminal.draw(|f| ui::draw(f, app))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+
+            if app.keybind_help_open {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?')) {
+                    app.keybind_help_open = false;
+                }
+                continue;
+            }
+
+            if key.code == KeyCode::Char('?') && key.modifiers.contains(KeyModifiers::ALT) {
+                app.hints_visible = !app.hints_visible;
+                continue;
+            }
+
+            if key.code == KeyCode::Char('?')
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && matches!(
+                    app.input_mode,
+                    InputMode::Normal
+                        | InputMode::ConfirmMerge
+                        | InputMode::TransferPending
+                        | InputMode::TransferNoMatch
+                )
+            {
+                app.keybind_help_open = true;
+                continue;
+            }
+
             match app.input_mode {
-                InputMode::Normal => match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Char('j') | KeyCode::Down => app.next(),
-                    KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                    KeyCode::Tab => {
-                        if key.modifiers.contains(KeyModifiers::SHIFT) {
-                            app.previous_tab();
-                        } else {
-                            app.next_tab();
-                        }
-                    }
-                    KeyCode::BackTab => app.previous_tab(),
-                    KeyCode::Char('[') => app.previous_subtab(),
-                    KeyCode::Char(']') => app.next_subtab(),
-                    KeyCode::Char('/') => app.start_db_search(),
-                    KeyCode::Char('~') => app.start_fuzzy_search(),
-                    KeyCode::Char('c') => app.start_category_edit(),
-                    KeyCode::Char('e') => app.start_category_rename(),
-                    KeyCode::Char('t') => app.start_transfer_mark(),
-                    KeyCode::Char('d') => app.delete_transfer(),
-                    KeyCode::Enter => {
-                        app.confirm_ai_category();
-                        app.confirm_transfer_review();
-                    }
-                    _ => {}
-                },
+                InputMode::Normal => keymap::dispatch_normal(app, key),
                 InputMode::DbSearch => {
                     // Handle autocomplete popup navigation when active
                     if app.filter_autocomplete_active() {
@@ -205,6 +214,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         app.cancel_input();
                     }
                 }
+            }
+
+            if app.should_quit {
+                return Ok(());
             }
         }
     }

@@ -36,7 +36,8 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 | You want to change… | Look in |
 |---|---|
 | Colors, layout, table columns, details panels, popups | `src/tui/ui.rs` |
-| What a key does | `src/tui/mod.rs` (one match per `InputMode`; text editing shared via `text_edit_request`) |
+| Normal-mode key dispatch / footer hints / `?` popover | `src/tui/keymap.rs` (`normal_binds` is the single source of truth) |
+| Modal-mode key dispatch | `src/tui/mod.rs` (one match per modal `InputMode`; update curated hints in `src/tui/keymap.rs` too) |
 | App state, actions, data loading, caches | `src/tui/app/mod.rs` |
 | Tab definitions / per-tab data & dispatch | `src/tui/app/tabs.rs` |
 | DB-search / fuzzy-search behaviour in the app | `src/tui/app/search.rs` |
@@ -75,6 +76,7 @@ src/
 │   └── fuzzy.rs            # Nucleo-based fuzzy matcher
 └── tui/
     ├── mod.rs              # TUI entry point, event loop, key dispatch
+    ├── keymap.rs           # Normal-mode key table + footer/help hint text
     ├── ui.rs               # Rendering: layout, tables, details, popups
     ├── search_bar.rs       # Search bar widget (context-aware keys, autocomplete)
     ├── filtered_list.rs    # FilteredList<T>: items + fuzzy-filtered view
@@ -203,6 +205,9 @@ handling and data flow stay uniform:
   caches (`get_cached_transaction/category/transfer`).
 - **Tables use `draw_scrolled_table`** (`ui.rs`) — it owns scroll-offset math;
   the per-view closure owns row content and styling.
+- **Normal-mode keys live in `keymap.rs`** — `normal_binds(app)` drives
+  dispatch, the bottom key-hint bar, and the `?` keybind popover. The hint bar
+  starts visible each launch; `Alt-?` toggles it for the session.
 
 ### Aesthetics
 
@@ -260,16 +265,21 @@ Store query methods don't change; the search bar UI is filter-agnostic.
 
 ### Adding a Key Binding
 
-1. `src/tui/mod.rs` — add to the right `InputMode` arm. Text-editing keys are
-   shared via `text_edit_request`; only add mode-specific keys.
-2. Implement the action as an `App` method in the matching feature file
+1. Implement the action as an `App` method in the matching feature file
    (`app/categories.rs`, `app/transfers.rs`, `app/search.rs`, or `app/mod.rs`).
-3. Update the key-binding tables below.
+2. For Normal mode, add one `Bind` row to `normal_binds` in `src/tui/keymap.rs`
+   (plus an `Act` variant and `run_normal` arm if needed). Footer and popover
+   text come from that same row.
+3. For a modal mode, update the matching `InputMode` arm in `src/tui/mod.rs`
+   and its curated `footer_hints` / `help_lines` arm in `src/tui/keymap.rs`.
+   Text-editing keys are shared via `text_edit_request`; only add mode-specific
+   keys.
+4. Update the key-binding tables below.
 
 ## TUI Key Bindings
 
-These tables document intent; `src/tui/mod.rs` is the implementation. Update
-both together.
+These tables document intent. Normal mode is implemented by `src/tui/keymap.rs`;
+modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 
 ### Global (Normal Mode)
 | Key | Action |
@@ -286,6 +296,8 @@ both together.
 | `t` | Mark as transfer |
 | `d` | Delete transfer |
 | `Enter` | Confirm (AI review, transfer review) |
+| `?` | Show keybind popover |
+| `Alt-?` | Toggle bottom key-hint bar |
 
 ### Search Modes (DB and Fuzzy)
 | Key | Action |
@@ -295,6 +307,7 @@ both together.
 | `↑` / `↓` | Navigate results |
 | `Tab` | Switch tabs (keeps search active) |
 | Standard text editing | Left/Right, Ctrl+Left/Right, Home/End, Backspace, Delete |
+| `Alt-?` | Toggle bottom key-hint bar |
 
 ### Category Popup
 | Key | Action |
@@ -303,12 +316,25 @@ both together.
 | `Enter` | Confirm selection |
 | `↑` / `↓` | Navigate suggestions |
 | Type | Filter categories |
+| `Alt-?` | Toggle bottom key-hint bar |
 
 ### Confirmation Popups
 | Key | Action |
 |-----|--------|
 | `y` / `Enter` | Confirm |
 | `n` / `Esc` | Cancel |
+| `?` | Show keybind popover |
+| `Alt-?` | Toggle bottom key-hint bar |
+
+### Transfer Popups
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Navigate candidates |
+| `T` / `Enter` | Link selected transfer candidate |
+| `t` | Re-search from the selected transaction |
+| `Esc` | Cancel or dismiss |
+| `?` | Show keybind popover |
+| `Alt-?` | Toggle bottom key-hint bar |
 
 ## Search Syntax (summary)
 

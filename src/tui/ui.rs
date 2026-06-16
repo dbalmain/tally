@@ -9,6 +9,7 @@ use ratatui::{
 use crate::{Transaction, TransactionWithEnrichment, TransferWithTransactions};
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
+use super::keymap::{self, HelpLine};
 
 const DETAILS_HEIGHT: u16 = 8;
 
@@ -31,7 +32,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     if has_fuzzy_search {
         constraints.push(Constraint::Length(1));
     }
+    let show_hints = app.hints_visible && !app.keybind_help_open;
     constraints.push(Constraint::Min(0));
+    if show_hints {
+        constraints.push(Constraint::Length(1));
+    }
     let chunks = Layout::vertical(constraints).split(f.area());
 
     let mut idx = 0;
@@ -60,6 +65,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Todo => draw_todo(f, app, content),
     }
 
+    if show_hints {
+        draw_key_hints(f, app, chunks[idx + 1]);
+    }
+
     if app.input_mode == InputMode::Category {
         draw_category_popup(f, app);
     }
@@ -85,6 +94,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if let Some(ref msg) = app.error_message {
         draw_error_popup(f, msg);
+    }
+
+    if app.keybind_help_open {
+        draw_keybind_popup(f, app);
     }
 }
 
@@ -141,6 +154,20 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         .divider("  ");
 
     f.render_widget(tabs, area);
+}
+
+fn draw_key_hints(f: &mut Frame, app: &App, area: Rect) {
+    let spans = keymap::footer_hints(app)
+        .into_iter()
+        .flat_map(|(key, desc)| {
+            [
+                Span::raw("  "),
+                Span::styled(key, Style::default().fg(Color::Cyan)),
+                Span::styled(format!(" {desc}"), Style::default().fg(Color::DarkGray)),
+            ]
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_transactions(f: &mut Frame, app: &App, area: Rect) {
@@ -499,6 +526,69 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_keybind_popup(f: &mut Frame, app: &App) {
+    let help = keymap::help_lines(app);
+    let screen = f.area();
+    let width = 64.min(screen.width.saturating_sub(2)).max(20);
+    let desired_height = (help.len() as u16).saturating_add(4).max(8);
+    let height = desired_height.min(screen.height.saturating_sub(2).max(1));
+    let area = centered_rect_size(width, height, screen);
+
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Keybinds")
+        .style(Style::default().bg(Color::Black).fg(Color::Cyan));
+    f.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+
+    let lines = help.into_iter().map(help_line).collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(Color::White))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        chunks[0],
+    );
+
+    let footer = Line::from(vec![
+        Span::styled("Esc/Enter", Style::default().fg(Color::Cyan)),
+        Span::styled(" close · ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Alt-?", Style::default().fg(Color::Cyan)),
+        Span::styled(" toggle bar", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(footer), chunks[1]);
+}
+
+fn help_line(line: HelpLine) -> Line<'static> {
+    match line {
+        HelpLine::Group(title) => Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        HelpLine::Bind(key, desc) => Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{key:<16}"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(desc),
+        ]),
+        HelpLine::Blank => Line::from(""),
+    }
+}
+
 fn draw_category_edit_popup(f: &mut Frame, app: &App) {
     let area = centered_rect_fixed_height(50, 4, f.area());
 
@@ -752,6 +842,14 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 fn centered_rect_fixed_height(percent_x: u16, height: u16, r: Rect) -> Rect {
     let popup_width = r.width * percent_x / 100;
+    let popup_height = height.min(r.height);
+    let x = (r.width - popup_width) / 2;
+    let y = (r.height - popup_height) / 2;
+    Rect::new(r.x + x, r.y + y, popup_width, popup_height)
+}
+
+fn centered_rect_size(width: u16, height: u16, r: Rect) -> Rect {
+    let popup_width = width.min(r.width);
     let popup_height = height.min(r.height);
     let x = (r.width - popup_width) / 2;
     let y = (r.height - popup_height) / 2;
