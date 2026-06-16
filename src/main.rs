@@ -23,6 +23,13 @@ fn main() {
     let exports_dir = collection_root.join("exports");
     let db_path = collection_root.join("tally.db");
 
+    // A vault has an `exports/` directory. Bail before opening the store so we
+    // don't create a stray tally.db in a directory that isn't a vault.
+    if !exports_dir.is_dir() {
+        eprintln!("This doesn't appear to be a tally vault");
+        std::process::exit(1);
+    }
+
     match args.command.as_deref() {
         Some("tui") | Some("--tui") => run_tui(&db_path, &exports_dir),
         Some("classify") => run_classify(&collection_root, &db_path, &exports_dir),
