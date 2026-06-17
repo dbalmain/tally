@@ -15,7 +15,6 @@
 - export as CSV or JSON
 - range grammar should utilise `..` and `..=` only. 
 
-- Bug it search - type "searchterm~"
 - give a nicer error when running tally in an empty/non-compatible directory
 - better transfer identification
 - when categorising a transaction, if the matching algorithm matches a number of other unconfirmed transactions, offer to apply it

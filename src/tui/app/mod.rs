@@ -446,11 +446,14 @@ impl App {
             .map(|s| s.search_bar.parsed().clone())
             .unwrap_or_default();
         let key = self.current_tab_key();
-        if let Err(e) = self
-            .lists
-            .reload(key, &self.store, &parsed, Some(LIST_LIMIT))
-        {
-            self.error_message = Some(format!("Failed to load {}: {}", tab_title(key), e));
+        match self.lists.reload(key, &self.store, &parsed, Some(LIST_LIMIT)) {
+            // A successful load clears any stale error: fixing the query,
+            // leaving search, or switching tabs all reload through here, so the
+            // error popup dismisses itself once the underlying problem is gone.
+            Ok(()) => self.error_message = None,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to load {}: {}", tab_title(key), e))
+            }
         }
         self.rebuild_tx_caches();
         self.apply_fuzzy_filter();
