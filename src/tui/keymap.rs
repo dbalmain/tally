@@ -515,7 +515,7 @@ mod tests {
             from_transaction: tx1,
             to_transaction: tx2,
         }]);
-        app.lists.categories = vec![category];
+        app.lists.categories = FilteredList::new(vec![category]);
         app
     }
 

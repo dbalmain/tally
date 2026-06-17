@@ -40,7 +40,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 | Modal-mode key dispatch | `src/tui/mod.rs` (one match per modal `InputMode`; update curated hints in `src/tui/keymap.rs` too) |
 | App state, actions, data loading, caches | `src/tui/app/mod.rs` |
 | Tab definitions / per-tab data & dispatch | `src/tui/app/tabs.rs` |
-| DB-search / fuzzy-search behaviour in the app | `src/tui/app/search.rs` |
+| DB-search / fuzzy-search behaviour in the app | `src/tui/app/search.rs`; Categories search is applied in memory by `src/tui/app/tabs.rs` (`/` path boundary-prefix, `~` path fuzzy) |
 | Category actions (assign, rename, merge, AI review) | `src/tui/app/categories.rs` |
 | Transfer actions (mark, confirm, delete) | `src/tui/app/transfers.rs` |
 | Search-bar widget (rendering, cursor-context keys, autocomplete) | `src/tui/search_bar.rs` |
@@ -348,6 +348,10 @@ Full reference: the `src/search/mod.rs` doc comment (canonical).
   `/pattern/i` is regex. End with ` ~` to switch to fuzzy mode keeping the
   DB filters.
 - **Fuzzy search (`~`)** is in-memory nucleo scoring over the loaded rows.
+- On the Categories tab, **DB search (`/`)** is not SQL-backed: it is an
+  in-memory, case-insensitive boundary-prefix filter over the category path
+  (boundaries are the start of the path or positions after non-alphanumeric
+  characters). **Fuzzy search (`~`)** is fuzzy over the path.
 
 ## Common Store Operations
 

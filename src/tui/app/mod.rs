@@ -458,19 +458,25 @@ impl App {
 
     /// Apply fuzzy filter on top of loaded data for current tab only
     fn apply_fuzzy_filter(&mut self) {
-        let pattern = self
+        let (db_query, pattern) = self
             .current_search_state()
-            .map(|s| s.fuzzy_pattern.clone())
+            .map(|s| (s.search_bar.value().to_string(), s.fuzzy_pattern.clone()))
             .unwrap_or_default();
         let key = self.current_tab_key();
-        self.lists
-            .apply_fuzzy(key, &pattern, &mut self.fuzzy_matcher, &self.tx_by_id);
+        self.lists.apply_fuzzy(
+            key,
+            &db_query,
+            &pattern,
+            &mut self.fuzzy_matcher,
+            &self.tx_by_id,
+        );
     }
 
     /// Reload data after a mutation (categorisation, transfers) — both tx
     /// caches and category counts may have changed.
     pub fn refresh_data(&mut self) {
-        self.lists.categories = self.load_or_show("load categories", |s| s.list_categories());
+        let categories = self.load_or_show("load categories", |s| s.list_categories());
+        self.lists.categories.set_items(categories);
         self.rebuild_search_configs();
         self.reload_current_tab();
         self.rebuild_category_counts();

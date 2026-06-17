@@ -95,7 +95,7 @@ pub(super) fn tab_title(key: TabKey) -> &'static str {
 pub struct TabLists {
     pub transactions: FilteredList<Transaction>,
     pub linked_transfers: FilteredList<TransferWithTransactions>,
-    pub categories: Vec<Category>,
+    pub categories: FilteredList<Category>,
     pub uncategorised: FilteredList<Transaction>,
     pub ai_reviews: FilteredList<TransactionWithEnrichment>,
     pub transfer_reviews: FilteredList<Transfer>,
@@ -110,7 +110,7 @@ impl TabLists {
             linked_transfers: FilteredList::new(
                 store.list_transfers_with_transactions(true, &query, limit)?,
             ),
-            categories: store.list_categories()?,
+            categories: FilteredList::new(store.list_categories()?),
             uncategorised: FilteredList::new(store.get_uncategorised_transactions(&query, limit)?),
             ai_reviews: FilteredList::new(store.get_pending_ai_reviews(&query, limit)?),
             transfer_reviews: FilteredList::new(store.get_pending_transfer_reviews(&query, limit)?),
@@ -166,12 +166,16 @@ impl TabLists {
         }
     }
 
-    /// Re-apply the fuzzy `pattern` to the list behind `key`. An empty
-    /// pattern shows all rows. `tx_by_id` resolves the transaction IDs held
-    /// by transfer reviews.
+    /// Re-apply in-memory filters to the list behind `key`. Non-Categories
+    /// tabs ignore `db_query` because their DB search has already been pushed
+    /// to SQL during reload; Categories apply `db_query` as an in-memory
+    /// boundary-prefix filter over the category path, then layer fuzzy
+    /// matching over it. `tx_by_id` resolves the transaction IDs held by
+    /// transfer reviews.
     pub(super) fn apply_fuzzy(
         &mut self,
         key: TabKey,
+        db_query: &str,
         pattern: &str,
         matcher: &mut FuzzyMatcher,
         tx_by_id: &HashMap<i64, Transaction>,
@@ -189,9 +193,9 @@ impl TabLists {
                     &twt.to_transaction.description,
                 ])
             }),
-            (Tab::Categories, _) => {
-                // Categories don't use fuzzy filtering (for now)
-            }
+            (Tab::Categories, _) => self
+                .categories
+                .refilter(|c| category_boundary_prefix(&c.path, db_query) && any_match(&[&c.path])),
             (Tab::Todo, sub) => match sub.unwrap_or(TodoSubTab::Uncategorised) {
                 TodoSubTab::Uncategorised => refilter_by(&mut self.uncategorised, pattern, |tx| {
                     any_match(&[&tx.description])
@@ -241,6 +245,29 @@ impl TabLists {
     }
 }
 
+/// True if `query` is a case-insensitive prefix of `path` starting at any
+/// boundary: the start of the string or immediately after a non-alphanumeric
+/// character. Empty query matches everything.
+fn category_boundary_prefix(path: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    let path_lower = path.to_lowercase();
+    let query_lower = query.to_lowercase();
+    let is_boundary = |start: usize| {
+        start == 0
+            || !path_lower[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric())
+    };
+
+    path_lower
+        .char_indices()
+        .any(|(i, _)| is_boundary(i) && path_lower[i..].starts_with(&query_lower))
+}
+
 /// Apply `visible` as the list's filter, or show everything when the pattern
 /// is empty.
 fn refilter_by<T>(list: &mut FilteredList<T>, pattern: &str, visible: impl FnMut(&T) -> bool) {
@@ -248,5 +275,45 @@ fn refilter_by<T>(list: &mut FilteredList<T>, pattern: &str, visible: impl FnMut
         list.show_all();
     } else {
         list.refilter(visible);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn category_boundary_prefix_matches_start_of_path() {
+        assert!(category_boundary_prefix("tododo", "todo"));
+    }
+
+    #[test]
+    fn category_boundary_prefix_matches_after_slash() {
+        assert!(category_boundary_prefix("tax/todos", "todo"));
+    }
+
+    #[test]
+    fn category_boundary_prefix_matches_after_hyphen() {
+        assert!(category_boundary_prefix("Personal-todos", "todo"));
+    }
+
+    #[test]
+    fn category_boundary_prefix_does_not_match_after_digit() {
+        assert!(!category_boundary_prefix("Food2todo", "todo"));
+    }
+
+    #[test]
+    fn category_boundary_prefix_does_not_match_inside_segment() {
+        assert!(!category_boundary_prefix("AllTax/Larbert", "tax"));
+    }
+
+    #[test]
+    fn category_boundary_prefix_is_case_insensitive() {
+        assert!(category_boundary_prefix("AllTax/Larbert", "lar"));
+    }
+
+    #[test]
+    fn category_boundary_prefix_empty_query_matches() {
+        assert!(category_boundary_prefix("AllTax/Larbert", ""));
     }
 }

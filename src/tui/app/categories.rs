@@ -220,9 +220,11 @@ impl App {
     }
 
     fn reload_categories(&mut self) {
-        self.lists.categories = self.load_or_show("load categories", |s| s.list_categories());
+        let categories = self.load_or_show("load categories", |s| s.list_categories());
+        self.lists.categories.set_items(categories);
         self.rebuild_search_configs();
         self.rebuild_category_counts();
+        self.apply_fuzzy_filter();
     }
 
     /// Rebuild the per-category transaction count cache in one bulk query.
