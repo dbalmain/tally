@@ -1,11 +1,12 @@
-//! Local category classification from confirmed temporal history and descriptions.
+//! Local transfer detection and category classification.
 //!
-//! [`train`] and [`predict`] are pure in-memory operations. [`classify`] is the
-//! storage adapter used by the CLI.
+//! [`detect_transfers`], [`train`], and [`predict`] are pure in-memory
+//! operations. [`classify`] is the storage adapter used by the CLI.
 
 mod adapter;
 mod svm;
 mod tfidf;
+mod transfers;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -17,6 +18,7 @@ use self::svm::LinearSvm;
 use self::tfidf::Tfidf;
 
 pub use adapter::classify;
+pub use transfers::{TransferHistory, TransferInput, detect_transfers};
 
 const EXACT_CONFIDENCE: f64 = 0.99;
 const RECURRING_HIGH_CONFIDENCE: f64 = 0.95;
@@ -25,6 +27,7 @@ const RECURRING_LOW_CONFIDENCE: f64 = 0.40;
 /// Counts produced by one local classification run.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ClassifyReport {
+    pub transfers: usize,
     pub exact: usize,
     pub recurring: usize,
     pub model: usize,

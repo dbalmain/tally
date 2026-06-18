@@ -432,7 +432,7 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
                 .enrichment
                 .as_ref()
                 .and_then(|e| e.ai_confidence)
-                .map(|c| format!("{:.0}%", c * 100.0))
+                .map(format_confidence_percent)
                 .unwrap_or_default();
 
             let amount_color = if tx.amount_cents < 0 {
@@ -471,6 +471,7 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(15),
             Constraint::Length(15),
             Constraint::Length(10),
+            Constraint::Length(6),
             Constraint::Length(12),
         ],
         |i, transfer| {
@@ -485,6 +486,13 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(format!("From: {}", transfer.from_transaction_id)),
                 Cell::from(format!("To: {}", transfer.to_transaction_id)),
                 Cell::from(transfer.source.as_str()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(
+                    transfer
+                        .ai_confidence
+                        .map(format_confidence_percent)
+                        .unwrap_or_default(),
+                )
+                .style(Style::default().fg(Color::Cyan)),
                 Cell::from(transfer.created_at.format("%Y-%m-%d").to_string()),
             ])
             .style(Style::default().bg(bg))
@@ -863,6 +871,10 @@ fn format_cents(cents: i64) -> String {
     format!("{}${}.{:02}", sign, dollars, remainder)
 }
 
+fn format_confidence_percent(confidence: f64) -> String {
+    format!("{:.0}%", confidence * 100.0)
+}
+
 fn draw_transaction_details(f: &mut Frame, app: &App, tx: &Transaction, area: Rect) {
     let bank_name = app.bank_name(tx.bank_id);
     let account_name = app.account_name(tx.account_id);
@@ -1037,7 +1049,7 @@ fn draw_ai_review_details(
         .enrichment
         .as_ref()
         .and_then(|e| e.ai_confidence)
-        .map(|c| format!("{:.0}%", c * 100.0))
+        .map(format_confidence_percent)
         .unwrap_or_else(|| "-".to_string());
 
     let lines = vec![

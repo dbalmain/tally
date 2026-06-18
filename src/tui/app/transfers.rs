@@ -53,7 +53,7 @@ impl App {
         };
 
         let created = self.try_mutation("create transfer", |s| {
-            s.create_transfer(from_id, to_id, TransferSource::Manual, true)
+            s.create_transfer(from_id, to_id, TransferSource::Manual, true, None)
                 .map(|_| ())
         });
         if created {

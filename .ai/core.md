@@ -127,7 +127,7 @@ Transaction {
 - `TransactionWithEnrichment` — Transaction + enrichment + resolved category
 
 ### Transfer
-- `Transfer { from_transaction_id, to_transaction_id, source, confirmed }` — Links two transactions as a transfer
+- `Transfer { from_transaction_id, to_transaction_id, source, confirmed, ai_confidence }` — Links two transactions as a transfer
 - `TransferWithTransactions` — Transfer + both resolved transactions
 
 ## Database Schema
@@ -140,7 +140,7 @@ Transaction {
 **Enrichment tables:**
 - `categories` — `id, path, created_at`
 - `transaction_enrichments` — `id, transaction_id, category_id, category_source, category_confirmed, ai_confidence, created_at, updated_at`
-- `transfers` — `id, from_transaction_id, to_transaction_id, source, confirmed, created_at`
+- `transfers` — `id, from_transaction_id, to_transaction_id, source, confirmed, ai_confidence, created_at`
 
 **Import tracking:**
 - `imported_files` — `id, account_id, path, content_hash, imported_at, import_batch_id`
@@ -157,13 +157,17 @@ Transaction {
 
 ### AI Classification Pipeline
 
-`tally classify` trains only from confirmed category enrichments. It first
-reuses the most recent prior same-biller category, preferring an exact amount;
-novel billers fall back to word/character TF-IDF plus a one-vs-rest linear SVM.
-The pure `train`/`predict` pipeline lives under `src/classify/`, with storage
-isolated in `adapter.rs`. Suggestions use source `ai`, remain unconfirmed, and
-never replace an existing enrichment. No configuration or external service is
-required.
+`tally classify` first detects likely transfers among uncategorised,
+not-yet-transferred transactions: same-day opposite amounts in different
+accounts, paired greedily with history-aware confidence. Detected transfers use
+source `auto`, remain unconfirmed, and are excluded from category suggestions.
+It then trains only from confirmed category enrichments, first reusing the most
+recent prior same-biller category and preferring an exact amount; novel billers
+fall back to word/character TF-IDF plus a one-vs-rest linear SVM. The pure
+`train`/`predict` and transfer-detection pipeline lives under `src/classify/`,
+with storage isolated in `adapter.rs`. Category suggestions use source `ai`,
+remain unconfirmed, and never replace an existing enrichment. No configuration
+or external service is required.
 
 ### Money as Cents (i64)
 All monetary values are integers in cents to avoid floating-point errors.
@@ -369,6 +373,7 @@ store.get_pending_ai_reviews(&query, limit) -> Vec<TransactionWithEnrichment>
 store.get_pending_transfer_reviews(&query, limit) -> Vec<Transfer>
 store.list_transfers_with_transactions(confirmed_only, &query, limit) -> Vec<TransferWithTransactions>
 store.get_confirmed_examples() -> Vec<ConfirmedCategoryExample>
+store.get_confirmed_transfer_examples() -> Vec<ConfirmedTransferExample>
 
 // Categories
 store.get_or_create_category(path) -> i64
@@ -377,7 +382,7 @@ store.get_transaction_category(tx_id) -> Option<Category>
 
 // Transfers
 store.find_matching_transfer_candidates(tx) -> Vec<Transaction>
-store.create_transfer(from_id, to_id, source, confirmed)
+store.create_transfer(from_id, to_id, source, confirmed, confidence)
 store.get_transfer_for_transaction(tx_id) -> Option<Transfer>
 ```
 

@@ -81,6 +81,15 @@ pub struct ConfirmedCategoryExample {
     pub category_path: String,
 }
 
+/// Confirmed transfer training example used by local transfer detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedTransferExample {
+    pub from_account_id: i64,
+    pub to_account_id: i64,
+    pub from_description: String,
+    pub to_description: String,
+}
+
 /// Hierarchical category (e.g., "Food/Groceries").
 #[derive(Debug, Clone)]
 pub struct Category {
@@ -171,6 +180,7 @@ pub struct Transfer {
     pub to_transaction_id: i64,
     pub source: TransferSource,
     pub confirmed: bool,
+    pub ai_confidence: Option<f64>,
     pub created_at: DateTime<Utc>,
 }
 

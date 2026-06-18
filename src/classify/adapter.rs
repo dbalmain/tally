@@ -1,12 +1,50 @@
 use std::path::Path;
 
 use crate::search::ParsedQuery;
-use crate::{CategorySource, Result, TransactionStore};
+use crate::{CategorySource, Result, TransactionStore, TransferSource};
 
-use super::{ClassifyReport, Example, Input, PredictionSource, normalise, predict, train};
+use super::{
+    ClassifyReport, Example, Input, PredictionSource, TransferHistory, TransferInput,
+    detect_transfers, normalise, predict, train,
+};
 
 /// Classify all currently uncategorized, non-transfer transactions in a collection.
 pub fn classify(store: &mut TransactionStore, _collection_root: &Path) -> Result<ClassifyReport> {
+    let mut report = ClassifyReport::default();
+
+    let transfer_history: Vec<_> = store
+        .get_confirmed_transfer_examples()?
+        .into_iter()
+        .map(|example| TransferHistory {
+            from_account_id: example.from_account_id,
+            to_account_id: example.to_account_id,
+            from_norm: normalise(&example.from_description),
+            to_norm: normalise(&example.to_description),
+        })
+        .collect();
+    let transfer_candidates: Vec<_> = store
+        .get_uncategorised_transactions(&ParsedQuery::empty(), None)?
+        .into_iter()
+        .map(|transaction| TransferInput {
+            id: transaction.id,
+            account_id: transaction.account_id,
+            date: transaction.date,
+            amount_cents: transaction.amount_cents,
+            norm: normalise(&transaction.description),
+        })
+        .collect();
+    let detected = detect_transfers(&transfer_candidates, &transfer_history);
+    for transfer in detected {
+        store.create_transfer(
+            transfer.from_id,
+            transfer.to_id,
+            TransferSource::Auto,
+            false,
+            Some(transfer.confidence),
+        )?;
+        report.transfers += 1;
+    }
+
     let examples: Vec<_> = store
         .get_confirmed_examples()?
         .into_iter()
@@ -19,7 +57,6 @@ pub fn classify(store: &mut TransactionStore, _collection_root: &Path) -> Result
         .collect();
     let classifier = train(&examples);
     let transactions = store.get_uncategorised_transactions(&ParsedQuery::empty(), None)?;
-    let mut report = ClassifyReport::default();
 
     for transaction in transactions {
         let input = Input {

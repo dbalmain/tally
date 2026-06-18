@@ -116,6 +116,7 @@ fn run_classify(collection_root: &Path, db_path: &Path, exports_dir: &Path) {
         tally::classify::classify(&mut store, collection_root).expect("Failed to classify");
 
     println!("Classification complete:");
+    println!("  Transfers detected: {}", report.transfers);
     println!("  Exact-amount suggestions: {}", report.exact);
     println!("  Recurring-biller suggestions: {}", report.recurring);
     println!("  Model suggestions: {}", report.model);

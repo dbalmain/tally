@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS transfers (
     to_transaction_id INTEGER NOT NULL UNIQUE REFERENCES transactions(id),
     source TEXT NOT NULL,
     confirmed INTEGER NOT NULL DEFAULT 0,
+    ai_confidence REAL,
     created_at TEXT NOT NULL
 );
 

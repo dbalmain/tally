@@ -9,8 +9,8 @@ use crate::import::{
 };
 use crate::search::{ParsedQuery, SqlContext};
 use crate::{
-    Account, Bank, Category, CategorySource, ConfirmedCategoryExample, Error, FuzzyMatcher,
-    RawTransaction, RefreshReport, Result, Transaction, TransactionEnrichment,
+    Account, Bank, Category, CategorySource, ConfirmedCategoryExample, ConfirmedTransferExample,
+    Error, FuzzyMatcher, RawTransaction, RefreshReport, Result, Transaction, TransactionEnrichment,
     TransactionWithEnrichment, Transfer, TransferSource, TransferWithTransactions,
 };
 
@@ -53,8 +53,7 @@ fn enrichment_cols(alias: &str) -> String {
 
 /// Column list for selecting a full `Transfer` from `transfers tr`.
 /// Order must match `parse_transfer`.
-const TRANSFER_COLS: &str =
-    "tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at";
+const TRANSFER_COLS: &str = "tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at, tr.ai_confidence";
 
 /// SQL context for queries rooted at `transactions_view t` (with optional
 /// `categories c` and `transactions_fts fts` joins).
@@ -822,6 +821,31 @@ impl TransactionStore {
         Ok(examples)
     }
 
+    /// Return all user-confirmed transfers as transfer-detection examples.
+    pub fn get_confirmed_transfer_examples(&self) -> Result<Vec<ConfirmedTransferExample>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ft.account_id, tt.account_id, ft.description, tt.description
+             FROM transfers tr
+             JOIN transactions_view ft ON ft.id = tr.from_transaction_id
+             JOIN transactions_view tt ON tt.id = tr.to_transaction_id
+             WHERE tr.confirmed = 1
+               AND ft.account_deleted_at IS NULL
+               AND tt.account_deleted_at IS NULL
+             ORDER BY tr.id",
+        )?;
+        let examples = stmt
+            .query_map([], |row| {
+                Ok(ConfirmedTransferExample {
+                    from_account_id: row.get(0)?,
+                    to_account_id: row.get(1)?,
+                    from_description: row.get(2)?,
+                    to_description: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(examples)
+    }
+
     /// Rename a category. Returns error if new name already exists.
     pub fn rename_category(&mut self, category_id: i64, new_path: &str) -> Result<()> {
         let normalised = new_path.trim().trim_matches('/');
@@ -921,15 +945,18 @@ impl TransactionStore {
         to_transaction_id: i64,
         source: TransferSource,
         confirmed: bool,
+        confidence: Option<f64>,
     ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO transfers (from_transaction_id, to_transaction_id, source, confirmed, created_at)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO transfers
+             (from_transaction_id, to_transaction_id, source, confirmed, ai_confidence, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
             params![
                 from_transaction_id,
                 to_transaction_id,
                 source.as_str(),
                 confirmed,
+                confidence,
                 Utc::now().to_rfc3339()
             ],
         )?;
@@ -954,11 +981,14 @@ impl TransactionStore {
 
     /// Get the transfer (if any) involving a transaction.
     pub fn get_transfer_for_transaction(&self, transaction_id: i64) -> Result<Option<Transfer>> {
+        let sql = format!(
+            "SELECT {TRANSFER_COLS}
+             FROM transfers tr
+             WHERE tr.from_transaction_id = ? OR tr.to_transaction_id = ?"
+        );
         self.conn
             .query_row(
-                "SELECT id, from_transaction_id, to_transaction_id, source, confirmed, created_at
-                 FROM transfers 
-                 WHERE from_transaction_id = ? OR to_transaction_id = ?",
+                &sql,
                 params![transaction_id, transaction_id],
                 parse_transfer,
             )
@@ -1221,8 +1251,8 @@ impl TransactionStore {
         let result = stmt
             .query_map(rusqlite::params_from_iter(params), |row| {
                 let transfer = parse_transfer(row)?;
-                let from_transaction = parse_transaction_at_offset(row, 6)?;
-                let to_transaction = parse_transaction_at_offset(row, 17)?;
+                let from_transaction = parse_transaction_at_offset(row, 7)?;
+                let to_transaction = parse_transaction_at_offset(row, 18)?;
                 Ok(TransferWithTransactions {
                     transfer,
                     from_transaction,
@@ -1312,6 +1342,7 @@ fn parse_transfer(row: &rusqlite::Row) -> rusqlite::Result<Transfer> {
         source,
         confirmed: row.get::<_, i32>(4)? != 0,
         created_at: parse_datetime(&row.get::<_, String>(5)?)?,
+        ai_confidence: row.get(6)?,
     })
 }
 
@@ -1548,7 +1579,7 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         let xfer_out = id_of(&store, "Transfer Out");
         let xfer_in = id_of(&store, "Transfer In");
         store
-            .create_transfer(xfer_out, xfer_in, TransferSource::Manual, true)
+            .create_transfer(xfer_out, xfer_in, TransferSource::Manual, true, None)
             .unwrap();
 
         (temp, store)
@@ -2137,7 +2168,7 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         // Link `linked` to a third transaction so it should be excluded.
         let other = insert_tx(&store, a1, "2024-03-11", 9999);
         store
-            .create_transfer(other, linked, TransferSource::Manual, true)
+            .create_transfer(other, linked, TransferSource::Manual, true, None)
             .unwrap();
 
         let candidates = store

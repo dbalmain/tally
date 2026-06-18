@@ -555,6 +555,7 @@ mod tests {
             to_transaction_id,
             source: TransferSource::Manual,
             confirmed,
+            ai_confidence: None,
             created_at: Utc::now(),
         }
     }
