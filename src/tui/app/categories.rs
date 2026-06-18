@@ -99,6 +99,29 @@ impl App {
         }
     }
 
+    /// Remove the category from the selected AI-review transaction, dropping
+    /// it back to uncategorised.
+    pub fn remove_ai_category(&mut self) {
+        if self.current_tab != Tab::Todo || self.todo_subtab != TodoSubTab::AiReview {
+            return;
+        }
+        let Some(tx_id) = self
+            .lists
+            .ai_reviews
+            .get(self.selected_index)
+            .map(|r| r.transaction.id)
+        else {
+            return;
+        };
+        if !self.try_mutation("remove category", |s| s.delete_enrichment(tx_id)) {
+            return;
+        }
+        self.refresh_data();
+        if self.selected_index >= self.lists.ai_reviews.len() && self.selected_index > 0 {
+            self.selected_index -= 1;
+        }
+    }
+
     // ==================== Category Editing (Categories Tab) ====================
 
     pub fn selected_category(&self) -> Option<&Category> {

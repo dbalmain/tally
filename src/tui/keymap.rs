@@ -43,6 +43,7 @@ pub enum Act {
     RenameCategory,
     MarkTransfer,
     DeleteTransfer,
+    RemoveCategory,
     Confirm,
     ClearSearch,
 }
@@ -119,12 +120,40 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
         && app.lists.linked_transfers.get(app.selected_index).is_some()
     {
         out.push(b(
-            &[Char('d')],
+            &[Char('d'), Code(KeyCode::Delete)],
             "d",
             "delete transfer",
             true,
             true,
             DeleteTransfer,
+        ));
+    }
+
+    if app.current_tab == Tab::Todo
+        && app.todo_subtab == TodoSubTab::TransferReview
+        && app.lists.transfer_reviews.get(app.selected_index).is_some()
+    {
+        out.push(b(
+            &[Code(KeyCode::Delete)],
+            "Del",
+            "remove transfer",
+            true,
+            true,
+            DeleteTransfer,
+        ));
+    }
+
+    if app.current_tab == Tab::Todo
+        && app.todo_subtab == TodoSubTab::AiReview
+        && app.lists.ai_reviews.get(app.selected_index).is_some()
+    {
+        out.push(b(
+            &[Code(KeyCode::Delete)],
+            "Del",
+            "remove category",
+            true,
+            true,
+            RemoveCategory,
         ));
     }
 
@@ -244,6 +273,7 @@ fn run_normal(app: &mut App, act: Act) {
         Act::RenameCategory => app.start_category_rename(),
         Act::MarkTransfer => app.start_transfer_mark(),
         Act::DeleteTransfer => app.delete_transfer(),
+        Act::RemoveCategory => app.remove_ai_category(),
         Act::Confirm => {
             app.confirm_ai_category();
             app.confirm_transfer_review();
@@ -437,16 +467,32 @@ mod tests {
             Act::DeleteTransfer,
             Trigger::Char('d')
         ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::DeleteTransfer,
+            Trigger::Code(KeyCode::Delete)
+        ));
 
         app.current_tab = Tab::Todo;
         app.todo_subtab = TodoSubTab::AiReview;
         let binds = normal_binds(&app);
+        assert!(has_act_trigger(&binds, Act::Categorise, Trigger::Char('c')));
+        assert!(has_act_trigger(
+            &binds,
+            Act::RemoveCategory,
+            Trigger::Code(KeyCode::Delete)
+        ));
         let bind = find_act(&binds, Act::Confirm).unwrap();
         assert_eq!(bind.desc, "confirm category");
         assert!(bind.triggers.contains(&Trigger::Code(KeyCode::Enter)));
 
         app.todo_subtab = TodoSubTab::TransferReview;
         let binds = normal_binds(&app);
+        assert!(has_act_trigger(
+            &binds,
+            Act::DeleteTransfer,
+            Trigger::Code(KeyCode::Delete)
+        ));
         let bind = find_act(&binds, Act::Confirm).unwrap();
         assert_eq!(bind.desc, "confirm transfer");
         assert!(bind.triggers.contains(&Trigger::Code(KeyCode::Enter)));

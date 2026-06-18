@@ -856,6 +856,15 @@ impl TransactionStore {
         Ok(())
     }
 
+    /// Remove a transaction's enrichment entirely (category + AI metadata).
+    pub fn delete_enrichment(&mut self, transaction_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM transaction_enrichments WHERE transaction_id = ?",
+            [transaction_id],
+        )?;
+        Ok(())
+    }
+
     /// Return all user-confirmed category assignments as classifier examples.
     pub fn get_confirmed_examples(&self) -> Result<Vec<ConfirmedCategoryExample>> {
         let mut stmt = self.conn.prepare(

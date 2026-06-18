@@ -101,22 +101,28 @@ impl App {
     }
 
     pub fn delete_transfer(&mut self) {
-        if self.current_tab != Tab::Transfers {
-            return;
-        }
-        let Some(transfer_id) = self
-            .lists
-            .linked_transfers
-            .get(self.selected_index)
-            .map(|twt| twt.transfer.id)
-        else {
+        let transfer_id = match (self.current_tab, self.todo_subtab) {
+            (Tab::Transfers, _) => self
+                .lists
+                .linked_transfers
+                .get(self.selected_index)
+                .map(|twt| twt.transfer.id),
+            (Tab::Todo, TodoSubTab::TransferReview) => self
+                .lists
+                .transfer_reviews
+                .get(self.selected_index)
+                .map(|t| t.id),
+            _ => None,
+        };
+        let Some(transfer_id) = transfer_id else {
             return;
         };
         if !self.try_mutation("delete transfer", |s| s.delete_transfer(transfer_id)) {
             return;
         }
         self.refresh_data();
-        if self.selected_index >= self.lists.linked_transfers.len() && self.selected_index > 0 {
+        if self.selected_index >= self.lists.len(self.current_tab_key()) && self.selected_index > 0
+        {
             self.selected_index -= 1;
         }
     }

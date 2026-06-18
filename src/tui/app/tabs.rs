@@ -1,9 +1,9 @@
 //! Tab definitions and per-tab list dispatch.
 //!
 //! Every piece of per-tab behaviour — what data backs a tab, how it reloads,
-//! how fuzzy filtering matches its rows, which tabs expose plain transactions
-//! — lives in this file. Adding a tab means: extend the enums, add a
-//! `FilteredList` field, extend each `TabLists` method, then add a draw
+//! how fuzzy filtering matches its rows, which tabs expose selectable
+//! transactions — lives in this file. Adding a tab means: extend the enums, add
+//! a `FilteredList` field, extend each `TabLists` method, then add a draw
 //! function in `ui.rs` (see "Adding a New Tab" in CLAUDE.md).
 
 use std::collections::HashMap;
@@ -223,22 +223,29 @@ impl TabLists {
     }
 
     /// The transaction at visible index `idx`, for tabs whose rows are plain
-    /// transactions (where category/transfer actions apply).
+    /// transactions or wrap one directly (where category/transfer actions
+    /// apply).
     pub(super) fn transaction_at(&self, key: TabKey, idx: usize) -> Option<&Transaction> {
         match key {
             (Tab::Transactions, _) => self.transactions.get(idx),
             (Tab::Todo, Some(TodoSubTab::Uncategorised)) => self.uncategorised.get(idx),
+            (Tab::Todo, Some(TodoSubTab::AiReview)) => {
+                self.ai_reviews.get(idx).map(|r| &r.transaction)
+            }
             _ => None,
         }
     }
 
-    /// Visible position of the transaction with `tx_id`, for the same tabs
-    /// as [`Self::transaction_at`].
+    /// Visible position of the transaction with `tx_id`, for the same tabs and
+    /// transaction-wrapping rows as [`Self::transaction_at`].
     pub(super) fn position_of_tx(&self, key: TabKey, tx_id: i64) -> Option<usize> {
         match key {
             (Tab::Transactions, _) => self.transactions.position(|tx| tx.id == tx_id),
             (Tab::Todo, Some(TodoSubTab::Uncategorised)) => {
                 self.uncategorised.position(|tx| tx.id == tx_id)
+            }
+            (Tab::Todo, Some(TodoSubTab::AiReview)) => {
+                self.ai_reviews.position(|r| r.transaction.id == tx_id)
             }
             _ => None,
         }

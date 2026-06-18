@@ -308,10 +308,11 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `[` / `]` | Previous/next subtab (Todo) |
 | `/` | Start DB search |
 | `~` | Start fuzzy search |
-| `c` | Set category on transaction |
+| `c` | Set category on transaction (including Todo → AI Review) |
 | `e` | Rename category (Categories tab) |
-| `t` | Mark as transfer |
-| `d` | Delete transfer |
+| `t` | Mark as transfer (including Todo → AI Review) |
+| `d` / `Delete` | Delete transfer (Transfers tab) |
+| `Delete` | Remove category (AI Review) / unlink transfer (Transfer Review) |
 | `Enter` | Confirm (AI review, transfer review) |
 | `Esc` | Clear active search (fuzzy first, then DB) |
 | `?` | Show keybind popover |
