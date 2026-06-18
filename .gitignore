@@ -1,5 +1,5 @@
 /target
-tally.db
+tally.db*
 exports
 classified-exports
 collection.toml

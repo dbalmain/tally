@@ -154,6 +154,19 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         .divider("  ");
 
     f.render_widget(tabs, area);
+
+    if app.refreshing {
+        let label = "Refreshing...";
+        let width = label.len() as u16;
+        if area.width > width {
+            let indicator_area = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
+            f.render_widget(
+                Paragraph::new(Span::styled(label, Style::default().fg(Color::DarkGray)))
+                    .alignment(Alignment::Right),
+                indicator_area,
+            );
+        }
+    }
 }
 
 fn draw_key_hints(f: &mut Frame, app: &App, area: Rect) {

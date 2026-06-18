@@ -1,5 +1,6 @@
 use chrono::{NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params, types::Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::db::{build_searchable_text, init_db};
@@ -54,6 +55,17 @@ fn enrichment_cols(alias: &str) -> String {
 /// Column list for selecting a full `Transfer` from `transfers tr`.
 /// Order must match `parse_transfer`.
 const TRANSFER_COLS: &str = "tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at, tr.ai_confidence";
+
+const PULL_CONCURRENCY: usize = 6;
+
+type PullResults = HashMap<(String, String), Result<Vec<RawTransaction>>>;
+
+struct PullJob {
+    bank_name: String,
+    account_name: String,
+    script: PathBuf,
+    account_dir: PathBuf,
+}
 
 /// SQL context for queries rooted at `transactions_view t` (with optional
 /// `categories c` and `transactions_fts fts` joins).
@@ -122,6 +134,8 @@ impl TransactionStore {
     /// Open or create the database at the given path.
     pub fn open(db_path: &Path, exports_dir: &Path) -> Result<Self> {
         let conn = Connection::open(db_path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         init_db(&conn)?;
         Ok(Self {
             conn,
@@ -142,11 +156,14 @@ impl TransactionStore {
     /// Scan exports directory and import all new transactions.
     pub fn refresh(&mut self) -> Result<RefreshReport> {
         let mut report = RefreshReport::default();
+        let discovered = self.discover_banks_and_accounts()?;
+        let pull_jobs = self.collect_pull_jobs(&discovered);
+        let mut pulled = Self::run_pull_jobs(&pull_jobs)?;
 
         // Wrap entire import in a transaction for performance
         self.conn.execute("BEGIN", [])?;
 
-        let result = self.refresh_inner(&mut report);
+        let result = self.refresh_inner(&mut report, &discovered, &mut pulled);
 
         match result {
             Ok(()) => {
@@ -160,16 +177,20 @@ impl TransactionStore {
         }
     }
 
-    fn refresh_inner(&mut self, report: &mut RefreshReport) -> Result<()> {
+    fn refresh_inner(
+        &mut self,
+        report: &mut RefreshReport,
+        discovered: &[(String, Vec<String>)],
+        pulled: &mut PullResults,
+    ) -> Result<()> {
         let batch_id = self.create_import_batch()?;
 
-        let discovered = self.discover_banks_and_accounts()?;
-
-        for (bank_name, account_names) in &discovered {
+        for (bank_name, account_names) in discovered {
             let bank_id = self.ensure_bank(bank_name, report)?;
 
             for account_name in account_names {
                 let account_id = self.ensure_account(bank_id, account_name, report)?;
+                let pulled = pulled.remove(&(bank_name.clone(), account_name.clone()));
 
                 self.import_account_transactions(
                     account_id,
@@ -177,16 +198,66 @@ impl TransactionStore {
                     account_name,
                     batch_id,
                     report,
+                    pulled,
                 )?;
             }
         }
 
-        self.soft_delete_missing_banks(&discovered, report)?;
-        self.soft_delete_missing_accounts(&discovered, report)?;
+        self.soft_delete_missing_banks(discovered, report)?;
+        self.soft_delete_missing_accounts(discovered, report)?;
 
         self.complete_import_batch(batch_id)?;
 
         Ok(())
+    }
+
+    fn collect_pull_jobs(&self, discovered: &[(String, Vec<String>)]) -> Vec<PullJob> {
+        let mut jobs = Vec::new();
+        for (bank_name, account_names) in discovered {
+            for account_name in account_names {
+                if let Some(script) = find_pull_script(&self.exports_dir, bank_name, account_name) {
+                    jobs.push(PullJob {
+                        bank_name: bank_name.clone(),
+                        account_name: account_name.clone(),
+                        script,
+                        account_dir: self.exports_dir.join(bank_name).join(account_name),
+                    });
+                }
+            }
+        }
+        jobs
+    }
+
+    fn run_pull_jobs(jobs: &[PullJob]) -> Result<PullResults> {
+        let mut pulled = HashMap::new();
+
+        for chunk in jobs.chunks(PULL_CONCURRENCY) {
+            std::thread::scope(|scope| {
+                let handles = chunk
+                    .iter()
+                    .map(|job| {
+                        scope.spawn(move || {
+                            let transactions = run_pull_script(&job.script, &job.account_dir);
+                            (
+                                (job.bank_name.clone(), job.account_name.clone()),
+                                transactions,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                for handle in handles {
+                    let (key, transactions) = handle.join().map_err(|_| {
+                        Error::ImportFailed("pull script worker panicked".to_string())
+                    })?;
+                    pulled.insert(key, transactions);
+                }
+
+                Ok::<(), Error>(())
+            })?;
+        }
+
+        Ok(pulled)
     }
 
     /// List all non-deleted banks.
@@ -366,6 +437,7 @@ impl TransactionStore {
         account_name: &str,
         batch_id: i64,
         report: &mut RefreshReport,
+        pulled: Option<Result<Vec<RawTransaction>>>,
     ) -> Result<()> {
         let account_dir = self.exports_dir.join(bank_name).join(account_name);
 
@@ -410,15 +482,17 @@ impl TransactionStore {
                 .to_string_lossy()
                 .to_string();
 
-            let transactions = run_pull_script(&script, &account_dir)?;
-            report.files_processed += 1;
-            self.insert_raw_transactions(
-                account_id,
-                transactions,
-                &relative_path,
-                batch_id,
-                report,
-            )?;
+            if let Some(transactions) = pulled {
+                let transactions = transactions?;
+                report.files_processed += 1;
+                self.insert_raw_transactions(
+                    account_id,
+                    transactions,
+                    &relative_path,
+                    batch_id,
+                    report,
+                )?;
+            }
         }
 
         Ok(())
@@ -1405,13 +1479,33 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         )
         .unwrap();
 
+        make_executable(&import_script);
+
+        temp
+    }
+
+    fn make_executable(path: &std::path::Path) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&import_script, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        temp
+        #[cfg(not(unix))]
+        let _ = path;
+    }
+
+    fn write_pull_script(path: &std::path::Path, description: &str, hash: &str) {
+        fs::write(
+            path,
+            format!(
+                r#"#!/usr/bin/env bash
+echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000,"balance_cents":50000,"hash":"{hash}"}}]'
+"#
+            ),
+        )
+        .unwrap();
+        make_executable(path);
     }
 
     /// Test fixture with two banks, three accounts, several transactions,
@@ -1610,6 +1704,37 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         let banks = store.list_banks().unwrap();
         assert_eq!(banks.len(), 1);
         assert_eq!(banks[0].name, "TestBank");
+    }
+
+    #[test]
+    fn refresh_imports_pull_results_for_multiple_accounts() {
+        let temp = TempDir::new().unwrap();
+        let bank_dir = temp.path().join("TestBank");
+        let checking_dir = bank_dir.join("Checking");
+        let savings_dir = bank_dir.join("Savings");
+        fs::create_dir_all(&checking_dir).unwrap();
+        fs::create_dir_all(&savings_dir).unwrap();
+        write_pull_script(&checking_dir.join("pull"), "Checking pull", "checking-pull");
+        write_pull_script(&savings_dir.join("pull"), "Savings pull", "savings-pull");
+
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+
+        let report = store.refresh().unwrap();
+        assert_eq!(report.banks_added, 1);
+        assert_eq!(report.accounts_added, 2);
+        assert_eq!(report.files_processed, 2);
+        assert_eq!(report.transactions_added, 2);
+
+        let mut txs = store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        txs.sort_by(|a, b| a.description.cmp(&b.description));
+
+        assert_eq!(txs.len(), 2);
+        assert_eq!(txs[0].description, "Checking pull");
+        assert_eq!(txs[0].source_file, "TestBank/Checking/pull");
+        assert_eq!(txs[1].description, "Savings pull");
+        assert_eq!(txs[1].source_file, "TestBank/Savings/pull");
     }
 
     #[test]

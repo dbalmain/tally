@@ -56,6 +56,7 @@ pub struct App {
     pub selected_index: usize,
     pub input_mode: InputMode,
     pub should_quit: bool,
+    pub refreshing: bool,
     pub keybind_help_open: bool,
     pub hints_visible: bool,
     // Category popup state
@@ -91,6 +92,10 @@ impl App {
     /// here is the right behaviour (the alternative is a half-populated UI
     /// that silently lies about what's in the database).
     pub fn new(store: TransactionStore) -> Result<Self> {
+        Self::new_with_refreshing(store, false)
+    }
+
+    pub fn new_with_refreshing(store: TransactionStore, refreshing: bool) -> Result<Self> {
         let lists = TabLists::load(&store, Some(LIST_LIMIT))?;
 
         let bank_list = store.list_banks()?;
@@ -111,6 +116,7 @@ impl App {
             selected_index: 0,
             input_mode: InputMode::Normal,
             should_quit: false,
+            refreshing,
             keybind_help_open: false,
             hints_visible: true,
             category_input: String::new(),

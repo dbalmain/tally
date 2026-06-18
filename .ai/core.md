@@ -222,6 +222,19 @@ handling and data flow stay uniform:
   amounts / transfer "to"; Yellow = categories, pending items; Cyan = transfer
   indicators, confidence scores; DarkGray = labels, disabled items
 
+## Performance
+
+`refresh()` discovers pull scripts and runs them in parallel before opening the
+DB write transaction, capped at six concurrent pulls. CSV import and all DB
+writes remain serial inside the transaction, preserving deduplication,
+soft-deletes, imported-file tracking, and batch accounting.
+
+`tally tui` opens immediately from the existing database, starts `refresh()` on
+a second store connection, and reloads the visible lists when that background
+refresh commits. File-backed stores enable SQLite WAL journal mode plus a
+5-second busy timeout so the foreground TUI can keep reading while the
+background connection writes; WAL sidecar files (`-wal`/`-shm`) are expected.
+
 ## Recipes
 
 ### Adding a New Search Filter

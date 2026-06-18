@@ -95,15 +95,19 @@ fn run_refresh(db_path: &Path, exports_dir: &Path) {
 }
 
 fn run_tui(db_path: &Path, exports_dir: &Path) {
-    let mut store =
+    let store =
         TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
 
-    // Auto-refresh on TUI startup
-    if let Err(e) = store.refresh() {
-        eprintln!("Warning: refresh failed: {}", e);
-    }
+    let (refresh_tx, refresh_rx) = std::sync::mpsc::channel();
+    let refresh_db_path = db_path.to_path_buf();
+    let refresh_exports_dir = exports_dir.to_path_buf();
+    std::thread::spawn(move || {
+        let result = TransactionStore::open(&refresh_db_path, &refresh_exports_dir)
+            .and_then(|mut store| store.refresh());
+        let _ = refresh_tx.send(result);
+    });
 
-    if let Err(e) = tally::tui::run(store) {
+    if let Err(e) = tally::tui::run(store, refresh_rx) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
     }

@@ -17,22 +17,24 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Duration;
 use tui_input::InputRequest;
 
-use crate::{Result, TransactionStore};
+use crate::{RefreshReport, Result, TransactionStore};
 
 use app::InputMode;
 
 /// Launch the interactive TUI application.
-pub fn run(store: TransactionStore) -> Result<()> {
+pub fn run(store: TransactionStore, refresh_rx: Receiver<Result<RefreshReport>>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store)?;
-    let res = run_app(&mut terminal, &mut app);
+    let mut app = App::new_with_refreshing(store, true)?;
+    let res = run_app(&mut terminal, &mut app, &refresh_rx);
 
     disable_raw_mode()?;
     execute!(
@@ -65,15 +67,36 @@ fn text_edit_request(key: &KeyEvent) -> Option<InputRequest> {
     }
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    refresh_rx: &Receiver<Result<RefreshReport>>,
+) -> Result<()> {
     loop {
         if app.should_quit {
             return Ok(());
         }
 
+        match refresh_rx.try_recv() {
+            Ok(Ok(_report)) => {
+                app.refreshing = false;
+                app.refresh_data();
+            }
+            Ok(Err(e)) => {
+                app.refreshing = false;
+                app.error_message = Some(format!("Refresh failed: {e}"));
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                app.refreshing = false;
+            }
+        }
+
         terminal.draw(|f| ui::draw(f, app))?;
 
-        if let Event::Key(key) = event::read()? {
+        if event::poll(Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+        {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
