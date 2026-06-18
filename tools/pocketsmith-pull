@@ -26,7 +26,9 @@
 #
 # Categories: PocketSmith's category is parked in each transaction's metadata
 # (pocketsmith_category) as an autocategorisation hint. It is deliberately NOT
-# mapped onto Tally's own category system.
+# mapped onto Tally's own category system. The stored value is the full
+# hierarchical path (ancestors joined by "/", raw PocketSmith titles), so a
+# downstream bootstrap can reconstruct a Tally category tree from the leaf.
 
 require 'net/http'
 require 'json'
@@ -95,6 +97,22 @@ end
 def fetch_accounts
   me, = api_get("#{API_BASE}/me")
   api_get_all("#{API_BASE}/users/#{me['id']}/accounts")
+end
+
+# Map every category id to its full hierarchical path ("Parent/Child/Leaf"),
+# joining the raw PocketSmith titles with "/". The categories endpoint returns
+# top-level categories with nested `children`, so we walk the tree once.
+def fetch_category_paths
+  me, = api_get("#{API_BASE}/me")
+  roots = api_get_all("#{API_BASE}/users/#{me['id']}/categories")
+  paths = {}
+  walk = lambda do |node, prefix|
+    path = prefix.empty? ? node['title'].to_s : "#{prefix}/#{node['title']}"
+    paths[node['id']] = path
+    (node['children'] || []).each { |child| walk.call(child, path) }
+  end
+  roots.each { |root| walk.call(root, '') }
+  paths
 end
 
 def fm_root
@@ -244,11 +262,11 @@ def to_cents(value)
   ((value || 0).to_f * 100).round
 end
 
-def build_metadata(txn)
+def build_metadata(txn, category_paths = {})
   meta = { 'pocketsmith_id' => txn['id'] }
 
   if (cat = txn['category'])
-    meta['pocketsmith_category'] = cat['title']
+    meta['pocketsmith_category'] = category_paths[cat['id']] || cat['title']
     meta['pocketsmith_category_id'] = cat['id']
   end
 
@@ -278,6 +296,7 @@ def cmd_account(id)
   url += "&start_date=#{start}&end_date=#{finish}" if start
 
   txns = api_get_all(url)
+  category_paths = fetch_category_paths
 
   out = txns.map do |txn|
     {
@@ -286,7 +305,7 @@ def cmd_account(id)
       amount_cents: to_cents(txn['amount']),
       balance_cents: to_cents(txn['closing_balance']),
       hash: "ps-#{txn['id']}",
-      metadata: build_metadata(txn)
+      metadata: build_metadata(txn, category_paths)
     }
   end
 
