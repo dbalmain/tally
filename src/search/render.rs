@@ -180,7 +180,9 @@ impl ParsedQuery {
                     clauses.push(rendered);
                     params.push(Value::Text(pattern.clone()));
                 }
-                QueryPart::Fts { query, .. } if !query.is_empty() => {
+                QueryPart::Fts {
+                    query, valid: true, ..
+                } if !query.is_empty() => {
                     let Some(rendered) = ctx.render_template("{fts_match}") else {
                         continue;
                     };
@@ -202,7 +204,9 @@ impl ParsedQuery {
                 ..
             } => template_uses(sql, placeholder),
             QueryPart::Regex { valid: true, .. } => placeholder == "description",
-            QueryPart::Fts { query, .. } if !query.is_empty() => placeholder == "fts_match",
+            QueryPart::Fts {
+                query, valid: true, ..
+            } if !query.is_empty() => placeholder == "fts_match",
             _ => false,
         })
     }
@@ -362,6 +366,7 @@ mod tests {
             parts: vec![QueryPart::Fts {
                 original: "coffee".into(),
                 query: "coffee*".into(),
+                valid: true,
                 span: Span::new(0, 0),
             }],
         };
@@ -377,6 +382,7 @@ mod tests {
             parts: vec![QueryPart::Fts {
                 original: "coffee".into(),
                 query: "coffee*".into(),
+                valid: true,
                 span: Span::new(0, 0),
             }],
         };
@@ -443,6 +449,7 @@ mod tests {
             parts: vec![QueryPart::Fts {
                 original: "coffee".into(),
                 query: "coffee*".into(),
+                valid: true,
                 span: Span::new(0, 0),
             }],
         };
@@ -474,6 +481,7 @@ mod tests {
                 QueryPart::Fts {
                     original: "x".into(),
                     query: "x".into(),
+                    valid: true,
                     span: Span::new(0, 0),
                 },
                 QueryPart::Regex {

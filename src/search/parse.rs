@@ -243,6 +243,7 @@ fn combine_fts_tokens(tokens: &[(String, Span)], cursor: usize) -> QueryPart {
     QueryPart::Fts {
         original,
         query,
+        valid: true,
         span,
     }
 }

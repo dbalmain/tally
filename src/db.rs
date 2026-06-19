@@ -167,9 +167,68 @@ fn register_regexp_function(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+thread_local! {
+    /// A throwaway in-memory FTS5 table used solely to validate user-typed FTS5
+    /// query syntax. It mirrors the production `transactions_fts` column name so
+    /// column-filter syntax (`searchable_text:foo`) validates identically.
+    static FTS_VALIDATOR: Connection = {
+        let conn = Connection::open_in_memory()
+            .expect("open in-memory FTS validator connection");
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE v USING fts5(searchable_text);
+             INSERT INTO v(rowid, searchable_text) VALUES (1, 'x');",
+        )
+        .expect("create FTS validator table");
+        conn
+    };
+}
+
+/// Returns whether `query` is a syntactically valid FTS5 MATCH expression.
+///
+/// SQLite is the single source of truth for FTS5 query grammar (column
+/// filters, `NEAR`, prefix `*`, phrase concatenation, etc.), so we ask it
+/// directly rather than reimplementing the grammar. Empty queries are treated
+/// as valid (callers skip them). Used by the search bar to reject invalid terms
+/// inline instead of letting the error surface as a failed list load.
+pub fn is_valid_fts_query(query: &str) -> bool {
+    if query.trim().is_empty() {
+        return true;
+    }
+    FTS_VALIDATOR.with(|conn| {
+        // FTS5 parses the MATCH expression at step time, so we must execute,
+        // not just prepare. The throwaway table holds one row, so a valid query
+        // either matches it or not — both are success; only a syntax error fails.
+        conn.prepare("SELECT 1 FROM v WHERE v MATCH ?1")
+            .and_then(|mut stmt| {
+                stmt.query([query])
+                    .and_then(|mut rows| rows.next().map(|_| ()))
+            })
+            .is_ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fts_query_validation() {
+        // Valid FTS5 syntax.
+        assert!(is_valid_fts_query("coffee"));
+        assert!(is_valid_fts_query("coffee*"));
+        assert!(is_valid_fts_query("coffee OR tea"));
+        assert!(is_valid_fts_query("\"exact phrase\""));
+        assert!(is_valid_fts_query("(foo)"));
+        // Empty / whitespace is treated as valid (callers skip it).
+        assert!(is_valid_fts_query(""));
+        assert!(is_valid_fts_query("   "));
+        // Malformed FTS5 syntax the parser optimistically lets through.
+        assert!(!is_valid_fts_query("asdf~"));
+        assert!(!is_valid_fts_query("asdf~*"));
+        assert!(!is_valid_fts_query("(foo"));
+        assert!(!is_valid_fts_query("foo)"));
+        assert!(!is_valid_fts_query("a&b"));
+    }
 
     #[test]
     fn test_init_db() {

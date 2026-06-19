@@ -60,6 +60,11 @@ pub enum QueryPart {
         original: String,
         /// The processed FTS5 query (with prefix * added, parens balanced).
         query: String,
+        /// Whether `query` is valid FTS5 syntax. Defaults to `true` at parse
+        /// time; the TUI search bar revalidates against SQLite (the source of
+        /// truth) and flips this to `false` for malformed terms, which then
+        /// render red and are excluded from SQL instead of erroring.
+        valid: bool,
         /// Span of the FTS text.
         span: Span,
     },
@@ -114,7 +119,9 @@ impl ParsedQuery {
         self.parts
             .iter()
             .filter_map(|p| match p {
-                QueryPart::Fts { query, .. } if !query.is_empty() => Some(query.as_str()),
+                QueryPart::Fts {
+                    query, valid: true, ..
+                } if !query.is_empty() => Some(query.as_str()),
                 _ => None,
             })
             .collect()
@@ -138,6 +145,18 @@ impl ParsedQuery {
         // Fall back to the leftmost invalid part.
         self.parts.iter().find_map(part_error_message)
     }
+
+    /// Re-mark each FTS part's validity using an external validator (SQLite, in
+    /// the TUI). FTS5's grammar lives in SQLite, so the pure parser optimisically
+    /// assumes validity; this lets the search bar flip malformed terms to
+    /// invalid so they render red and drop out of the SQL instead of erroring.
+    pub fn revalidate_fts(&mut self, is_valid: impl Fn(&str) -> bool) {
+        for part in &mut self.parts {
+            if let QueryPart::Fts { query, valid, .. } = part {
+                *valid = is_valid(query);
+            }
+        }
+    }
 }
 
 fn part_span_contains_cursor(part: &QueryPart, cursor: usize) -> bool {
@@ -152,6 +171,11 @@ fn part_error_message(part: &QueryPart) -> Option<&str> {
             ..
         } => Some(msg.as_str()),
         QueryPart::Regex { valid: false, .. } => Some("Invalid regex pattern"),
+        QueryPart::Fts {
+            query,
+            valid: false,
+            ..
+        } if !query.is_empty() => Some("Invalid search term"),
         _ => None,
     }
 }
@@ -220,6 +244,32 @@ mod tests {
         assert_eq!(q.error_at_cursor(2), Some("bad date"));
         // Cursor in whitespace falls back to the leftmost invalid.
         assert_eq!(q.error_at_cursor(6), Some("bad date"));
+    }
+
+    fn fts(text: &str, start: usize) -> QueryPart {
+        QueryPart::Fts {
+            original: text.to_string(),
+            query: text.to_string(),
+            valid: true,
+            span: Span::new(start, start + text.len()),
+        }
+    }
+
+    #[test]
+    fn revalidate_fts_drops_invalid_from_sql_and_reports_error() {
+        let mut q = ParsedQuery {
+            parts: vec![fts("asdf~", 0)],
+        };
+        // Optimistically valid before revalidation.
+        assert_eq!(q.fts_queries(), vec!["asdf~"]);
+        assert_eq!(q.error_at_cursor(0), None);
+
+        // Treat anything containing '~' as invalid (stands in for SQLite).
+        q.revalidate_fts(|s| !s.contains('~'));
+
+        // Invalid FTS no longer reaches SQL, and surfaces as an inline error.
+        assert!(q.fts_queries().is_empty());
+        assert_eq!(q.error_at_cursor(0), Some("Invalid search term"));
     }
 
     #[test]

@@ -256,7 +256,11 @@ impl SearchBar {
     fn reparse(&mut self) {
         let value = self.input.value();
         let cursor = self.cursor();
-        let (parsed, context) = parse(&self.config, value, cursor);
+        let (mut parsed, context) = parse(&self.config, value, cursor);
+        // FTS5's query grammar lives in SQLite, so let it judge validity rather
+        // than reimplementing it here. Malformed terms are then shown red and
+        // dropped from the SQL instead of surfacing as a failed list load.
+        parsed.revalidate_fts(crate::db::is_valid_fts_query);
         self.parsed = parsed;
         self.context = context;
     }
@@ -711,6 +715,8 @@ impl SearchBar {
                     Color::Red
                 }
             }
+            // Invalid FTS syntax (judged by SQLite) is red like invalid filters.
+            (QueryPart::Fts { valid: false, .. }, _) => Color::Red,
             (QueryPart::Fts { .. }, true) => Color::Cyan,
             (QueryPart::Fts { .. }, false) => Color::DarkGray,
         }
