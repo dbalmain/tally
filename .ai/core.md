@@ -57,7 +57,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 src/
 ├── main.rs                 # CLI entry point, argument parsing
 ├── lib.rs                  # Public API exports
-├── classify/               # Pure temporal + TF-IDF/SVM classification and adapter
+├── classify/               # Pure temporal + TF-IDF/SVM classification, similarity index, adapter
 ├── types.rs                # Core data structures
 ├── db.rs                   # SQLite schema, transactions_view, FTS index
 ├── store.rs                # TransactionStore: all database operations
@@ -81,7 +81,7 @@ src/
     ├── search_bar.rs       # Search bar widget (context-aware keys, autocomplete)
     ├── filtered_list.rs    # FilteredList<T>: items + fuzzy-filtered view
     └── app/
-        ├── mod.rs          # App struct, construction, caches, navigation
+        ├── mod.rs          # App struct, construction, caches, navigation, bulk-apply state
         ├── tabs.rs         # Tab/TodoSubTab enums + TabLists (per-tab dispatch)
         ├── search.rs       # TabSearchState + search/autocomplete actions
         ├── categories.rs   # Category popup, AI review, rename/merge
@@ -168,6 +168,23 @@ fall back to word/character TF-IDF plus a one-vs-rest linear SVM. The pure
 with storage isolated in `adapter.rs`. Category suggestions use source `ai`,
 remain unconfirmed, and never replace an existing enrichment. No configuration
 or external service is required.
+
+When the category popup manually assigns a category, the TUI can offer to apply
+the same category to other unconfirmed transactions whose normalised
+descriptions are strong TF-IDF cosine matches. The precomputed pure index lives
+in `src/classify/similarity.rs`; the cutoff is `SIMILARITY_THRESHOLD`.
+
+### Transfer / category are mutually exclusive
+
+A transaction is either part of a transfer or categorised, never both. The
+invariant is enforced in `store.create_transfer`, which deletes any enrichment
+on both endpoints (a no-op for the uncategorised rows AI detection picks). The
+TUI guards the inverse: categorising a transfer (`c`) prompts to unlink it
+first, and marking a transfer (`t`) whose chosen endpoint is already linked
+prompts to break the existing transfer(s). Both prompts run through the generic
+`InputMode::Confirm` / `ConfirmAction` flow (`App::confirm_proceed`). Transfer
+candidate search (`store.transfer_candidates`) therefore no longer hides
+already-linked transactions — it offers them and the caller confirms.
 
 ### Money as Cents (i64)
 All monetary values are integers in cents to avoid floating-point errors.
@@ -308,11 +325,11 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `[` / `]` | Previous/next subtab (Todo) |
 | `/` | Start DB search |
 | `~` | Start fuzzy search |
-| `c` | Set category on transaction (including Todo → AI Review) |
+| `c` | Set category on transaction (including Todo → AI Review); categorising a transfer prompts to unlink it first |
 | `e` | Rename category (Categories tab) |
-| `t` | Mark as transfer (including Todo → AI Review) |
+| `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
 | `d` / `Delete` | Delete transfer (Transfers tab) |
-| `Delete` | Remove category (AI Review) / unlink transfer (Transfer Review) |
+| `Delete` | Transactions tab: unlink transfer, else remove category. AI Review: remove category. Transfer Review: unlink transfer |
 | `Enter` | Confirm (AI review, transfer review) |
 | `Esc` | Clear active search (fuzzy first, then DB) |
 | `?` | Show keybind popover |
@@ -335,6 +352,16 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `Enter` | Confirm selection |
 | `↑` / `↓` | Navigate suggestions |
 | Type | Filter categories |
+| `Alt-?` | Toggle bottom key-hint bar |
+
+### Bulk Apply Popup
+| Key | Action |
+|-----|--------|
+| `Space` | Toggle selected row |
+| `a` | Toggle all rows |
+| `Enter` | Apply to selected rows |
+| `Esc` | Cancel |
+| `↑` / `↓` | Navigate rows |
 | `Alt-?` | Toggle bottom key-hint bar |
 
 ### Confirmation Popups
@@ -383,6 +410,7 @@ whose order must match the `parse_*_at_offset` row parsers.
 // Querying (all take &ParsedQuery + Option<usize> limit)
 store.query_transactions(&query, limit) -> Vec<Transaction>
 store.get_uncategorised_transactions(&query, limit) -> Vec<Transaction>
+store.get_unconfirmed_transactions(&query, limit) -> Vec<Transaction>
 store.get_pending_ai_reviews(&query, limit) -> Vec<TransactionWithEnrichment>
 store.get_pending_transfer_reviews(&query, limit) -> Vec<Transfer>
 store.list_transfers_with_transactions(confirmed_only, &query, limit) -> Vec<TransferWithTransactions>

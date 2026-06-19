@@ -3,9 +3,12 @@
 
 use tui_input::Input;
 
-use crate::{Category, CategorySource};
+use crate::classify::{SIMILARITY_THRESHOLD, normalise};
+use crate::{Category, CategorySource, Transaction};
 
-use super::{App, ConfirmAction, InputMode, Tab, TodoSubTab};
+use super::{App, BulkApplyState, BulkRow, ConfirmAction, InputMode, Tab, TodoSubTab};
+
+const BULK_APPLY_MATCH_LIMIT: usize = 200;
 
 impl App {
     // ==================== Category Popup (assign to transaction) ====================
@@ -71,15 +74,51 @@ impl App {
             return;
         };
 
-        let saved = self.try_mutation("set category", |s| {
-            let category_id = s.get_or_create_category(&category_path)?;
-            s.set_category(tx.id, category_id, CategorySource::Manual, true, None)
-        });
-        if saved {
-            self.refresh_data();
+        // A transaction is either a transfer or categorised, never both.
+        // Categorising one that is part of a transfer breaks the link — confirm
+        // first.
+        if let Some(transfer_id) = self.get_cached_transfer(tx.id).map(|t| t.id) {
+            self.category_input.clear();
+            self.category_suggestions.clear();
+            self.category_selected = 0;
+            self.confirm_message = Some(
+                "This transaction is part of a transfer. Categorising it will unlink the transfer. Continue?"
+                    .to_string(),
+            );
+            self.confirm_action = Some(ConfirmAction::BreakTransferForCategory {
+                transfer_id,
+                tx,
+                category_path,
+            });
+            self.input_mode = InputMode::Confirm;
+            return;
         }
 
+        self.apply_category(tx, category_path);
+    }
+
+    /// Persist a manual category for `tx`, then offer to bulk-apply it to
+    /// similar transactions. Assumes any transfer conflict has been resolved.
+    pub(super) fn apply_category(&mut self, tx: Transaction, category_path: String) {
+        let mut saved_category_id = None;
+        let saved = self.try_mutation("set category", |s| {
+            let category_id = s.get_or_create_category(&category_path)?;
+            s.set_category(tx.id, category_id, CategorySource::Manual, true, None)?;
+            saved_category_id = Some(category_id);
+            Ok(())
+        });
+        if !saved {
+            return;
+        }
+
+        let Some(category_id) = saved_category_id else {
+            self.error_message = Some("Failed to set category: category was not resolved".into());
+            return;
+        };
+
+        self.refresh_data();
         self.cancel_input();
+        self.open_bulk_apply_for(tx, category_id, category_path);
     }
 
     pub fn confirm_ai_category(&mut self) {
@@ -120,6 +159,117 @@ impl App {
         if self.selected_index >= self.lists.ai_reviews.len() && self.selected_index > 0 {
             self.selected_index -= 1;
         }
+    }
+
+    fn open_bulk_apply_for(&mut self, tx: Transaction, category_id: i64, category_path: String) {
+        if self.similarity_index.is_none() {
+            self.rebuild_similarity_index();
+        }
+
+        let query_norm = normalise(&tx.description);
+        let matches = self
+            .similarity_index
+            .as_ref()
+            .map(|index| index.similar_to(&query_norm, tx.id, SIMILARITY_THRESHOLD))
+            .unwrap_or_default();
+        let rows: Vec<_> = matches
+            .into_iter()
+            .take(BULK_APPLY_MATCH_LIMIT)
+            .filter_map(|(id, score)| {
+                self.similarity_candidates
+                    .get(&id)
+                    .cloned()
+                    .map(|tx| BulkRow {
+                        tx,
+                        score,
+                        selected: true,
+                    })
+            })
+            .collect();
+
+        if rows.is_empty() {
+            return;
+        }
+
+        self.bulk_apply = Some(BulkApplyState {
+            category_id,
+            category_path,
+            rows,
+            cursor: 0,
+        });
+        self.input_mode = InputMode::BulkApply;
+    }
+
+    pub fn bulk_apply_toggle(&mut self) {
+        let Some(state) = self.bulk_apply.as_mut() else {
+            return;
+        };
+        if let Some(row) = state.rows.get_mut(state.cursor) {
+            row.selected = !row.selected;
+        }
+    }
+
+    pub fn bulk_apply_toggle_all(&mut self) {
+        let Some(state) = self.bulk_apply.as_mut() else {
+            return;
+        };
+        let selected = state.rows.iter().any(|row| !row.selected);
+        for row in &mut state.rows {
+            row.selected = selected;
+        }
+    }
+
+    pub fn bulk_apply_next(&mut self) {
+        let Some(state) = self.bulk_apply.as_mut() else {
+            return;
+        };
+        if !state.rows.is_empty() {
+            state.cursor = (state.cursor + 1) % state.rows.len();
+        }
+    }
+
+    pub fn bulk_apply_prev(&mut self) {
+        let Some(state) = self.bulk_apply.as_mut() else {
+            return;
+        };
+        if !state.rows.is_empty() {
+            state.cursor = (state.cursor + state.rows.len() - 1) % state.rows.len();
+        }
+    }
+
+    pub fn bulk_apply_confirm(&mut self) {
+        let Some(state) = self.bulk_apply.as_ref() else {
+            return;
+        };
+        let category_id = state.category_id;
+        let selected_ids: Vec<_> = state
+            .rows
+            .iter()
+            .filter(|row| row.selected)
+            .map(|row| row.tx.id)
+            .collect();
+
+        if selected_ids.is_empty() {
+            self.bulk_apply_cancel();
+            return;
+        }
+
+        let applied = self.try_mutation("apply category", |s| {
+            for tx_id in selected_ids {
+                s.set_category(tx_id, category_id, CategorySource::Manual, true, None)?;
+            }
+            Ok(())
+        });
+        if applied {
+            self.bulk_apply = None;
+            self.input_mode = InputMode::Normal;
+            self.refresh_data();
+        }
+    }
+
+    pub fn bulk_apply_cancel(&mut self) {
+        self.bulk_apply = None;
+        self.input_mode = InputMode::Normal;
     }
 
     // ==================== Category Editing (Categories Tab) ====================

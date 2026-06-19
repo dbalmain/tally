@@ -21,6 +21,8 @@ use std::collections::HashMap;
 
 use tui_input::Input;
 
+use crate::classify::{SimilarityIndex, normalise};
+use crate::search::ParsedQuery;
 use crate::{
     Account, Bank, Category, FuzzyMatcher, Result, Transaction, TransactionStore, Transfer,
 };
@@ -37,14 +39,36 @@ pub enum InputMode {
     FuzzySearch,
     Category,
     CategoryEdit,
+    BulkApply,
     ConfirmMerge,
+    /// Generic yes/no confirmation driven by `confirm_action` (the
+    /// transfer/category-breaking flows). `ConfirmMerge` predates this and
+    /// keeps its own handlers.
+    Confirm,
     TransferPending,
     TransferNoMatch,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    MergeCategory { source_id: i64, target_id: i64 },
+    MergeCategory {
+        source_id: i64,
+        target_id: i64,
+    },
+    /// Categorising a transaction that is part of a transfer: unlink the
+    /// transfer first, then apply the category.
+    BreakTransferForCategory {
+        transfer_id: i64,
+        tx: Transaction,
+        category_path: String,
+    },
+    /// Marking a transfer whose chosen endpoints are already linked elsewhere:
+    /// delete the existing transfer(s), then create the new one.
+    BreakTransfersForTransfer {
+        transfer_ids: Vec<i64>,
+        from_id: i64,
+        to_id: i64,
+    },
 }
 
 pub struct App {
@@ -55,6 +79,8 @@ pub struct App {
     pub lists: TabLists,
     pub selected_index: usize,
     pub input_mode: InputMode,
+    pub similarity_index: Option<SimilarityIndex>,
+    pub bulk_apply: Option<BulkApplyState>,
     pub should_quit: bool,
     pub refreshing: bool,
     pub keybind_help_open: bool,
@@ -75,6 +101,7 @@ pub struct App {
     category_by_tx_id: HashMap<i64, String>,
     transfer_by_tx_id: HashMap<i64, Transfer>,
     category_tx_count: HashMap<i64, usize>,
+    similarity_candidates: HashMap<i64, Transaction>,
     // Category editing state (Categories tab)
     pub editing_category: Option<Category>,
     pub category_edit_input: Input,
@@ -83,6 +110,19 @@ pub struct App {
     pub confirm_action: Option<ConfirmAction>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
+}
+
+pub struct BulkApplyState {
+    pub category_id: i64,
+    pub category_path: String,
+    pub rows: Vec<BulkRow>,
+    pub cursor: usize,
+}
+
+pub struct BulkRow {
+    pub tx: Transaction,
+    pub score: f32,
+    pub selected: bool,
 }
 
 impl App {
@@ -115,6 +155,8 @@ impl App {
             todo_subtab: TodoSubTab::Uncategorised,
             selected_index: 0,
             input_mode: InputMode::Normal,
+            similarity_index: None,
+            bulk_apply: None,
             should_quit: false,
             refreshing,
             keybind_help_open: false,
@@ -132,6 +174,7 @@ impl App {
             category_by_tx_id: HashMap::new(),
             transfer_by_tx_id: HashMap::new(),
             category_tx_count: HashMap::new(),
+            similarity_candidates: HashMap::new(),
             editing_category: None,
             category_edit_input: Input::default(),
             confirm_message: None,
@@ -487,11 +530,34 @@ impl App {
     /// Reload data after a mutation (categorisation, transfers) — both tx
     /// caches and category counts may have changed.
     pub fn refresh_data(&mut self) {
+        self.similarity_index = None;
+        self.similarity_candidates.clear();
         let categories = self.load_or_show("load categories", |s| s.list_categories());
         self.lists.categories.set_items(categories);
         self.rebuild_search_configs();
         self.reload_current_tab();
         self.rebuild_category_counts();
+    }
+
+    fn rebuild_similarity_index(&mut self) {
+        let query = ParsedQuery::empty();
+        let candidates = self.load_or_show("load unconfirmed transactions", |s| {
+            s.get_unconfirmed_transactions(&query, None)
+        });
+        let examples = self.load_or_show("load confirmed category examples", |s| {
+            s.get_confirmed_examples()
+        });
+        let extra_corpus: Vec<_> = examples
+            .iter()
+            .map(|example| normalise(&example.description))
+            .collect();
+        let candidate_norms: Vec<_> = candidates
+            .iter()
+            .map(|tx| (tx.id, normalise(&tx.description)))
+            .collect();
+
+        self.similarity_candidates = candidates.into_iter().map(|tx| (tx.id, tx)).collect();
+        self.similarity_index = SimilarityIndex::build(&candidate_norms, &extra_corpus);
     }
 
     // ==================== Input ====================
@@ -505,10 +571,62 @@ impl App {
         self.clear_transfer_mode();
         self.clear_category_edit();
         self.clear_confirm();
+        self.bulk_apply = None;
     }
 
     fn clear_confirm(&mut self) {
         self.confirm_message = None;
         self.confirm_action = None;
+    }
+
+    /// Carry out the pending `confirm_action` (the generic `InputMode::Confirm`
+    /// flows). `ConfirmMerge` predates this and keeps its own `confirm_merge`.
+    pub fn confirm_proceed(&mut self) {
+        let Some(action) = self.confirm_action.take() else {
+            self.cancel_input();
+            return;
+        };
+        self.confirm_message = None;
+        match action {
+            ConfirmAction::MergeCategory {
+                source_id,
+                target_id,
+            } => {
+                // Never routed through this mode, but keep merge working if it is.
+                self.confirm_action = Some(ConfirmAction::MergeCategory {
+                    source_id,
+                    target_id,
+                });
+                self.confirm_merge();
+            }
+            ConfirmAction::BreakTransferForCategory {
+                transfer_id,
+                tx,
+                category_path,
+            } => {
+                if !self.try_mutation("unlink transfer", |s| s.delete_transfer(transfer_id)) {
+                    self.input_mode = InputMode::Normal;
+                    return;
+                }
+                self.apply_category(tx, category_path);
+            }
+            ConfirmAction::BreakTransfersForTransfer {
+                transfer_ids,
+                from_id,
+                to_id,
+            } => {
+                let applied = self.try_mutation("recreate transfer", |s| {
+                    for id in &transfer_ids {
+                        s.delete_transfer(*id)?;
+                    }
+                    s.create_transfer(from_id, to_id, crate::TransferSource::Manual, true, None)?;
+                    Ok(())
+                });
+                self.input_mode = InputMode::Normal;
+                if applied {
+                    self.refresh_data();
+                }
+            }
+        }
     }
 }

@@ -121,6 +121,8 @@ fn run_app(
                     app.input_mode,
                     InputMode::Normal
                         | InputMode::ConfirmMerge
+                        | InputMode::Confirm
+                        | InputMode::BulkApply
                         | InputMode::TransferPending
                         | InputMode::TransferNoMatch
                 )
@@ -206,6 +208,15 @@ fn run_app(
                     KeyCode::Char(c) => app.update_category_input(c),
                     _ => {}
                 },
+                InputMode::BulkApply => match key.code {
+                    KeyCode::Esc => app.bulk_apply_cancel(),
+                    KeyCode::Enter => app.bulk_apply_confirm(),
+                    KeyCode::Char(' ') => app.bulk_apply_toggle(),
+                    KeyCode::Char('a') => app.bulk_apply_toggle_all(),
+                    KeyCode::Char('j') | KeyCode::Down => app.bulk_apply_next(),
+                    KeyCode::Char('k') | KeyCode::Up => app.bulk_apply_prev(),
+                    _ => {}
+                },
                 InputMode::CategoryEdit => match key.code {
                     KeyCode::Esc => app.cancel_input(),
                     KeyCode::Enter => app.confirm_category_rename(),
@@ -221,6 +232,15 @@ fn run_app(
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                         app.cancel_merge();
+                    }
+                    _ => {}
+                },
+                InputMode::Confirm => match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        app.confirm_proceed();
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.cancel_input();
                     }
                     _ => {}
                 },

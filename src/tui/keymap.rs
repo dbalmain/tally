@@ -43,6 +43,7 @@ pub enum Act {
     RenameCategory,
     MarkTransfer,
     DeleteTransfer,
+    DeleteTxLink,
     RemoveCategory,
     Confirm,
     ClearSearch,
@@ -114,6 +115,17 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
 
     if app.selected_category().is_some() {
         out.push(b(&[Char('e')], "e", "rename", true, true, RenameCategory));
+    }
+
+    if app.current_tab == Tab::Transactions && app.selected_transaction().is_some() {
+        out.push(b(
+            &[Code(KeyCode::Delete)],
+            "Del",
+            "remove link",
+            true,
+            true,
+            DeleteTxLink,
+        ));
     }
 
     if app.current_tab == Tab::Transfers
@@ -273,6 +285,7 @@ fn run_normal(app: &mut App, act: Act) {
         Act::RenameCategory => app.start_category_rename(),
         Act::MarkTransfer => app.start_transfer_mark(),
         Act::DeleteTransfer => app.delete_transfer(),
+        Act::DeleteTxLink => app.delete_selected_tx_link(),
         Act::RemoveCategory => app.remove_ai_category(),
         Act::Confirm => {
             app.confirm_ai_category();
@@ -300,7 +313,15 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
         InputMode::FuzzySearch => vec![("Enter", "keep filter"), ("Esc", "clear & exit")],
         InputMode::Category => vec![("↑/↓", "select"), ("Enter", "assign"), ("Esc", "cancel")],
         InputMode::CategoryEdit => vec![("Enter", "save"), ("Esc", "cancel")],
+        InputMode::BulkApply => vec![
+            ("↑/↓", "select"),
+            ("Space", "toggle"),
+            ("a", "all"),
+            ("Enter", "apply"),
+            ("Esc", "cancel"),
+        ],
         InputMode::ConfirmMerge => with_keys(vec![("y", "merge"), ("n", "cancel")]),
+        InputMode::Confirm => with_keys(vec![("y", "confirm"), ("n", "cancel")]),
         InputMode::TransferPending => with_keys(vec![
             ("↑/↓", "select"),
             ("T/Enter", "link"),
@@ -324,7 +345,9 @@ pub fn help_lines(app: &App) -> Vec<HelpLine> {
         InputMode::FuzzySearch => fuzzy_search_lines(&mut lines),
         InputMode::Category => category_lines(&mut lines),
         InputMode::CategoryEdit => category_edit_lines(&mut lines),
+        InputMode::BulkApply => bulk_apply_lines(&mut lines),
         InputMode::ConfirmMerge => confirm_merge_lines(&mut lines),
+        InputMode::Confirm => confirm_lines(&mut lines),
         InputMode::TransferPending => transfer_pending_lines(&mut lines),
         InputMode::TransferNoMatch => transfer_no_match_lines(&mut lines),
     }
@@ -385,9 +408,24 @@ fn category_edit_lines(lines: &mut Vec<HelpLine>) {
     bind_line(lines, "Esc", "cancel");
 }
 
+fn bulk_apply_lines(lines: &mut Vec<HelpLine>) {
+    group(lines, "Bulk Apply");
+    bind_line(lines, "↑/↓ or j/k", "select row");
+    bind_line(lines, "Space", "toggle row");
+    bind_line(lines, "a", "toggle all");
+    bind_line(lines, "Enter", "apply selected");
+    bind_line(lines, "Esc", "cancel");
+}
+
 fn confirm_merge_lines(lines: &mut Vec<HelpLine>) {
     group(lines, "Merge Category");
     bind_line(lines, "y/Enter", "merge");
+    bind_line(lines, "n/Esc", "cancel");
+}
+
+fn confirm_lines(lines: &mut Vec<HelpLine>) {
+    group(lines, "Confirm");
+    bind_line(lines, "y/Enter", "confirm");
     bind_line(lines, "n/Esc", "cancel");
 }
 

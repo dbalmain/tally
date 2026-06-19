@@ -1030,6 +1030,14 @@ impl TransactionStore {
         confirmed: bool,
         confidence: Option<f64>,
     ) -> Result<i64> {
+        // Invariant: a transaction is either part of a transfer or categorised,
+        // never both. Marking a transfer clears any category enrichment on both
+        // endpoints (a no-op for the uncategorised transactions AI detection
+        // picks, and the deliberate behaviour for a manual mark).
+        self.conn.execute(
+            "DELETE FROM transaction_enrichments WHERE transaction_id IN (?, ?)",
+            params![from_transaction_id, to_transaction_id],
+        )?;
         self.conn.execute(
             "INSERT INTO transfers
              (from_transaction_id, to_transaction_id, source, confirmed, ai_confidence, created_at)
@@ -1105,13 +1113,14 @@ impl TransactionStore {
         } else {
             ""
         };
+        // Transactions already involved in a transfer are intentionally NOT
+        // excluded: the caller offers to break the existing link (with
+        // confirmation) when the chosen candidate is already linked.
         let sql = format!(
             "SELECT {}
              FROM transactions_view t
-             LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id
              WHERE t.amount_cents = ?{}
                AND t.id != ?
-               AND tr.id IS NULL
                AND t.account_deleted_at IS NULL
              ORDER BY ABS(julianday(t.date) - julianday(?)), t.id",
             tx_cols("t"),
@@ -1171,6 +1180,55 @@ impl TransactionStore {
 
         log::debug!(
             "get_uncategorised_transactions SQL: {} params: {:?}",
+            sql,
+            params
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let transactions = stmt
+            .query_map(rusqlite::params_from_iter(params), parse_transaction)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(transactions)
+    }
+
+    /// Transactions eligible for (re)categorisation: no enrichment, or an
+    /// enrichment that is not user-confirmed. Excludes transfer legs.
+    pub fn get_unconfirmed_transactions(
+        &self,
+        query: &ParsedQuery,
+        limit: Option<usize>,
+    ) -> Result<Vec<Transaction>> {
+        let mut sql = format!("SELECT {} FROM transactions_view t", tx_cols("t"));
+        // FTS join (conditional on the parsed query)
+        if query.fts_query().is_some() {
+            sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
+        }
+        // Always join enrichments (we filter on confirmation) and transfers
+        // (we exclude transactions involved in a transfer).
+        sql.push_str(
+            " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
+             LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id",
+        );
+        // Optional category join is a no-op here because `e` is already joined
+        // — if the user filters by category we just need `c` too.
+        if query.uses_placeholder("category_path") {
+            sql.push_str(" LEFT JOIN categories c ON e.category_id = c.id");
+        }
+        sql.push_str(
+            " WHERE t.account_deleted_at IS NULL
+               AND (e.id IS NULL OR e.category_id IS NULL OR e.category_confirmed = 0)
+               AND tr.id IS NULL",
+        );
+
+        let rendered = query.render(&transaction_ctx());
+        sql.push_str(&rendered.and_prefix());
+        let mut params = rendered.params;
+
+        sql.push_str(" ORDER BY t.date DESC, t.id DESC");
+        push_limit(&mut sql, &mut params, limit);
+
+        log::debug!(
+            "get_unconfirmed_transactions SQL: {} params: {:?}",
             sql,
             params
         );
@@ -1992,6 +2050,30 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
         );
     }
 
+    // ----- get_unconfirmed_transactions -----
+
+    #[test]
+    fn unconfirmed_includes_uncategorised_and_unconfirmed_ai() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .get_unconfirmed_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+
+        let descs: Vec<_> = txs.iter().map(|t| t.description.as_str()).collect();
+        assert_eq!(descs, vec!["Coffee Bean", "Interest"]);
+    }
+
+    #[test]
+    fn unconfirmed_respects_filters() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .get_unconfirmed_transactions(&q("account:NAB"), None)
+            .unwrap();
+
+        let descs: Vec<_> = txs.iter().map(|t| t.description.as_str()).collect();
+        assert_eq!(descs, vec!["Coffee Bean"]);
+    }
+
     // ----- get_pending_ai_reviews -----
 
     #[test]
@@ -2293,13 +2375,14 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
     }
 
     #[test]
-    fn transfer_candidates_exclude_already_linked() {
+    fn transfer_candidates_include_already_linked() {
         let (_tmp, mut store, a1, a2) = store_with_two_accounts();
         let source = insert_tx(&store, a1, "2024-03-10", -5000);
         let linked = insert_tx(&store, a2, "2024-03-11", 5000);
         let unlinked = insert_tx(&store, a2, "2024-03-12", 5000);
 
-        // Link `linked` to a third transaction so it should be excluded.
+        // Link `linked` to a third transaction. It is still offered as a
+        // candidate: the caller confirms before breaking the existing link.
         let other = insert_tx(&store, a1, "2024-03-11", 9999);
         store
             .create_transfer(other, linked, TransferSource::Manual, true, None)
@@ -2310,7 +2393,30 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
             .unwrap();
 
         let ids: Vec<i64> = candidates.iter().map(|t| t.id).collect();
-        assert_eq!(ids, vec![unlinked]);
-        assert!(!ids.contains(&linked));
+        assert!(ids.contains(&linked));
+        assert!(ids.contains(&unlinked));
+    }
+
+    #[test]
+    fn create_transfer_clears_category_on_both_endpoints() {
+        let (_tmp, mut store, a1, a2) = store_with_two_accounts();
+        let from = insert_tx(&store, a1, "2024-03-10", -5000);
+        let to = insert_tx(&store, a2, "2024-03-10", 5000);
+
+        let cat = store.get_or_create_category("Food").unwrap();
+        store
+            .set_category(from, cat, CategorySource::Manual, true, None)
+            .unwrap();
+        store
+            .set_category(to, cat, CategorySource::Manual, true, None)
+            .unwrap();
+
+        store
+            .create_transfer(from, to, TransferSource::Manual, true, None)
+            .unwrap();
+
+        // Invariant: a transfer is never categorised.
+        assert!(store.get_transaction_category(from).unwrap().is_none());
+        assert!(store.get_transaction_category(to).unwrap().is_none());
     }
 }

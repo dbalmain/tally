@@ -3,7 +3,7 @@
 
 use crate::TransferSource;
 
-use super::{App, InputMode, Tab, TodoSubTab};
+use super::{App, ConfirmAction, InputMode, Tab, TodoSubTab};
 
 impl App {
     pub fn start_transfer_mark(&mut self) {
@@ -52,6 +52,46 @@ impl App {
             (to_tx.id, from_tx.id)
         };
 
+        // If this exact transfer already exists, marking it is a no-op — no
+        // warning, no churn.
+        let already_linked = [from_id, to_id].into_iter().any(|id| {
+            self.get_cached_transfer(id).is_some_and(|t| {
+                (t.from_transaction_id == from_id && t.to_transaction_id == to_id)
+                    || (t.from_transaction_id == to_id && t.to_transaction_id == from_id)
+            })
+        });
+        if already_linked {
+            self.clear_transfer_mode();
+            return;
+        }
+
+        // If either endpoint is already part of a *different* transfer, creating
+        // this one would break those links — confirm first.
+        let mut transfer_ids: Vec<i64> = [from_id, to_id]
+            .into_iter()
+            .filter_map(|id| self.get_cached_transfer(id).map(|t| t.id))
+            .collect();
+        transfer_ids.sort_unstable();
+        transfer_ids.dedup();
+
+        if !transfer_ids.is_empty() {
+            let n = transfer_ids.len();
+            self.confirm_message = Some(format!(
+                "{} existing transfer{} will be unlinked. Continue?",
+                n,
+                if n == 1 { "" } else { "s" }
+            ));
+            self.confirm_action = Some(ConfirmAction::BreakTransfersForTransfer {
+                transfer_ids,
+                from_id,
+                to_id,
+            });
+            self.pending_transfer_tx = None;
+            self.transfer_candidates.clear();
+            self.input_mode = InputMode::Confirm;
+            return;
+        }
+
         let created = self.try_mutation("create transfer", |s| {
             s.create_transfer(from_id, to_id, TransferSource::Manual, true, None)
                 .map(|_| ())
@@ -96,6 +136,29 @@ impl App {
             return;
         };
         if self.try_mutation("confirm transfer", |s| s.confirm_transfer(transfer_id)) {
+            self.refresh_data();
+        }
+    }
+
+    /// On a plain-transaction view, `Delete` removes the selected
+    /// transaction's transfer link, or — if it isn't a transfer — its category.
+    /// (A transaction is never both; transfer takes precedence so legacy rows
+    /// that ended up with both can be cleared with two presses.)
+    pub fn delete_selected_tx_link(&mut self) {
+        let Some(tx_id) = self.selected_transaction().map(|tx| tx.id) else {
+            return;
+        };
+        if let Some(transfer_id) = self.get_cached_transfer(tx_id).map(|t| t.id) {
+            if self.try_mutation("delete transfer", |s| s.delete_transfer(transfer_id)) {
+                self.refresh_data();
+            }
+            return;
+        }
+        if self
+            .get_cached_category(tx_id)
+            .is_some_and(|c| !c.is_empty())
+            && self.try_mutation("remove category", |s| s.delete_enrichment(tx_id))
+        {
             self.refresh_data();
         }
     }

@@ -77,7 +77,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_category_edit_popup(f, app);
     }
 
-    if app.input_mode == InputMode::ConfirmMerge {
+    if app.input_mode == InputMode::BulkApply {
+        draw_bulk_apply_popup(f, app);
+    }
+
+    if matches!(app.input_mode, InputMode::ConfirmMerge | InputMode::Confirm) {
         draw_confirm_popup(f, app);
     }
 
@@ -657,7 +661,7 @@ fn draw_category_edit_popup(f: &mut Frame, app: &App) {
 }
 
 fn draw_confirm_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect_fixed_height(50, 4, f.area());
+    let area = centered_rect_fixed_height(60, 6, f.area());
 
     f.render_widget(Clear, area);
 
@@ -675,13 +679,15 @@ fn draw_confirm_popup(f: &mut Frame, app: &App) {
 
     let chunks = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .split(inner);
 
-    let msg_line = Paragraph::new(message).style(Style::default().fg(Color::Yellow));
+    let msg_line = Paragraph::new(message)
+        .style(Style::default().fg(Color::Yellow))
+        .wrap(ratatui::widgets::Wrap { trim: true });
     f.render_widget(msg_line, chunks[1]);
 
     let help = Paragraph::new(Line::from(vec![
@@ -735,6 +741,79 @@ fn draw_category_popup(f: &mut Frame, app: &App) {
 
     let suggestions_widget = Paragraph::new(suggestions);
     f.render_widget(suggestions_widget, chunks[1]);
+}
+
+fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
+    let Some(state) = app.bulk_apply.as_ref() else {
+        return;
+    };
+
+    let area = centered_rect(60, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let selected = state.rows.iter().filter(|row| row.selected).count();
+    let title = format!(
+        "Apply \"{}\" to similar ({} selected)",
+        state.category_path, selected
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let rows: Vec<_> = state.rows.iter().collect();
+    draw_scrolled_table(
+        f,
+        inner,
+        &rows,
+        state.cursor,
+        &[
+            Constraint::Length(4),
+            Constraint::Length(12),
+            Constraint::Min(20),
+            Constraint::Length(12),
+            Constraint::Length(6),
+        ],
+        |i, row| {
+            let bg = if i == state.cursor {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
+            let amount_color = if row.tx.amount_cents < 0 {
+                Color::Red
+            } else {
+                Color::Green
+            };
+            let checkbox = if row.selected { "[x]" } else { "[ ]" };
+            let checkbox_color = if row.selected {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
+
+            Row::new(vec![
+                Cell::from(checkbox).style(Style::default().fg(checkbox_color)),
+                Cell::from(row.tx.date.to_string()),
+                Cell::from(row.tx.description.as_str()),
+                Cell::from(
+                    Line::from(format_cents(row.tx.amount_cents)).alignment(Alignment::Right),
+                )
+                .style(Style::default().fg(amount_color)),
+                Cell::from(format_confidence_percent(f64::from(row.score)))
+                    .style(Style::default().fg(Color::Cyan)),
+            ])
+            .style(Style::default().bg(bg))
+        },
+    );
 }
 
 /// Render the filter autocomplete popup anchored below the DB search bar.

@@ -125,7 +125,7 @@ impl Analyzer {
 fn word_ngrams(document: &str) -> Vec<String> {
     let words: Vec<_> = document
         .split_whitespace()
-        .filter(|word| word.len() >= 2)
+        .filter(|word| !word.is_empty())
         .collect();
     let mut features = Vec::with_capacity(words.len() * 2);
     for (index, word) in words.iter().enumerate() {

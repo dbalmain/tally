@@ -4,6 +4,7 @@
 //! operations. [`classify`] is the storage adapter used by the CLI.
 
 mod adapter;
+mod similarity;
 mod svm;
 mod tfidf;
 mod transfers;
@@ -18,6 +19,7 @@ use self::svm::LinearSvm;
 use self::tfidf::Tfidf;
 
 pub use adapter::classify;
+pub use similarity::{SIMILARITY_THRESHOLD, SimilarityIndex};
 pub use transfers::{TransferHistory, TransferInput, detect_transfers};
 
 const EXACT_CONFIDENCE: f64 = 0.99;
