@@ -485,11 +485,12 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
         &transfer_reviews,
         app.selected_index,
         &[
-            Constraint::Length(15),
-            Constraint::Length(15),
-            Constraint::Length(10),
-            Constraint::Length(6),
             Constraint::Length(12),
+            Constraint::Min(20),
+            Constraint::Length(12),
+            Constraint::Length(3),
+            Constraint::Min(20),
+            Constraint::Length(6),
         ],
         |i, transfer| {
             let is_selected = i == app.selected_index;
@@ -499,18 +500,33 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
                 Color::Reset
             };
 
+            let from = app.get_cached_transaction(transfer.from_transaction_id);
+            let to = app.get_cached_transaction(transfer.to_transaction_id);
+
+            // The two legs of a transfer share one magnitude, so show the
+            // amount once (on the "from" side) rather than duplicating it.
+            let date = from
+                .map(|tx| tx.date.to_string())
+                .unwrap_or_else(|| format!("#{}", transfer.from_transaction_id));
+            let from_desc = from.map(|tx| tx.description.clone()).unwrap_or_default();
+            let amount = from
+                .map(|tx| format_cents(tx.amount_cents))
+                .unwrap_or_default();
+            let to_desc = to.map(|tx| tx.description.clone()).unwrap_or_default();
+            let confidence = transfer
+                .ai_confidence
+                .map(format_confidence_percent)
+                .unwrap_or_default();
+
             Row::new(vec![
-                Cell::from(format!("From: {}", transfer.from_transaction_id)),
-                Cell::from(format!("To: {}", transfer.to_transaction_id)),
-                Cell::from(transfer.source.as_str()).style(Style::default().fg(Color::Cyan)),
-                Cell::from(
-                    transfer
-                        .ai_confidence
-                        .map(format_confidence_percent)
-                        .unwrap_or_default(),
-                )
-                .style(Style::default().fg(Color::Cyan)),
-                Cell::from(transfer.created_at.format("%Y-%m-%d").to_string()),
+                Cell::from(date),
+                Cell::from(from_desc),
+                Cell::from(Line::from(amount).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::Red)),
+                Cell::from("→").style(Style::default().fg(Color::Cyan)),
+                Cell::from(to_desc),
+                Cell::from(Line::from(confidence).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::Cyan)),
             ])
             .style(Style::default().bg(bg))
         },
