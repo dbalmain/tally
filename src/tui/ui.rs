@@ -10,9 +10,35 @@ use crate::{Transaction, TransactionWithEnrichment, TransferWithTransactions};
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
-use super::table::{ScrollTable, calculate_scroll_offset};
+use super::table::{ScrollTable, aligned_table, calculate_scroll_offset};
 
 const DETAILS_HEIGHT: u16 = 8;
+
+/// Inline detail height for the transfer panels: one account line aligned to
+/// the description columns, plus one source/status line.
+const TRANSFER_DETAIL_HEIGHT: u16 = 2;
+
+/// Column layout shared by the Transfers table and its inline detail, so each
+/// account lands directly under the matching description column.
+const TRANSFER_COLS: [Constraint; 6] = [
+    Constraint::Length(12),
+    Constraint::Min(20),
+    Constraint::Length(12),
+    Constraint::Length(3),
+    Constraint::Min(20),
+    Constraint::Length(12),
+];
+
+/// Same as [`TRANSFER_COLS`] but for the Transfer Review table, whose last
+/// column is the narrower confidence percentage.
+const TRANSFER_REVIEW_COLS: [Constraint; 6] = [
+    Constraint::Length(12),
+    Constraint::Min(20),
+    Constraint::Length(12),
+    Constraint::Length(3),
+    Constraint::Min(20),
+    Constraint::Length(6),
+];
 
 pub fn draw(f: &mut Frame, app: &App) {
     let has_db_search = app.db_search_active() || app.input_mode == InputMode::DbSearch;
@@ -201,44 +227,33 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    ScrollTable::new(
-        &transfers,
-        app.selected_index,
-        &[
-            Constraint::Length(12),
-            Constraint::Min(20),
-            Constraint::Length(12),
-            Constraint::Length(3),
-            Constraint::Min(20),
-            Constraint::Length(12),
-        ],
-    )
-    .detail(DETAILS_HEIGHT, |f, twt, area| {
-        draw_transfer_details(f, app, twt, area);
-    })
-    .render(f, area, |i, twt| {
-        let is_selected = i == app.selected_index;
-        let bg = if is_selected {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
+    ScrollTable::new(&transfers, app.selected_index, &TRANSFER_COLS)
+        .detail(TRANSFER_DETAIL_HEIGHT, |f, twt, area| {
+            draw_transfer_details(f, app, twt, area);
+        })
+        .render(f, area, |i, twt| {
+            let is_selected = i == app.selected_index;
+            let bg = if is_selected {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
 
-        let from = &twt.from_transaction;
-        let to = &twt.to_transaction;
+            let from = &twt.from_transaction;
+            let to = &twt.to_transaction;
 
-        Row::new(vec![
-            Cell::from(from.date.to_string()),
-            Cell::from(from.description.as_str()),
-            Cell::from(Line::from(format_cents(from.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(Color::Red)),
-            Cell::from("→").style(Style::default().fg(Color::Cyan)),
-            Cell::from(to.description.as_str()),
-            Cell::from(Line::from(format_cents(to.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(Color::Green)),
-        ])
-        .style(Style::default().bg(bg))
-    });
+            Row::new(vec![
+                Cell::from(from.date.to_string()),
+                Cell::from(from.description.as_str()),
+                Cell::from(Line::from(format_cents(from.amount_cents)).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::Red)),
+                Cell::from("→").style(Style::default().fg(Color::Cyan)),
+                Cell::from(to.description.as_str()),
+                Cell::from(Line::from(format_cents(to.amount_cents)).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::Green)),
+            ])
+            .style(Style::default().bg(bg))
+        });
 }
 
 fn draw_todo(f: &mut Frame, app: &App, area: Rect) {
@@ -425,59 +440,48 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    ScrollTable::new(
-        &transfer_reviews,
-        app.selected_index,
-        &[
-            Constraint::Length(12),
-            Constraint::Min(20),
-            Constraint::Length(12),
-            Constraint::Length(3),
-            Constraint::Min(20),
-            Constraint::Length(6),
-        ],
-    )
-    .detail(DETAILS_HEIGHT, |f, transfer, area| {
-        draw_pending_transfer_details(f, app, transfer, area);
-    })
-    .render(f, area, |i, transfer| {
-        let is_selected = i == app.selected_index;
-        let bg = if is_selected {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
+    ScrollTable::new(&transfer_reviews, app.selected_index, &TRANSFER_REVIEW_COLS)
+        .detail(TRANSFER_DETAIL_HEIGHT, |f, transfer, area| {
+            draw_pending_transfer_details(f, app, transfer, area);
+        })
+        .render(f, area, |i, transfer| {
+            let is_selected = i == app.selected_index;
+            let bg = if is_selected {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
 
-        let from = app.get_cached_transaction(transfer.from_transaction_id);
-        let to = app.get_cached_transaction(transfer.to_transaction_id);
+            let from = app.get_cached_transaction(transfer.from_transaction_id);
+            let to = app.get_cached_transaction(transfer.to_transaction_id);
 
-        // The two legs of a transfer share one magnitude, so show the
-        // amount once (on the "from" side) rather than duplicating it.
-        let date = from
-            .map(|tx| tx.date.to_string())
-            .unwrap_or_else(|| format!("#{}", transfer.from_transaction_id));
-        let from_desc = from.map(|tx| tx.description.clone()).unwrap_or_default();
-        let amount = from
-            .map(|tx| format_cents(tx.amount_cents))
-            .unwrap_or_default();
-        let to_desc = to.map(|tx| tx.description.clone()).unwrap_or_default();
-        let confidence = transfer
-            .ai_confidence
-            .map(format_confidence_percent)
-            .unwrap_or_default();
+            // The two legs of a transfer share one magnitude, so show the
+            // amount once (on the "from" side) rather than duplicating it.
+            let date = from
+                .map(|tx| tx.date.to_string())
+                .unwrap_or_else(|| format!("#{}", transfer.from_transaction_id));
+            let from_desc = from.map(|tx| tx.description.clone()).unwrap_or_default();
+            let amount = from
+                .map(|tx| format_cents(tx.amount_cents))
+                .unwrap_or_default();
+            let to_desc = to.map(|tx| tx.description.clone()).unwrap_or_default();
+            let confidence = transfer
+                .ai_confidence
+                .map(format_confidence_percent)
+                .unwrap_or_default();
 
-        Row::new(vec![
-            Cell::from(date),
-            Cell::from(from_desc),
-            Cell::from(Line::from(amount).alignment(Alignment::Right))
-                .style(Style::default().fg(Color::Red)),
-            Cell::from("→").style(Style::default().fg(Color::Cyan)),
-            Cell::from(to_desc),
-            Cell::from(Line::from(confidence).alignment(Alignment::Right))
-                .style(Style::default().fg(Color::Cyan)),
-        ])
-        .style(Style::default().bg(bg))
-    });
+            Row::new(vec![
+                Cell::from(date),
+                Cell::from(from_desc),
+                Cell::from(Line::from(amount).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::Red)),
+                Cell::from("→").style(Style::default().fg(Color::Cyan)),
+                Cell::from(to_desc),
+                Cell::from(Line::from(confidence).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::Cyan)),
+            ])
+            .style(Style::default().bg(bg))
+        });
 }
 
 fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
@@ -997,69 +1001,66 @@ fn draw_transaction_details(f: &mut Frame, app: &App, tx: &Transaction, area: Re
 }
 
 fn draw_transfer_details(f: &mut Frame, app: &App, twt: &TransferWithTransactions, area: Rect) {
-    let footer = Line::from(vec![
-        Span::styled("Created: ", Style::default().fg(Color::DarkGray)),
-        Span::raw(twt.transfer.created_at.format("%Y-%m-%d %H:%M").to_string()),
-        Span::raw("  "),
-        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
-        Span::raw(twt.transfer.source.as_str()),
-    ]);
     draw_transfer_pair(
         f,
         app,
         &twt.from_transaction,
         &twt.to_transaction,
-        footer,
+        twt.transfer.source.as_str(),
+        &TRANSFER_COLS,
         area,
     );
 }
 
-/// Render the shared "From: ... / To: ... / <footer>" block used by both the
-/// confirmed-transfer detail panel and the pending-review one. The only
-/// difference between the two panels is what goes on the footer line, so it's
-/// the caller's responsibility to construct that.
+/// Glyph shown under the `→` to indicate how the transfer was linked.
+/// `auto` (classifier-detected) is the default and shows nothing; `ai` =
+/// AI-suggested, `manual` = linked by the user.
+fn source_glyph(source: &str) -> &'static str {
+    match source {
+        "ai" => "✦",
+        "manual" => "☝",
+        _ => "",
+    }
+}
+
+/// Render the shared inline transfer detail used by both the confirmed-transfer
+/// panel and the pending-review one. Each account sits directly under its
+/// description column and the source glyph under the `→` (the panel reuses the
+/// row table's `widths` via [`aligned_table`]); the line below is left blank.
 fn draw_transfer_pair(
     f: &mut Frame,
     app: &App,
     from: &crate::Transaction,
     to: &crate::Transaction,
-    footer: Line<'_>,
+    source: &str,
+    widths: &[Constraint],
     area: Rect,
 ) {
-    let from_bank = app.bank_name(from.bank_id);
-    let from_account = app.account_name(from.account_id);
-    let to_bank = app.bank_name(to.bank_id);
-    let to_account = app.account_name(to.account_id);
+    let from_account = format!(
+        "{} / {}",
+        app.bank_name(from.bank_id),
+        app.account_name(from.account_id)
+    );
+    let to_account = format!(
+        "{} / {}",
+        app.bank_name(to.bank_id),
+        app.account_name(to.account_id)
+    );
 
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("From: ", Style::default().fg(Color::Red)),
-            Span::raw(format!(
-                "{} / {} — {} — {} — {}",
-                from_bank,
-                from_account,
-                from.date,
-                format_cents(from.amount_cents),
-                &from.description,
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("To:   ", Style::default().fg(Color::Green)),
-            Span::raw(format!(
-                "{} / {} — {} — {} — {}",
-                to_bank,
-                to_account,
-                to.date,
-                format_cents(to.amount_cents),
-                &to.description,
-            )),
-        ]),
-        footer,
-    ];
-
-    let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(paragraph, area);
+    // Empty cells in the date/amount columns push each account under its
+    // description column (indices 1 and 4) and the source glyph under the
+    // arrow (index 3), matching the row above. The remaining detail line is
+    // left blank.
+    let account_row = Row::new(vec![
+        Cell::from(""),
+        Cell::from(from_account).style(Style::default().fg(Color::DarkGray)),
+        Cell::from(""),
+        Cell::from(source_glyph(source)).style(Style::default().fg(Color::Cyan)),
+        Cell::from(to_account).style(Style::default().fg(Color::DarkGray)),
+        Cell::from(""),
+    ]);
+    let row_area = Rect { height: 1, ..area };
+    f.render_widget(aligned_table(vec![account_row], widths), row_area);
 }
 
 fn draw_ai_review_details(
@@ -1144,12 +1145,13 @@ fn draw_pending_transfer_details(f: &mut Frame, app: &App, transfer: &crate::Tra
         }
     };
 
-    let footer = Line::from(vec![
-        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
-        Span::raw(transfer.source.as_str()),
-        Span::raw("  "),
-        Span::styled("Status: ", Style::default().fg(Color::Yellow)),
-        Span::raw("Pending review"),
-    ]);
-    draw_transfer_pair(f, app, from_tx, to_tx, footer, area);
+    draw_transfer_pair(
+        f,
+        app,
+        from_tx,
+        to_tx,
+        transfer.source.as_str(),
+        &TRANSFER_REVIEW_COLS,
+        area,
+    );
 }

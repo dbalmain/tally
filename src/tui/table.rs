@@ -183,6 +183,15 @@ fn render_row_range<'a, T>(
     );
 }
 
+/// Build a table with this module's standard column spacing and flex, so an
+/// overlay (e.g. an inline detail line) lines up under the same columns a
+/// [`ScrollTable`] rendered. Pass the same `widths` the rows used.
+pub(crate) fn aligned_table<'a>(rows: Vec<Row<'a>>, widths: &[Constraint]) -> Table<'a> {
+    Table::new(rows, widths.to_vec())
+        .column_spacing(COLUMN_SPACING)
+        .flex(TABLE_FLEX)
+}
+
 fn resolve_column_widths(widths: &[Constraint], area: Rect) -> Vec<Constraint> {
     if widths.is_empty() {
         return Vec::new();
