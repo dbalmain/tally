@@ -16,10 +16,11 @@ fix this file.
 ```bash
 cargo build           # Build
 cargo test            # Run tests
-cargo run             # Refresh transactions from exports/
+cargo run             # Launch terminal UI
+cargo run -- pull     # Refresh transactions from exports/
 cargo run -- tui      # Launch terminal UI (--tui also accepted)
 cargo run -- classify # Suggest categories locally (temporal history + TF-IDF/SVM)
-cargo run -- --collection PATH  # Use PATH as the collection root (or set FM_COLLECTION)
+cargo run -- --vault PATH  # Use PATH as the vault root (or set FM_VAULT)
 ```
 
 ## Project Goals

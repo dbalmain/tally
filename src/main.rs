@@ -2,8 +2,16 @@ use std::path::{Path, PathBuf};
 use tally::TransactionStore;
 
 struct CliArgs {
-    collection: Option<PathBuf>,
+    vault: Option<PathBuf>,
     command: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Tui,
+    Refresh,
+    Classify,
+    Help { to_stderr: bool },
 }
 
 fn main() {
@@ -15,13 +23,23 @@ fn main() {
     }
 
     let args = parse_cli_args(std::env::args().skip(1));
-    let collection_root = args
-        .collection
-        .or_else(|| std::env::var_os("FM_COLLECTION").map(PathBuf::from))
+    let vault_root = args
+        .vault
+        .or_else(|| std::env::var_os("FM_VAULT").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let exports_dir = collection_root.join("exports");
-    let db_path = collection_root.join("tally.db");
+    let action = action_for_command(args.command.as_deref());
+
+    if let Action::Help { to_stderr } = action {
+        print_help(to_stderr);
+        if to_stderr {
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let exports_dir = vault_root.join("exports");
+    let db_path = vault_root.join("tally.db");
 
     // A vault has an `exports/` directory. Bail before opening the store so we
     // don't create a stray tally.db in a directory that isn't a vault.
@@ -30,33 +48,60 @@ fn main() {
         std::process::exit(1);
     }
 
-    match args.command.as_deref() {
-        Some("tui") | Some("--tui") => run_tui(&db_path, &exports_dir),
-        Some("classify") => run_classify(&collection_root, &db_path, &exports_dir),
-        _ => run_refresh(&db_path, &exports_dir),
+    match action {
+        Action::Tui => run_tui(&db_path, &exports_dir),
+        Action::Refresh => run_refresh(&db_path, &exports_dir),
+        Action::Classify => run_classify(&vault_root, &db_path, &exports_dir),
+        Action::Help { .. } => unreachable!("help action returned before vault validation"),
     }
 }
 
 fn parse_cli_args(args: impl IntoIterator<Item = String>) -> CliArgs {
     let mut args = args.into_iter();
-    let mut collection = None;
+    let mut vault = None;
     let mut command = None;
 
     while let Some(arg) = args.next() {
-        if arg == "--collection" {
-            collection = Some(PathBuf::from(
-                args.next().expect("--collection requires a path"),
-            ));
-        } else if let Some(path) = arg.strip_prefix("--collection=") {
-            collection = Some(PathBuf::from(path));
+        if arg == "--vault" {
+            vault = Some(PathBuf::from(args.next().expect("--vault requires a path")));
+        } else if let Some(path) = arg.strip_prefix("--vault=") {
+            vault = Some(PathBuf::from(path));
         } else if command.is_none() {
             command = Some(arg);
         }
     }
 
-    CliArgs {
-        collection,
-        command,
+    CliArgs { vault, command }
+}
+
+fn action_for_command(command: Option<&str>) -> Action {
+    match command {
+        None | Some("tui") | Some("--tui") => Action::Tui,
+        Some("pull") => Action::Refresh,
+        Some("classify") => Action::Classify,
+        Some("--help") | Some("-h") => Action::Help { to_stderr: false },
+        Some(_) => Action::Help { to_stderr: true },
+    }
+}
+
+fn print_help(to_stderr: bool) {
+    let help = "\
+Usage: tally [--vault PATH] [COMMAND]
+
+Commands:
+  (none)     Launch the terminal UI (default)
+  pull       Refresh transactions from exports/ (run import/pull scripts)
+  classify   Suggest categories and detect transfers locally
+  tui        Launch the terminal UI
+
+Global flags:
+  --vault PATH   Use PATH as the vault root (or set FM_VAULT)
+";
+
+    if to_stderr {
+        eprint!("{help}");
+    } else {
+        print!("{help}");
     }
 }
 
@@ -113,11 +158,10 @@ fn run_tui(db_path: &Path, exports_dir: &Path) {
     }
 }
 
-fn run_classify(collection_root: &Path, db_path: &Path, exports_dir: &Path) {
+fn run_classify(vault_root: &Path, db_path: &Path, exports_dir: &Path) {
     let mut store =
         TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
-    let report =
-        tally::classify::classify(&mut store, collection_root).expect("Failed to classify");
+    let report = tally::classify::classify(&mut store, vault_root).expect("Failed to classify");
 
     println!("Classification complete:");
     println!("  Transfers detected: {}", report.transfers);
@@ -132,26 +176,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_collection_before_command() {
-        let args = parse_cli_args(["--collection", "/tmp/finances", "tui"].map(String::from));
+    fn parses_vault_before_command() {
+        let args = parse_cli_args(["--vault", "/tmp/finances", "tui"].map(String::from));
 
-        assert_eq!(args.collection, Some(PathBuf::from("/tmp/finances")));
+        assert_eq!(args.vault, Some(PathBuf::from("/tmp/finances")));
         assert_eq!(args.command.as_deref(), Some("tui"));
     }
 
     #[test]
-    fn parses_collection_after_command() {
-        let args = parse_cli_args(["--tui", "--collection=finances"].map(String::from));
+    fn parses_vault_after_command() {
+        let args = parse_cli_args(["--tui", "--vault=finances"].map(String::from));
 
-        assert_eq!(args.collection, Some(PathBuf::from("finances")));
+        assert_eq!(args.vault, Some(PathBuf::from("finances")));
         assert_eq!(args.command.as_deref(), Some("--tui"));
     }
 
     #[test]
-    fn collection_flag_does_not_change_unknown_command_behavior() {
-        let args = parse_cli_args(["refresh", "--collection", "finances"].map(String::from));
+    fn vault_flag_does_not_change_unknown_command_behavior() {
+        let args = parse_cli_args(["refresh", "--vault", "finances"].map(String::from));
 
-        assert_eq!(args.collection, Some(PathBuf::from("finances")));
+        assert_eq!(args.vault, Some(PathBuf::from("finances")));
         assert_eq!(args.command.as_deref(), Some("refresh"));
+    }
+
+    #[test]
+    fn resolves_command_actions() {
+        assert_eq!(action_for_command(None), Action::Tui);
+        assert_eq!(action_for_command(Some("pull")), Action::Refresh);
+        assert_eq!(
+            action_for_command(Some("refresh")),
+            Action::Help { to_stderr: true }
+        );
     }
 }

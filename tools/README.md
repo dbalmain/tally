@@ -54,7 +54,7 @@ tools/pocketsmith-pull list
 tools/pocketsmith-pull sync
 
 # Import one collection. Tally runs each account folder's `pull` shim.
-cargo run -- --collection "$FM_ROOT/personal"
+cargo run -- --vault "$FM_ROOT/personal" pull
 ```
 
 You can rename the generated folders however you like — the shims key off the
