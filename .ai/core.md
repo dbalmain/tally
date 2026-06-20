@@ -36,6 +36,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 | You want to change… | Look in |
 |---|---|
 | Colors, layout, table columns, details panels, popups | `src/tui/ui.rs` |
+| Scrollable table component / inline detail panel / column geometry | `src/tui/table.rs` |
 | Normal-mode key dispatch / footer hints / `?` popover | `src/tui/keymap.rs` (`normal_binds` is the single source of truth) |
 | Modal-mode key dispatch | `src/tui/mod.rs` (one match per modal `InputMode`; update curated hints in `src/tui/keymap.rs` too) |
 | App state, actions, data loading, caches | `src/tui/app/mod.rs` |
@@ -78,6 +79,7 @@ src/
     ├── mod.rs              # TUI entry point, event loop, key dispatch
     ├── keymap.rs           # Normal-mode key table + footer/help hint text
     ├── ui.rs               # Rendering: layout, tables, details, popups
+    ├── table.rs            # Domain-agnostic scrollable table + inline detail panel geometry
     ├── search_bar.rs       # Search bar widget (context-aware keys, autocomplete)
     ├── filtered_list.rs    # FilteredList<T>: items + fuzzy-filtered view
     └── app/
@@ -224,8 +226,9 @@ handling and data flow stay uniform:
   `match app.current_tab` to other files; add a method to `TabLists` instead.
 - **Rendering never queries the DB** — `ui.rs` reads `App` state and the
   caches (`get_cached_transaction/category/transfer`).
-- **Tables use `draw_scrolled_table`** (`ui.rs`) — it owns scroll-offset math;
-  the per-view closure owns row content and styling.
+- **Tables use `ScrollTable`** (`src/tui/table.rs`) — it owns scroll-offset
+  math, inline detail placement, and column geometry; per-view closures own row
+  content, styling, and optional detail rendering.
 - **Normal-mode keys live in `keymap.rs`** — `normal_binds(app)` drives
   dispatch, the bottom key-hint bar, and the `?` keybind popover. The hint bar
   starts visible each launch; `Alt-?` toggles it for the session.
@@ -281,8 +284,8 @@ Store query methods don't change; the search bar UI is filter-agnostic.
    plain transactions) `transaction_at` / `position_of_tx`.
 2. `src/tui/app/search.rs` — decide the tab's filters in
    `build_search_config`.
-3. `src/tui/ui.rs` — add a `draw_…` function (use `draw_scrolled_table`) and
-   dispatch to it from `draw()`.
+3. `src/tui/ui.rs` — add a `draw_…` function (use `ScrollTable`) and dispatch
+   to it from `draw()`.
 4. If new data feeds the caches, extend `rebuild_tx_caches` in
    `src/tui/app/mod.rs`.
 5. Update the key-binding/tab docs in this file.

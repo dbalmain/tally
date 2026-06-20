@@ -2,6 +2,7 @@ mod app;
 mod filtered_list;
 mod keymap;
 pub mod search_bar;
+mod table;
 mod ui;
 
 pub use app::App;

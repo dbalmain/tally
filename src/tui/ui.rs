@@ -3,13 +3,14 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Tabs},
 };
 
 use crate::{Transaction, TransactionWithEnrichment, TransferWithTransactions};
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
+use super::table::{ScrollTable, calculate_scroll_offset};
 
 const DETAILS_HEIGHT: u16 = 8;
 
@@ -188,15 +189,8 @@ fn draw_key_hints(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_transactions(f: &mut Frame, app: &App, area: Rect) {
-    let chunks =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(area);
-
     let transactions: Vec<_> = app.lists.transactions.iter().collect();
-    draw_transaction_table(f, app, &transactions, app.selected_index, chunks[0]);
-
-    if let Some(tx) = app.lists.transactions.get(app.selected_index) {
-        draw_transaction_details(f, app, tx, chunks[1]);
-    }
+    draw_transaction_table(f, app, &transactions, app.selected_index, area);
 }
 
 fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
@@ -207,12 +201,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let chunks =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(area);
-
-    draw_scrolled_table(
-        f,
-        chunks[0],
+    ScrollTable::new(
         &transfers,
         app.selected_index,
         &[
@@ -223,65 +212,46 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Min(20),
             Constraint::Length(12),
         ],
-        |i, twt| {
-            let is_selected = i == app.selected_index;
-            let bg = if is_selected {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
+    )
+    .detail(DETAILS_HEIGHT, |f, twt, area| {
+        draw_transfer_details(f, app, twt, area);
+    })
+    .render(f, area, |i, twt| {
+        let is_selected = i == app.selected_index;
+        let bg = if is_selected {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
 
-            let from = &twt.from_transaction;
-            let to = &twt.to_transaction;
+        let from = &twt.from_transaction;
+        let to = &twt.to_transaction;
 
-            Row::new(vec![
-                Cell::from(from.date.to_string()),
-                Cell::from(from.description.as_str()),
-                Cell::from(Line::from(format_cents(from.amount_cents)).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Red)),
-                Cell::from("→").style(Style::default().fg(Color::Cyan)),
-                Cell::from(to.description.as_str()),
-                Cell::from(Line::from(format_cents(to.amount_cents)).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Green)),
-            ])
-            .style(Style::default().bg(bg))
-        },
-    );
-
-    if let Some(twt) = app.lists.linked_transfers.get(app.selected_index) {
-        draw_transfer_details(f, app, twt, chunks[1]);
-    }
+        Row::new(vec![
+            Cell::from(from.date.to_string()),
+            Cell::from(from.description.as_str()),
+            Cell::from(Line::from(format_cents(from.amount_cents)).alignment(Alignment::Right))
+                .style(Style::default().fg(Color::Red)),
+            Cell::from("→").style(Style::default().fg(Color::Cyan)),
+            Cell::from(to.description.as_str()),
+            Cell::from(Line::from(format_cents(to.amount_cents)).alignment(Alignment::Right))
+                .style(Style::default().fg(Color::Green)),
+        ])
+        .style(Style::default().bg(bg))
+    });
 }
 
 fn draw_todo(f: &mut Frame, app: &App, area: Rect) {
-    let content_chunks =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(DETAILS_HEIGHT)]).split(area);
-
     match app.todo_subtab {
         TodoSubTab::Uncategorised => {
             let uncategorised: Vec<_> = app.lists.uncategorised.iter().collect();
-            draw_transaction_table(
-                f,
-                app,
-                &uncategorised,
-                app.selected_index,
-                content_chunks[0],
-            );
-            if let Some(tx) = app.lists.uncategorised.get(app.selected_index) {
-                draw_transaction_details(f, app, tx, content_chunks[1]);
-            }
+            draw_transaction_table(f, app, &uncategorised, app.selected_index, area);
         }
         TodoSubTab::AiReview => {
-            draw_ai_review_table(f, app, content_chunks[0]);
-            if let Some(review) = app.lists.ai_reviews.get(app.selected_index) {
-                draw_ai_review_details(f, app, review, content_chunks[1]);
-            }
+            draw_ai_review_table(f, app, area);
         }
         TodoSubTab::TransferReview => {
-            draw_transfer_review_table(f, app, content_chunks[0]);
-            if let Some(transfer) = app.lists.transfer_reviews.get(app.selected_index) {
-                draw_pending_transfer_details(f, app, transfer, content_chunks[1]);
-            }
+            draw_transfer_review_table(f, app, area);
         }
     }
 }
@@ -313,32 +283,6 @@ fn draw_todo_subtabs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(subtabs, area);
 }
 
-/// Shared scaffold for the scrolling list views: computes the scroll offset
-/// from the selection, renders only the visible window, and delegates row
-/// construction (including styling) to `row`, which receives each item's
-/// visible index for selection comparisons.
-fn draw_scrolled_table<'a, T>(
-    f: &mut Frame,
-    area: Rect,
-    items: &[&'a T],
-    selected: usize,
-    widths: &[Constraint],
-    mut row: impl FnMut(usize, &'a T) -> Row<'a>,
-) {
-    let visible_height = area.height as usize;
-    let offset = calculate_scroll_offset(selected, items.len(), visible_height);
-
-    let rows: Vec<Row> = items
-        .iter()
-        .enumerate()
-        .skip(offset)
-        .take(visible_height)
-        .map(|(i, item)| row(i, item))
-        .collect();
-
-    f.render_widget(Table::new(rows, widths.to_vec()), area);
-}
-
 /// Dimmed placeholder for views with nothing to show.
 fn draw_empty_message(f: &mut Frame, message: &str, area: Rect) {
     let text = Paragraph::new(vec![
@@ -358,9 +302,7 @@ fn draw_transaction_table(
     selected: usize,
     area: Rect,
 ) {
-    draw_scrolled_table(
-        f,
-        area,
+    ScrollTable::new(
         transactions,
         selected,
         &[
@@ -369,59 +311,60 @@ fn draw_transaction_table(
             Constraint::Length(12),
             Constraint::Length(12),
         ],
-        |i, tx| {
-            let is_selected = i == selected;
-            let is_pending = app.is_pending_transfer_tx(tx.id);
-            let is_candidate = app.is_transfer_candidate(tx.id);
-            let is_disabled =
-                app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
+    )
+    .detail(DETAILS_HEIGHT, |f, tx, area| {
+        draw_transaction_details(f, app, tx, area);
+    })
+    .render(f, area, |i, tx| {
+        let is_selected = i == selected;
+        let is_pending = app.is_pending_transfer_tx(tx.id);
+        let is_candidate = app.is_transfer_candidate(tx.id);
+        let is_disabled =
+            app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
 
-            let bg = if is_pending {
-                Color::Blue
-            } else if is_selected && app.input_mode == InputMode::TransferPending {
-                Color::Green
-            } else if is_selected {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
+        let bg = if is_pending {
+            Color::Blue
+        } else if is_selected && app.input_mode == InputMode::TransferPending {
+            Color::Green
+        } else if is_selected {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
 
-            let fg = if is_disabled {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
+        let fg = if is_disabled {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
 
-            let amount_color = if is_disabled {
-                Color::DarkGray
-            } else if tx.amount_cents < 0 {
-                Color::Red
-            } else {
-                Color::Green
-            };
+        let amount_color = if is_disabled {
+            Color::DarkGray
+        } else if tx.amount_cents < 0 {
+            Color::Red
+        } else {
+            Color::Green
+        };
 
-            let amount = format_cents(tx.amount_cents);
-            let balance = format_cents(tx.balance_cents);
+        let amount = format_cents(tx.amount_cents);
+        let balance = format_cents(tx.balance_cents);
 
-            Row::new(vec![
-                Cell::from(tx.date.to_string()).style(Style::default().fg(fg)),
-                Cell::from(tx.description.as_str()).style(Style::default().fg(fg)),
-                Cell::from(Line::from(amount).alignment(Alignment::Right))
-                    .style(Style::default().fg(amount_color)),
-                Cell::from(Line::from(balance).alignment(Alignment::Right))
-                    .style(Style::default().fg(fg)),
-            ])
-            .style(Style::default().bg(bg))
-        },
-    );
+        Row::new(vec![
+            Cell::from(tx.date.to_string()).style(Style::default().fg(fg)),
+            Cell::from(tx.description.as_str()).style(Style::default().fg(fg)),
+            Cell::from(Line::from(amount).alignment(Alignment::Right))
+                .style(Style::default().fg(amount_color)),
+            Cell::from(Line::from(balance).alignment(Alignment::Right))
+                .style(Style::default().fg(fg)),
+        ])
+        .style(Style::default().bg(bg))
+    });
 }
 
 fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
     let ai_reviews: Vec<_> = app.lists.ai_reviews.iter().collect();
 
-    draw_scrolled_table(
-        f,
-        area,
+    ScrollTable::new(
         &ai_reviews,
         app.selected_index,
         &[
@@ -431,44 +374,47 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(25),
             Constraint::Length(6),
         ],
-        |i, review| {
-            let is_selected = i == app.selected_index;
-            let bg = if is_selected {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
+    )
+    .detail(DETAILS_HEIGHT, |f, review, area| {
+        draw_ai_review_details(f, app, review, area);
+    })
+    .render(f, area, |i, review| {
+        let is_selected = i == app.selected_index;
+        let bg = if is_selected {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
 
-            let tx = &review.transaction;
-            let category_path = review
-                .category
-                .as_ref()
-                .map(|c| c.path.as_str())
-                .unwrap_or("-");
-            let confidence = review
-                .enrichment
-                .as_ref()
-                .and_then(|e| e.ai_confidence)
-                .map(format_confidence_percent)
-                .unwrap_or_default();
+        let tx = &review.transaction;
+        let category_path = review
+            .category
+            .as_ref()
+            .map(|c| c.path.as_str())
+            .unwrap_or("-");
+        let confidence = review
+            .enrichment
+            .as_ref()
+            .and_then(|e| e.ai_confidence)
+            .map(format_confidence_percent)
+            .unwrap_or_default();
 
-            let amount_color = if tx.amount_cents < 0 {
-                Color::Red
-            } else {
-                Color::Green
-            };
+        let amount_color = if tx.amount_cents < 0 {
+            Color::Red
+        } else {
+            Color::Green
+        };
 
-            Row::new(vec![
-                Cell::from(tx.date.to_string()),
-                Cell::from(tx.description.as_str()),
-                Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
-                    .style(Style::default().fg(amount_color)),
-                Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
-                Cell::from(confidence).style(Style::default().fg(Color::Cyan)),
-            ])
-            .style(Style::default().bg(bg))
-        },
-    );
+        Row::new(vec![
+            Cell::from(tx.date.to_string()),
+            Cell::from(tx.description.as_str()),
+            Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
+                .style(Style::default().fg(amount_color)),
+            Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
+            Cell::from(confidence).style(Style::default().fg(Color::Cyan)),
+        ])
+        .style(Style::default().bg(bg))
+    });
 }
 
 fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
@@ -479,9 +425,7 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    draw_scrolled_table(
-        f,
-        area,
+    ScrollTable::new(
         &transfer_reviews,
         app.selected_index,
         &[
@@ -492,45 +436,48 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Min(20),
             Constraint::Length(6),
         ],
-        |i, transfer| {
-            let is_selected = i == app.selected_index;
-            let bg = if is_selected {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
+    )
+    .detail(DETAILS_HEIGHT, |f, transfer, area| {
+        draw_pending_transfer_details(f, app, transfer, area);
+    })
+    .render(f, area, |i, transfer| {
+        let is_selected = i == app.selected_index;
+        let bg = if is_selected {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
 
-            let from = app.get_cached_transaction(transfer.from_transaction_id);
-            let to = app.get_cached_transaction(transfer.to_transaction_id);
+        let from = app.get_cached_transaction(transfer.from_transaction_id);
+        let to = app.get_cached_transaction(transfer.to_transaction_id);
 
-            // The two legs of a transfer share one magnitude, so show the
-            // amount once (on the "from" side) rather than duplicating it.
-            let date = from
-                .map(|tx| tx.date.to_string())
-                .unwrap_or_else(|| format!("#{}", transfer.from_transaction_id));
-            let from_desc = from.map(|tx| tx.description.clone()).unwrap_or_default();
-            let amount = from
-                .map(|tx| format_cents(tx.amount_cents))
-                .unwrap_or_default();
-            let to_desc = to.map(|tx| tx.description.clone()).unwrap_or_default();
-            let confidence = transfer
-                .ai_confidence
-                .map(format_confidence_percent)
-                .unwrap_or_default();
+        // The two legs of a transfer share one magnitude, so show the
+        // amount once (on the "from" side) rather than duplicating it.
+        let date = from
+            .map(|tx| tx.date.to_string())
+            .unwrap_or_else(|| format!("#{}", transfer.from_transaction_id));
+        let from_desc = from.map(|tx| tx.description.clone()).unwrap_or_default();
+        let amount = from
+            .map(|tx| format_cents(tx.amount_cents))
+            .unwrap_or_default();
+        let to_desc = to.map(|tx| tx.description.clone()).unwrap_or_default();
+        let confidence = transfer
+            .ai_confidence
+            .map(format_confidence_percent)
+            .unwrap_or_default();
 
-            Row::new(vec![
-                Cell::from(date),
-                Cell::from(from_desc),
-                Cell::from(Line::from(amount).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Red)),
-                Cell::from("→").style(Style::default().fg(Color::Cyan)),
-                Cell::from(to_desc),
-                Cell::from(Line::from(confidence).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Cyan)),
-            ])
-            .style(Style::default().bg(bg))
-        },
-    );
+        Row::new(vec![
+            Cell::from(date),
+            Cell::from(from_desc),
+            Cell::from(Line::from(amount).alignment(Alignment::Right))
+                .style(Style::default().fg(Color::Red)),
+            Cell::from("→").style(Style::default().fg(Color::Cyan)),
+            Cell::from(to_desc),
+            Cell::from(Line::from(confidence).alignment(Alignment::Right))
+                .style(Style::default().fg(Color::Cyan)),
+        ])
+        .style(Style::default().bg(bg))
+    });
 }
 
 fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
@@ -541,30 +488,28 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    draw_scrolled_table(
-        f,
-        area,
+    ScrollTable::new(
         &categories,
         app.selected_index,
         &[Constraint::Length(4), Constraint::Min(30)],
-        |i, cat| {
-            let is_selected = i == app.selected_index;
-            let (bg, count_fg) = if is_selected {
-                (Color::DarkGray, Color::Gray)
-            } else {
-                (Color::Reset, Color::DarkGray)
-            };
+    )
+    .render(f, area, |i, cat| {
+        let is_selected = i == app.selected_index;
+        let (bg, count_fg) = if is_selected {
+            (Color::DarkGray, Color::Gray)
+        } else {
+            (Color::Reset, Color::DarkGray)
+        };
 
-            let tx_count = app.category_transaction_count(cat.id);
+        let tx_count = app.category_transaction_count(cat.id);
 
-            Row::new(vec![
-                Cell::from(Line::from(format!("{}", tx_count)).alignment(Alignment::Right))
-                    .style(Style::default().fg(count_fg)),
-                Cell::from(cat.path.as_str()).style(Style::default().fg(Color::Yellow)),
-            ])
-            .style(Style::default().bg(bg))
-        },
-    );
+        Row::new(vec![
+            Cell::from(Line::from(format!("{}", tx_count)).alignment(Alignment::Right))
+                .style(Style::default().fg(count_fg)),
+            Cell::from(cat.path.as_str()).style(Style::default().fg(Color::Yellow)),
+        ])
+        .style(Style::default().bg(bg))
+    });
 }
 
 fn draw_keybind_popup(f: &mut Frame, app: &App) {
@@ -786,9 +731,7 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
     };
 
     let rows: Vec<_> = state.rows.iter().collect();
-    draw_scrolled_table(
-        f,
-        inner,
+    ScrollTable::new(
         &rows,
         state.cursor,
         &[
@@ -798,38 +741,36 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
             Constraint::Length(12),
             Constraint::Length(6),
         ],
-        |i, row| {
-            let bg = if i == state.cursor {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
-            let amount_color = if row.tx.amount_cents < 0 {
-                Color::Red
-            } else {
-                Color::Green
-            };
-            let checkbox = if row.selected { "[x]" } else { "[ ]" };
-            let checkbox_color = if row.selected {
-                Color::Green
-            } else {
-                Color::DarkGray
-            };
+    )
+    .render(f, inner, |i, row| {
+        let bg = if i == state.cursor {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
+        let amount_color = if row.tx.amount_cents < 0 {
+            Color::Red
+        } else {
+            Color::Green
+        };
+        let checkbox = if row.selected { "[x]" } else { "[ ]" };
+        let checkbox_color = if row.selected {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
 
-            Row::new(vec![
-                Cell::from(checkbox).style(Style::default().fg(checkbox_color)),
-                Cell::from(row.tx.date.to_string()),
-                Cell::from(row.tx.description.as_str()),
-                Cell::from(
-                    Line::from(format_cents(row.tx.amount_cents)).alignment(Alignment::Right),
-                )
+        Row::new(vec![
+            Cell::from(checkbox).style(Style::default().fg(checkbox_color)),
+            Cell::from(row.tx.date.to_string()),
+            Cell::from(row.tx.description.as_str()),
+            Cell::from(Line::from(format_cents(row.tx.amount_cents)).alignment(Alignment::Right))
                 .style(Style::default().fg(amount_color)),
-                Cell::from(format_confidence_percent(f64::from(row.score)))
-                    .style(Style::default().fg(Color::Cyan)),
-            ])
-            .style(Style::default().bg(bg))
-        },
-    );
+            Cell::from(format_confidence_percent(f64::from(row.score)))
+                .style(Style::default().fg(Color::Cyan)),
+        ])
+        .style(Style::default().bg(bg))
+    });
 }
 
 /// Render the filter autocomplete popup anchored below the DB search bar.
@@ -936,16 +877,6 @@ fn draw_error_popup(f: &mut Frame, msg: &str) {
         .style(Style::default().fg(Color::White));
 
     f.render_widget(paragraph, area);
-}
-
-fn calculate_scroll_offset(selected: usize, total: usize, visible_height: usize) -> usize {
-    if total <= visible_height || selected < visible_height / 2 {
-        0
-    } else if selected > total - visible_height / 2 {
-        total.saturating_sub(visible_height)
-    } else {
-        selected.saturating_sub(visible_height / 2)
-    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
