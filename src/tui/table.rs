@@ -192,6 +192,19 @@ pub(crate) fn aligned_table<'a>(rows: Vec<Row<'a>>, widths: &[Constraint]) -> Ta
         .flex(TABLE_FLEX)
 }
 
+/// The x-offset and width of column `index` extended to the right edge of
+/// `area`, using this module's column geometry. Lets an inline detail line
+/// start under a given column (e.g. the description) yet span the rest of the
+/// row width.
+pub(crate) fn column_span(widths: &[Constraint], area: Rect, index: usize) -> (u16, u16) {
+    let cols = Layout::horizontal(widths)
+        .flex(TABLE_FLEX)
+        .spacing(COLUMN_SPACING)
+        .split(Rect { height: 1, ..area });
+    let x = cols.get(index).map_or(area.x, |r| r.x);
+    (x, area.right().saturating_sub(x))
+}
+
 fn resolve_column_widths(widths: &[Constraint], area: Rect) -> Vec<Constraint> {
     if widths.is_empty() {
         return Vec::new();

@@ -85,6 +85,8 @@ pub struct App {
     pub refreshing: bool,
     pub keybind_help_open: bool,
     pub hints_visible: bool,
+    /// Whether transaction detail panels expand to show source + metadata.
+    pub tx_details_expanded: bool,
     // Category popup state
     pub category_input: String,
     pub category_suggestions: Vec<Category>,
@@ -161,6 +163,7 @@ impl App {
             refreshing,
             keybind_help_open: false,
             hints_visible: true,
+            tx_details_expanded: false,
             category_input: String::new(),
             category_suggestions: Vec::new(),
             category_selected: 0,
@@ -483,6 +486,11 @@ impl App {
 
     pub fn selected_transaction(&self) -> Option<&Transaction> {
         self.get_current_transaction(self.selected_index)
+    }
+
+    /// Toggle the expanded (source + metadata) transaction detail panel.
+    pub fn toggle_tx_details(&mut self) {
+        self.tx_details_expanded = !self.tx_details_expanded;
     }
 
     // ==================== Data Loading ====================

@@ -333,6 +333,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
 | `d` / `Delete` | Delete transfer (Transfers tab) |
 | `Delete` | Transactions tab: unlink transfer, else remove category. AI Review: remove category. Transfer Review: unlink transfer |
+| `M` | Toggle source + metadata lines in the transaction detail (Transactions tab, Todo → Uncategorised) |
 | `Enter` | Confirm (AI review, transfer review) |
 | `Esc` | Clear active search (fuzzy first, then DB) |
 | `?` | Show keybind popover |

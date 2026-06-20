@@ -47,6 +47,7 @@ pub enum Act {
     RemoveCategory,
     Confirm,
     ClearSearch,
+    ToggleDetails,
 }
 
 #[derive(Debug)]
@@ -126,6 +127,10 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
             true,
             DeleteTxLink,
         ));
+    }
+
+    if is_transaction_view(app) && app.selected_transaction().is_some() {
+        out.push(b(&[Char('M')], "M", "details", true, true, ToggleDetails));
     }
 
     if app.current_tab == Tab::Transfers
@@ -238,6 +243,13 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     out
 }
 
+/// The views whose rows are plain transactions with the expandable detail
+/// panel (Transactions tab and the Todo → Uncategorised subtab).
+fn is_transaction_view(app: &App) -> bool {
+    app.current_tab == Tab::Transactions
+        || (app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::Uncategorised)
+}
+
 fn confirm_desc(app: &App) -> Option<&'static str> {
     if app.current_tab != Tab::Todo {
         return None;
@@ -292,6 +304,7 @@ fn run_normal(app: &mut App, act: Act) {
             app.confirm_transfer_review();
         }
         Act::ClearSearch => app.clear_search(),
+        Act::ToggleDetails => app.toggle_tx_details(),
     }
 }
 

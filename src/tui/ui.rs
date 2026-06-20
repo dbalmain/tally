@@ -10,7 +10,7 @@ use crate::{Transaction, TransactionWithEnrichment, TransferWithTransactions};
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
-use super::table::{ScrollTable, aligned_table, calculate_scroll_offset};
+use super::table::{ScrollTable, aligned_table, calculate_scroll_offset, column_span};
 
 const DETAILS_HEIGHT: u16 = 8;
 
@@ -38,6 +38,17 @@ const TRANSFER_REVIEW_COLS: [Constraint; 6] = [
     Constraint::Length(3),
     Constraint::Min(20),
     Constraint::Length(6),
+];
+
+/// Column layout shared by the transaction table and its inline detail, so the
+/// account/source/metadata lines land under the description column. The third
+/// column holds the category or transfer counterpart.
+const TRANSACTION_COLS: [Constraint; 5] = [
+    Constraint::Length(12),
+    Constraint::Min(20),
+    Constraint::Min(16),
+    Constraint::Length(12),
+    Constraint::Length(12),
 ];
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -317,63 +328,118 @@ fn draw_transaction_table(
     selected: usize,
     area: Rect,
 ) {
-    ScrollTable::new(
-        transactions,
-        selected,
-        &[
-            Constraint::Length(12),
-            Constraint::Min(30),
-            Constraint::Length(12),
-            Constraint::Length(12),
-        ],
-    )
-    .detail(DETAILS_HEIGHT, |f, tx, area| {
-        draw_transaction_details(f, app, tx, area);
-    })
-    .render(f, area, |i, tx| {
-        let is_selected = i == selected;
-        let is_pending = app.is_pending_transfer_tx(tx.id);
-        let is_candidate = app.is_transfer_candidate(tx.id);
-        let is_disabled =
-            app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
+    let detail_height = transaction_detail_height(app, transactions.get(selected).copied());
 
-        let bg = if is_pending {
-            Color::Blue
-        } else if is_selected && app.input_mode == InputMode::TransferPending {
-            Color::Green
-        } else if is_selected {
+    ScrollTable::new(transactions, selected, &TRANSACTION_COLS)
+        .detail(detail_height, |f, tx, area| {
+            draw_transaction_details(f, app, tx, area);
+        })
+        .render(f, area, |i, tx| {
+            let is_selected = i == selected;
+            let is_pending = app.is_pending_transfer_tx(tx.id);
+            let is_candidate = app.is_transfer_candidate(tx.id);
+            let is_disabled =
+                app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
+
+            let bg = if is_pending {
+                Color::Blue
+            } else if is_selected && app.input_mode == InputMode::TransferPending {
+                Color::Green
+            } else if is_selected {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
+
+            let fg = if is_disabled {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
+
+            let amount_color = if is_disabled {
+                Color::DarkGray
+            } else if tx.amount_cents < 0 {
+                Color::Red
+            } else {
+                Color::Green
+            };
+
+            let amount = format_cents(tx.amount_cents);
+            let balance = format_cents(tx.balance_cents);
+
+            // The selected row shows the account here and moves the full
+            // (untruncated) description into the detail line below it.
+            let middle = if is_selected {
+                format!(
+                    "{} / {}",
+                    app.bank_name(tx.bank_id),
+                    app.account_name(tx.account_id)
+                )
+            } else {
+                tx.description.clone()
+            };
+
+            Row::new(vec![
+                Cell::from(tx.date.to_string()).style(Style::default().fg(fg)),
+                Cell::from(middle).style(Style::default().fg(fg)),
+                category_or_transfer_cell(app, tx, is_disabled),
+                Cell::from(Line::from(amount).alignment(Alignment::Right))
+                    .style(Style::default().fg(amount_color)),
+                Cell::from(Line::from(balance).alignment(Alignment::Right))
+                    .style(Style::default().fg(fg)),
+            ])
+            .style(Style::default().bg(bg))
+        });
+}
+
+/// The third transaction column: the category path (yellow, like the
+/// Categories tab) or, for a transfer, `to:`/`from:` the counterpart account
+/// (cyan). Dimmed to match a disabled row during transfer marking.
+fn category_or_transfer_cell(app: &App, tx: &Transaction, dimmed: bool) -> Cell<'static> {
+    if let Some(transfer) = app.get_cached_transfer(tx.id) {
+        let (label, other_id) = if transfer.from_transaction_id == tx.id {
+            ("to", transfer.to_transaction_id)
+        } else {
+            ("from", transfer.from_transaction_id)
+        };
+        let account = app
+            .get_cached_transaction(other_id)
+            .map(|other| app.account_name(other.account_id))
+            .unwrap_or_default();
+        let color = if dimmed { Color::DarkGray } else { Color::Cyan };
+        Cell::from(Line::from(format!("{label}:{account}")).alignment(Alignment::Right))
+            .style(Style::default().fg(color))
+    } else if let Some(category) = app.get_cached_category(tx.id).filter(|c| !c.is_empty()) {
+        let color = if dimmed {
             Color::DarkGray
         } else {
-            Color::Reset
+            Color::Yellow
         };
+        Cell::from(Line::from(category.to_string()).alignment(Alignment::Right))
+            .style(Style::default().fg(color))
+    } else {
+        Cell::from("")
+    }
+}
 
-        let fg = if is_disabled {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
-
-        let amount_color = if is_disabled {
-            Color::DarkGray
-        } else if tx.amount_cents < 0 {
-            Color::Red
-        } else {
-            Color::Green
-        };
-
-        let amount = format_cents(tx.amount_cents);
-        let balance = format_cents(tx.balance_cents);
-
-        Row::new(vec![
-            Cell::from(tx.date.to_string()).style(Style::default().fg(fg)),
-            Cell::from(tx.description.as_str()).style(Style::default().fg(fg)),
-            Cell::from(Line::from(amount).alignment(Alignment::Right))
-                .style(Style::default().fg(amount_color)),
-            Cell::from(Line::from(balance).alignment(Alignment::Right))
-                .style(Style::default().fg(fg)),
-        ])
-        .style(Style::default().bg(bg))
-    });
+/// Height of the inline transaction detail: the full description line, the
+/// source and metadata lines when expanded (`M`), and a trailing blank. Zero
+/// when nothing is selected so the table renders without a detail block.
+fn transaction_detail_height(app: &App, selected: Option<&Transaction>) -> u16 {
+    match selected {
+        Some(tx) => {
+            let mut lines = 1; // description
+            if app.tx_details_expanded {
+                lines += 1; // source
+                if !tx.metadata.is_empty() {
+                    lines += 1; // metadata
+                }
+            }
+            lines + 1 // trailing blank
+        }
+        None => 0,
+    }
 }
 
 fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
@@ -918,86 +984,40 @@ fn format_confidence_percent(confidence: f64) -> String {
     format!("{:.0}%", confidence * 100.0)
 }
 
+/// Inline transaction detail: the full (untruncated) description directly under
+/// the row's account, then (when expanded with `M`) the source file and
+/// metadata. Each line starts under the description column and spans the rest
+/// of the width; the final detail line is left blank.
 fn draw_transaction_details(f: &mut Frame, app: &App, tx: &Transaction, area: Rect) {
-    let bank_name = app.bank_name(tx.bank_id);
-    let account_name = app.account_name(tx.account_id);
+    // The description is primary (default colour); source/metadata are dimmed.
+    let mut values = vec![(tx.description.clone(), Color::Reset)];
 
-    let amount_style = if tx.amount_cents < 0 {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default().fg(Color::Green)
-    };
+    if app.tx_details_expanded {
+        values.push((tx.source_file.clone(), Color::DarkGray));
+        if !tx.metadata.is_empty() {
+            let metadata = serde_json::to_string(&tx.metadata).unwrap_or_default();
+            values.push((metadata, Color::DarkGray));
+        }
+    }
 
-    let metadata_str = if tx.metadata.is_empty() {
-        String::new()
-    } else {
-        serde_json::to_string(&tx.metadata).unwrap_or_default()
-    };
-
-    let transfer_info = app.get_cached_transfer(tx.id).and_then(|transfer| {
-        let other_id = if transfer.from_transaction_id == tx.id {
-            transfer.to_transaction_id
-        } else {
-            transfer.from_transaction_id
+    // Start each line under the description column (index 1) and span the rest
+    // of the row width, so long descriptions and metadata stay readable.
+    let (x, width) = column_span(&TRANSACTION_COLS, area, 1);
+    for (i, (value, color)) in values.into_iter().enumerate() {
+        if i as u16 >= area.height {
+            break;
+        }
+        let line_area = Rect {
+            x,
+            y: area.y + i as u16,
+            width,
+            height: 1,
         };
-        app.get_cached_transaction(other_id)
-    });
-
-    let category = app.get_cached_category(tx.id).unwrap_or_default();
-
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Date: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(tx.date.to_string()),
-            Span::raw("  "),
-            Span::styled("Amount: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format_cents(tx.amount_cents), amount_style),
-            Span::raw("  "),
-            Span::styled("Balance: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(format_cents(tx.balance_cents)),
-        ]),
-        Line::from(vec![
-            Span::styled("Account: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(format!("{} / {}", bank_name, account_name)),
-        ]),
-        Line::from(vec![
-            Span::styled("Description: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&tx.description),
-        ]),
-    ];
-
-    if let Some(other_tx) = transfer_info {
-        let other_bank = app.bank_name(other_tx.bank_id);
-        let other_account = app.account_name(other_tx.account_id);
-        lines.push(Line::from(vec![
-            Span::styled("Transfer: ", Style::default().fg(Color::Cyan)),
-            Span::raw(format!(
-                "{} / {} — {}",
-                other_bank, other_account, other_tx.description
-            )),
-        ]));
-    } else if !category.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Category: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(category, Style::default().fg(Color::Yellow)),
-        ]));
+        f.render_widget(
+            Paragraph::new(Span::styled(value, Style::default().fg(color))),
+            line_area,
+        );
     }
-
-    lines.push(Line::from(vec![
-        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
-        Span::raw(&tx.source_file),
-    ]));
-
-    if !metadata_str.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Metadata: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(metadata_str),
-        ]));
-    }
-
-    let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(paragraph, area);
 }
 
 fn draw_transfer_details(f: &mut Frame, app: &App, twt: &TransferWithTransactions, area: Rect) {
