@@ -227,6 +227,8 @@ handling and data flow stay uniform:
   `match app.current_tab` to other files; add a method to `TabLists` instead.
 - **Rendering never queries the DB** — `ui.rs` reads `App` state and the
   caches (`get_cached_transaction/category/transfer`).
+- **Overlay modals use shared chrome** — use `src/tui/modal.rs` `Modal`; modal
+  keybind hints render inside the modal and hide the global hint bar.
 - **Tables use `ScrollTable`** (`src/tui/table.rs`) — it owns scroll-offset
   math, inline detail placement, and column geometry; per-view closures own row
   content, styling, and optional detail rendering.

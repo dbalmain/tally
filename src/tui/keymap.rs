@@ -333,15 +333,15 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("Enter", "apply"),
             ("Esc", "cancel"),
         ],
-        InputMode::ConfirmMerge => with_keys(vec![("y", "merge"), ("n", "cancel")]),
-        InputMode::Confirm => with_keys(vec![("y", "confirm"), ("n", "cancel")]),
+        InputMode::ConfirmMerge => vec![("y", "merge"), ("n", "cancel")],
+        InputMode::Confirm => vec![("y", "confirm"), ("n", "cancel")],
         InputMode::TransferPending => with_keys(vec![
             ("↑/↓", "select"),
             ("T/Enter", "link"),
             ("t", "re-search"),
             ("Esc", "cancel"),
         ]),
-        InputMode::TransferNoMatch => with_keys(vec![("Esc", "dismiss")]),
+        InputMode::TransferNoMatch => vec![("Esc", "dismiss")],
     }
 }
 

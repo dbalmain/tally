@@ -1,6 +1,7 @@
 mod app;
 mod filtered_list;
 mod keymap;
+mod modal;
 pub mod search_bar;
 mod table;
 mod ui;

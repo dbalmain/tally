@@ -3,13 +3,14 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Tabs},
+    widgets::{Block, Cell, Clear, Paragraph, Row, Tabs},
 };
 
 use crate::{Transaction, TransactionWithEnrichment, TransferWithTransactions};
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
+use super::modal::{Modal, hint_line};
 use super::table::{ScrollTable, aligned_table, calculate_scroll_offset, column_span};
 
 const DETAILS_HEIGHT: u16 = 8;
@@ -70,7 +71,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     if has_fuzzy_search {
         constraints.push(Constraint::Length(1));
     }
-    let show_hints = app.hints_visible && !app.keybind_help_open;
+    let modal_open = matches!(
+        app.input_mode,
+        InputMode::Category
+            | InputMode::CategoryEdit
+            | InputMode::BulkApply
+            | InputMode::Confirm
+            | InputMode::ConfirmMerge
+            | InputMode::TransferNoMatch
+    ) || app.error_message.is_some()
+        || app.keybind_help_open;
+    let show_hints = app.hints_visible && !modal_open;
     constraints.push(Constraint::Min(0));
     if show_hints {
         constraints.push(Constraint::Length(1));
@@ -212,17 +223,7 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_key_hints(f: &mut Frame, app: &App, area: Rect) {
-    let spans = keymap::footer_hints(app)
-        .into_iter()
-        .flat_map(|(key, desc)| {
-            [
-                Span::raw("  "),
-                Span::styled(key, Style::default().fg(Color::Cyan)),
-                Span::styled(format!(" {desc}"), Style::default().fg(Color::DarkGray)),
-            ]
-        })
-        .collect::<Vec<_>>();
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    f.render_widget(Paragraph::new(hint_line(&keymap::footer_hints(app))), area);
 }
 
 fn draw_transactions(f: &mut Frame, app: &App, area: Rect) {
@@ -589,38 +590,21 @@ fn draw_keybind_popup(f: &mut Frame, app: &App) {
     let desired_height = (help.len() as u16).saturating_add(4).max(8);
     let height = desired_height.min(screen.height.saturating_sub(2).max(1));
     let area = centered_rect_size(width, height, screen);
-
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Keybinds")
-        .style(Style::default().bg(Color::Black).fg(Color::Cyan));
-    f.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+    let hints = [("Esc/Enter", "close"), ("Alt-?", "toggle bar")];
+    let body = Modal {
+        title: "Keybinds",
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
 
     let lines = help.into_iter().map(help_line).collect::<Vec<_>>();
     f.render_widget(
         Paragraph::new(lines)
             .style(Style::default().fg(Color::White))
             .wrap(ratatui::widgets::Wrap { trim: false }),
-        chunks[0],
+        body,
     );
-
-    let footer = Line::from(vec![
-        Span::styled("Esc/Enter", Style::default().fg(Color::Cyan)),
-        Span::styled(" close · ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Alt-?", Style::default().fg(Color::Cyan)),
-        Span::styled(" toggle bar", Style::default().fg(Color::DarkGray)),
-    ]);
-    f.render_widget(Paragraph::new(footer), chunks[1]);
 }
 
 fn help_line(line: HelpLine) -> Line<'static> {
@@ -646,29 +630,16 @@ fn help_line(line: HelpLine) -> Line<'static> {
 }
 
 fn draw_category_edit_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect_fixed_height(50, 4, f.area());
+    let area = centered_rect_fixed_height(50, 6, f.area());
+    let hints = keymap::footer_hints(app);
+    let body = Modal {
+        title: "Rename category",
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
 
-    f.render_widget(Clear, area);
-
-    let block = Block::default().style(Style::default().bg(Color::Black));
-    f.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
-    };
-
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(inner);
-
-    let input_width = chunks[1].width as usize;
+    let input_width = body.width as usize;
     let scroll = app.category_edit_scroll(input_width);
     let cursor_pos = app.category_edit_cursor();
 
@@ -676,80 +647,41 @@ fn draw_category_edit_popup(f: &mut Frame, app: &App) {
     let input_value = app.category_edit_value();
     let visible: String = input_value.chars().skip(scroll).take(input_width).collect();
     let input = Paragraph::new(visible).style(Style::default().fg(Color::Yellow));
-    f.render_widget(input, chunks[1]);
+    f.render_widget(input, body);
 
     // Position cursor relative to scroll
-    let cursor_x = chunks[1].x + (cursor_pos - scroll) as u16;
-    f.set_cursor_position((cursor_x, chunks[1].y));
-
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
-        Span::styled(" save  ", Style::default().fg(Color::White)),
-        Span::styled("Esc", Style::default().fg(Color::Cyan)),
-        Span::styled(" cancel", Style::default().fg(Color::White)),
-    ]));
-    f.render_widget(help, chunks[2]);
+    let cursor_x = body.x + (cursor_pos - scroll) as u16;
+    f.set_cursor_position((cursor_x, body.y));
 }
 
 fn draw_confirm_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect_fixed_height(60, 6, f.area());
-
-    f.render_widget(Clear, area);
-
-    let block = Block::default().style(Style::default().bg(Color::Black));
-    f.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
-    };
-
+    let area = centered_rect_fixed_height(60, 8, f.area());
+    let hints = keymap::footer_hints(app);
+    let body = Modal {
+        title: "Confirm",
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
     let message = app.confirm_message.as_deref().unwrap_or("Confirm action?");
-
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(3),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(inner);
 
     let msg_line = Paragraph::new(message)
         .style(Style::default().fg(Color::Yellow))
         .wrap(ratatui::widgets::Wrap { trim: true });
-    f.render_widget(msg_line, chunks[1]);
-
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("y", Style::default().fg(Color::Green)),
-        Span::styled(" yes  ", Style::default().fg(Color::White)),
-        Span::styled("n", Style::default().fg(Color::Red)),
-        Span::styled(" no", Style::default().fg(Color::White)),
-    ]));
-    f.render_widget(help, chunks[2]);
+    f.render_widget(msg_line, body);
 }
 
 fn draw_category_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(50, 60, f.area());
+    let hints = keymap::footer_hints(app);
+    let body = Modal {
+        title: "Category",
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
 
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Category")
-        .style(Style::default().bg(Color::Black));
-
-    f.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-
-    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(body);
 
     let input_style = Style::default().fg(Color::Yellow);
     let input = Paragraph::new(app.category_input.as_str()).style(input_style);
@@ -761,12 +693,22 @@ fn draw_category_popup(f: &mut Frame, app: &App) {
         .enumerate()
         .take(chunks[1].height as usize)
         .map(|(i, cat)| {
-            let style = if i == app.category_selected {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
+            let selected = i == app.category_selected;
+            let bg = if selected {
+                Color::DarkGray
             } else {
-                Style::default().fg(Color::Gray)
+                Color::Reset
             };
-            Line::styled(&cat.path, style)
+            if cat.id == 0 {
+                // The synthetic "what you typed" entry: a new category.
+                Line::from(vec![
+                    Span::styled(&cat.path, Style::default().fg(Color::Green).bg(bg)),
+                    Span::styled(" (new)", Style::default().fg(Color::DarkGray).bg(bg)),
+                ])
+            } else {
+                let fg = if selected { Color::White } else { Color::Gray };
+                Line::styled(&cat.path, Style::default().fg(fg).bg(bg))
+            }
         })
         .collect();
 
@@ -780,25 +722,19 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
     };
 
     let area = centered_rect(60, 70, f.area());
-    f.render_widget(Clear, area);
 
     let selected = state.rows.iter().filter(|row| row.selected).count();
     let title = format!(
         "Apply \"{}\" to similar ({} selected)",
         state.category_path, selected
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .style(Style::default().bg(Color::Black));
-    f.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
+    let hints = keymap::footer_hints(app);
+    let body = Modal {
+        title: &title,
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
 
     let rows: Vec<_> = state.rows.iter().collect();
     ScrollTable::new(
@@ -812,7 +748,7 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
             Constraint::Length(6),
         ],
     )
-    .render(f, inner, |i, row| {
+    .render(f, body, |i, row| {
         let bg = if i == state.cursor {
             Color::DarkGray
         } else {
@@ -906,47 +842,41 @@ fn draw_filter_autocomplete_popup(f: &mut Frame, app: &App, search_area: Rect) {
 
 fn draw_no_match_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(40, 20, f.area());
-
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("No Match")
-        .style(Style::default().bg(Color::Black).fg(Color::Red));
+    let hints = keymap::footer_hints(app);
+    let body = Modal {
+        title: "No match",
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
 
     let tx = app.pending_transfer_tx.as_ref();
     let msg = if let Some(tx) = tx {
         format!(
-            "No matching transaction found for\n{} ({})\n\nPress Escape to cancel",
+            "No matching transaction found for\n{} ({})",
             format_cents(tx.amount_cents),
             tx.description
         )
     } else {
-        "No matching transaction found.\n\nPress Escape to cancel".to_string()
+        "No matching transaction found.".to_string()
     };
 
-    let paragraph = Paragraph::new(msg)
-        .block(block)
-        .style(Style::default().fg(Color::White));
-
-    f.render_widget(paragraph, area);
+    let paragraph = Paragraph::new(msg).style(Style::default().fg(Color::White));
+    f.render_widget(paragraph, body);
 }
 
 fn draw_error_popup(f: &mut Frame, msg: &str) {
     let area = centered_rect(40, 15, f.area());
+    let hints = [("Esc", "dismiss")];
+    let body = Modal {
+        title: "Error",
+        hints: &hints,
+        border: Color::Red,
+    }
+    .draw(f, area);
 
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Error")
-        .style(Style::default().bg(Color::Black).fg(Color::Red));
-
-    let paragraph = Paragraph::new(msg)
-        .block(block)
-        .style(Style::default().fg(Color::White));
-
-    f.render_widget(paragraph, area);
+    let paragraph = Paragraph::new(msg).style(Style::default().fg(Color::White));
+    f.render_widget(paragraph, body);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
