@@ -41,6 +41,16 @@ impl App {
             let input = self.category_input.clone();
             self.category_suggestions =
                 self.load_or_show("search categories", |s| s.find_categories(&input));
+            // Offer the literal typed text as a (possibly new) category so a value
+            // that fuzzy-matches existing paths can still be committed verbatim.
+            let typed = input.trim();
+            if !typed.is_empty() && !self.category_suggestions.iter().any(|c| c.path == typed) {
+                self.category_suggestions.push(Category {
+                    id: 0,
+                    path: typed.to_string(),
+                    created_at: chrono::Utc::now(),
+                });
+            }
         }
         self.category_selected = 0;
     }
@@ -172,7 +182,7 @@ impl App {
             .as_ref()
             .map(|index| index.similar_to(&query_norm, tx.id, SIMILARITY_THRESHOLD))
             .unwrap_or_default();
-        let rows: Vec<_> = matches
+        let mut rows: Vec<_> = matches
             .into_iter()
             .take(BULK_APPLY_MATCH_LIMIT)
             .filter_map(|(id, score)| {
@@ -186,6 +196,12 @@ impl App {
                     })
             })
             .collect();
+        rows.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.tx.date.cmp(&a.tx.date))
+        });
 
         if rows.is_empty() {
             return;
