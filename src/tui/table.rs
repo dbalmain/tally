@@ -236,13 +236,12 @@ pub(crate) fn calculate_scroll_offset(
     }
 
     let selected = selected.min(total - 1);
-    if total <= visible_height || selected < visible_height / 2 {
-        0
-    } else if selected > total.saturating_sub(visible_height / 2) {
-        total.saturating_sub(visible_height)
-    } else {
-        selected.saturating_sub(visible_height / 2)
+    if total <= visible_height {
+        return 0;
     }
+
+    let max_offset = total - visible_height;
+    selected.saturating_sub(visible_height / 2).min(max_offset)
 }
 
 fn calculate_scroll_offset_with_detail(
@@ -280,5 +279,23 @@ mod tests {
         assert_eq!(clamped_detail_height(5, 8), 4);
         assert_eq!(calculate_scroll_offset_with_detail(4, 10, 5, 8), 4);
         assert_eq!(calculate_scroll_offset_with_detail(0, 10, 0, 8), 0);
+    }
+
+    #[test]
+    fn scroll_offset_never_leaves_a_blank_trailing_row() {
+        for visible in [7usize, 21, 23] {
+            let total = 61;
+            for selected in 0..total {
+                let offset = calculate_scroll_offset(selected, total, visible);
+                assert!(
+                    offset + visible <= total,
+                    "offset {offset} + visible {visible} > total {total} at selected {selected}",
+                );
+                assert!(
+                    offset <= selected && selected < offset + visible,
+                    "selected {selected} not visible: offset {offset}, visible {visible}",
+                );
+            }
+        }
     }
 }
