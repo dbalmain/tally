@@ -6,11 +6,12 @@ use ratatui::{
     widgets::{Block, Cell, Clear, Paragraph, Row, Tabs},
 };
 
-use crate::{Transaction, TransactionWithEnrichment, TransferWithTransactions};
+use crate::{FilterOverride, Transaction, TransactionWithEnrichment, TransferWithTransactions};
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
 use super::modal::{Modal, hint_line};
+use super::search_bar::SearchBar;
 use super::table::{ScrollTable, aligned_table, calculate_scroll_offset, column_span};
 
 const DETAILS_HEIGHT: u16 = 8;
@@ -52,7 +53,28 @@ const TRANSACTION_COLS: [Constraint; 5] = [
     Constraint::Length(12),
 ];
 
+const FILTER_COLS: [Constraint; 5] = [
+    Constraint::Min(16),
+    Constraint::Min(24),
+    Constraint::Min(18),
+    Constraint::Length(5),
+    Constraint::Length(6),
+];
+
+const FILTER_EDIT_PREVIEW_COLS: [Constraint; 5] = [
+    Constraint::Length(12),
+    Constraint::Min(24),
+    Constraint::Min(18),
+    Constraint::Length(12),
+    Constraint::Length(12),
+];
+
 pub fn draw(f: &mut Frame, app: &App) {
+    if app.filter_edit_visible() {
+        draw_filter_edit_takeover(f, app);
+        return;
+    }
+
     let has_db_search = app.db_search_active() || app.input_mode == InputMode::DbSearch;
     let has_fuzzy_search = app.fuzzy_search_active() || app.input_mode == InputMode::FuzzySearch;
 
@@ -71,16 +93,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     if has_fuzzy_search {
         constraints.push(Constraint::Length(1));
     }
-    let modal_open = matches!(
-        app.input_mode,
-        InputMode::Category
-            | InputMode::CategoryEdit
-            | InputMode::BulkApply
-            | InputMode::Confirm
-            | InputMode::ConfirmMerge
-            | InputMode::TransferNoMatch
-    ) || app.error_message.is_some()
-        || app.keybind_help_open;
+    let modal_open = overlay_open(app);
     let show_hints = app.hints_visible && !modal_open;
     constraints.push(Constraint::Min(0));
     if show_hints {
@@ -112,18 +125,64 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Transfers => draw_transfers(f, app, content),
         Tab::Categories => draw_categories(f, app, content),
         Tab::Todo => draw_todo(f, app, content),
+        Tab::Filters => draw_filters(f, app, content),
     }
 
     if show_hints {
         draw_key_hints(f, app, chunks[idx + 1]);
     }
 
+    draw_overlays(f, app, db_search_area, None);
+}
+
+fn draw_filter_edit_takeover(f: &mut Frame, app: &App) {
+    let show_hints = app.hints_visible && !overlay_open(app);
+    let mut constraints = vec![
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ];
+    if show_hints {
+        constraints.push(Constraint::Length(1));
+    }
+    let chunks = Layout::vertical(constraints).split(f.area());
+
+    draw_filter_edit_heading(f, app, chunks[0]);
+    draw_filter_edit_search_bar(f, app, chunks[1]);
+    draw_filter_edit_preview(f, app, chunks[2]);
+
+    if show_hints {
+        draw_key_hints(f, app, chunks[3]);
+    }
+
+    draw_overlays(f, app, None, Some(chunks[1]));
+}
+
+fn overlay_open(app: &App) -> bool {
+    matches!(
+        app.input_mode,
+        InputMode::Category
+            | InputMode::TextPrompt
+            | InputMode::BulkApply
+            | InputMode::Confirm
+            | InputMode::ConfirmMerge
+            | InputMode::TransferNoMatch
+    ) || app.error_message.is_some()
+        || app.keybind_help_open
+}
+
+fn draw_overlays(
+    f: &mut Frame,
+    app: &App,
+    db_search_area: Option<Rect>,
+    filter_edit_search_area: Option<Rect>,
+) {
     if app.input_mode == InputMode::Category {
         draw_category_popup(f, app);
     }
 
-    if app.input_mode == InputMode::CategoryEdit {
-        draw_category_edit_popup(f, app);
+    if app.input_mode == InputMode::TextPrompt {
+        draw_text_prompt_popup(f, app);
     }
 
     if app.input_mode == InputMode::BulkApply {
@@ -141,8 +200,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Some(search_area) = db_search_area
         && app.filter_autocomplete_active()
         && app.input_mode == InputMode::DbSearch
+        && let Some(search_state) = app.current_search_state()
     {
-        draw_filter_autocomplete_popup(f, app, search_area);
+        draw_search_autocomplete_popup(f, &search_state.search_bar, search_area);
+    }
+
+    if let Some(search_area) = filter_edit_search_area
+        && app.filter_edit_autocomplete_active()
+        && app.input_mode == InputMode::FilterEdit
+        && let Some(search_bar) = app.filter_edit_search_bar()
+    {
+        draw_search_autocomplete_popup(f, search_bar, search_area);
     }
 
     if let Some(ref msg) = app.error_message {
@@ -186,6 +254,73 @@ fn draw_fuzzy_search_bar(f: &mut Frame, app: &App, area: Rect) {
         ]);
         f.render_widget(Paragraph::new(search_line), area);
     }
+}
+
+fn draw_filter_edit_heading(f: &mut Frame, app: &App, area: Rect) {
+    let mut spans = vec![Span::styled(
+        app.filter_edit_name().to_string(),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(path) = app.filter_edit_category_path() {
+        spans.push(Span::styled(
+            "  category ",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(
+            path.to_string(),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_filter_edit_search_bar(f: &mut Frame, app: &App, area: Rect) {
+    let is_active = app.input_mode == InputMode::FilterEdit;
+    if let Some(search_bar) = app.filter_edit_search_bar() {
+        let (cursor_x, cursor_y) = search_bar.render(f, area, "/", is_active);
+        if is_active {
+            f.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
+}
+
+fn draw_filter_edit_preview(f: &mut Frame, app: &App, area: Rect) {
+    let preview = app.filter_edit_preview();
+    if preview.is_empty() {
+        draw_empty_message(f, "No matching transactions.", area);
+        return;
+    }
+
+    let selected = app.filter_edit_preview_scroll();
+    ScrollTable::new(preview, selected, &FILTER_EDIT_PREVIEW_COLS).render(f, area, |i, tx| {
+        let bg = if i == selected {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
+        let amount_color = if tx.amount_cents < 0 {
+            Color::Red
+        } else {
+            Color::Green
+        };
+        let account = format!(
+            "{} / {}",
+            app.bank_name(tx.bank_id),
+            app.account_name(tx.account_id)
+        );
+
+        Row::new(vec![
+            Cell::from(tx.date.to_string()),
+            Cell::from(tx.description.as_str()),
+            Cell::from(account).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
+                .style(Style::default().fg(amount_color)),
+            Cell::from(Line::from(format_cents(tx.balance_cents)).alignment(Alignment::Right)),
+        ])
+        .style(Style::default().bg(bg))
+    });
 }
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
@@ -583,6 +718,63 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
     });
 }
 
+fn draw_filters(f: &mut Frame, app: &App, area: Rect) {
+    let filters: Vec<_> = app.lists.filters.iter().collect();
+
+    if filters.is_empty() {
+        draw_empty_message(f, "No filters yet.", area);
+        return;
+    }
+
+    ScrollTable::new(&filters, app.selected_index, &FILTER_COLS).render(f, area, |i, filter| {
+        let bg = if i == app.selected_index {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
+
+        let category = filter
+            .category_id
+            .and_then(|id| app.category_path(id))
+            .map(|path| Cell::from(path.to_string()).style(Style::default().fg(Color::Yellow)))
+            .unwrap_or_else(dim_dash_cell);
+
+        let override_mode = if filter.category_id.is_some() {
+            let label = match filter.override_mode {
+                FilterOverride::Uncategorised => "new",
+                FilterOverride::Ai => "+ai",
+                FilterOverride::All => "all",
+            };
+            Cell::from(label).style(Style::default().fg(Color::Cyan))
+        } else {
+            dim_dash_cell()
+        };
+
+        let review = if filter.category_id.is_some() {
+            if filter.review_required {
+                Cell::from("review").style(Style::default().fg(Color::Yellow))
+            } else {
+                Cell::from("auto").style(Style::default().fg(Color::DarkGray))
+            }
+        } else {
+            dim_dash_cell()
+        };
+
+        Row::new(vec![
+            Cell::from(filter.name.as_str()),
+            Cell::from(filter.query.as_str()).style(Style::default().fg(Color::DarkGray)),
+            category,
+            override_mode,
+            review,
+        ])
+        .style(Style::default().bg(bg))
+    });
+}
+
+fn dim_dash_cell() -> Cell<'static> {
+    Cell::from("—").style(Style::default().fg(Color::DarkGray))
+}
+
 fn draw_keybind_popup(f: &mut Frame, app: &App) {
     let help = keymap::help_lines(app);
     let screen = f.area();
@@ -629,22 +821,22 @@ fn help_line(line: HelpLine) -> Line<'static> {
     }
 }
 
-fn draw_category_edit_popup(f: &mut Frame, app: &App) {
+fn draw_text_prompt_popup(f: &mut Frame, app: &App) {
     let area = centered_rect_fixed_height(50, 6, f.area());
     let hints = keymap::footer_hints(app);
     let body = Modal {
-        title: "Rename category",
+        title: app.text_prompt_title(),
         hints: &hints,
         border: Color::Cyan,
     }
     .draw(f, area);
 
     let input_width = body.width as usize;
-    let scroll = app.category_edit_scroll(input_width);
-    let cursor_pos = app.category_edit_cursor();
+    let scroll = app.text_prompt_scroll(input_width);
+    let cursor_pos = app.text_prompt_cursor();
 
     // Display scrolled portion of input
-    let input_value = app.category_edit_value();
+    let input_value = app.text_prompt_value();
     let visible: String = input_value.chars().skip(scroll).take(input_width).collect();
     let input = Paragraph::new(visible).style(Style::default().fg(Color::Yellow));
     f.render_widget(input, body);
@@ -779,13 +971,9 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
     });
 }
 
-/// Render the filter autocomplete popup anchored below the DB search bar.
-/// `search_area` is the rect the search bar was drawn into.
-fn draw_filter_autocomplete_popup(f: &mut Frame, app: &App, search_area: Rect) {
-    let Some(search_state) = app.current_search_state() else {
-        return;
-    };
-    let Some(ac_state) = search_state.search_bar.autocomplete() else {
+/// Render a search-filter autocomplete popup anchored below a search bar.
+fn draw_search_autocomplete_popup(f: &mut Frame, search_bar: &SearchBar, search_area: Rect) {
+    let Some(ac_state) = search_bar.autocomplete() else {
         return;
     };
 

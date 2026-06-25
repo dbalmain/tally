@@ -1,26 +1,64 @@
 //! Category actions: the category-assignment popup, AI-review confirmation,
 //! and rename/merge on the Categories tab.
 
-use tui_input::Input;
-
 use crate::classify::{SIMILARITY_THRESHOLD, normalise};
 use crate::{Category, CategorySource, Transaction};
 
-use super::{App, BulkApplyState, BulkRow, ConfirmAction, InputMode, Tab, TodoSubTab};
+use super::{
+    App, BulkApplyState, BulkRow, CategoryTarget, ConfirmAction, InputMode, Tab, TextPromptTarget,
+    TodoSubTab,
+};
 
 const BULK_APPLY_MATCH_LIMIT: usize = 200;
 
 impl App {
-    // ==================== Category Popup (assign to transaction) ====================
+    // ==================== Category Popup ====================
 
     pub fn start_category_edit(&mut self) {
-        if self.selected_transaction().is_some() {
-            self.input_mode = InputMode::Category;
-            self.category_input.clear();
-            self.category_suggestions =
-                self.load_or_show("load categories", |s| s.list_categories());
-            self.category_selected = 0;
+        if let Some(filter) = self.filter_edit_filter_for_category().cloned() {
+            let input = filter
+                .category_id
+                .and_then(|id| self.category_path(id))
+                .unwrap_or("")
+                .to_string();
+            self.open_category_popup(CategoryTarget::Filter(filter.id), input);
+            return;
         }
+
+        if self.current_tab == Tab::Filters {
+            let Some(filter) = self.selected_filter().cloned() else {
+                return;
+            };
+            let input = filter
+                .category_id
+                .and_then(|id| self.category_path(id))
+                .unwrap_or("")
+                .to_string();
+            self.open_category_popup(CategoryTarget::Filter(filter.id), input);
+            return;
+        }
+
+        if self.selected_transaction().is_some() {
+            self.open_category_popup(CategoryTarget::Transaction, String::new());
+        }
+    }
+
+    fn open_category_popup(&mut self, target: CategoryTarget, input: String) {
+        self.input_mode = InputMode::Category;
+        self.category_target = target;
+        self.category_input = input;
+        self.category_suggestions = self.load_or_show("load categories", |s| s.list_categories());
+        self.category_selected = 0;
+        if !self.category_input.is_empty() {
+            self.update_category_suggestions();
+        }
+    }
+
+    pub(super) fn clear_category_popup(&mut self) {
+        self.category_input.clear();
+        self.category_suggestions.clear();
+        self.category_selected = 0;
+        self.category_target = CategoryTarget::Transaction;
     }
 
     pub fn update_category_input(&mut self, c: char) {
@@ -69,17 +107,20 @@ impl App {
     }
 
     pub fn confirm_category(&mut self) {
+        if let CategoryTarget::Filter(filter_id) = self.category_target {
+            self.confirm_filter_category(filter_id);
+            return;
+        }
+
+        self.confirm_transaction_category();
+    }
+
+    fn confirm_transaction_category(&mut self) {
         let Some(tx) = self.selected_transaction().cloned() else {
             return;
         };
 
-        let category_path = if !self.category_suggestions.is_empty() {
-            self.category_suggestions[self.category_selected]
-                .path
-                .clone()
-        } else if !self.category_input.is_empty() {
-            self.category_input.clone()
-        } else {
+        let Some(category_path) = self.selected_category_path() else {
             self.cancel_input();
             return;
         };
@@ -88,9 +129,7 @@ impl App {
         // Categorising one that is part of a transfer breaks the link — confirm
         // first.
         if let Some(transfer_id) = self.get_cached_transfer(tx.id).map(|t| t.id) {
-            self.category_input.clear();
-            self.category_suggestions.clear();
-            self.category_selected = 0;
+            self.clear_category_popup();
             self.confirm_message = Some(
                 "This transaction is part of a transfer. Categorising it will unlink the transfer. Continue?"
                     .to_string(),
@@ -105,6 +144,54 @@ impl App {
         }
 
         self.apply_category(tx, category_path);
+    }
+
+    fn confirm_filter_category(&mut self, filter_id: i64) {
+        let clear_existing = self.category_input.trim().is_empty()
+            && self
+                .lists
+                .filters
+                .items()
+                .iter()
+                .find(|filter| filter.id == filter_id)
+                .is_some_and(|filter| filter.category_id.is_some());
+
+        if clear_existing {
+            if self.try_mutation("clear filter category", |s| {
+                s.set_filter_category(filter_id, None)
+            }) {
+                self.clear_category_popup();
+                self.reapply_filters();
+                self.restore_after_filter_modal(filter_id);
+            }
+            return;
+        }
+
+        let Some(category_path) = self.selected_category_path() else {
+            self.cancel_input();
+            return;
+        };
+
+        if self.try_mutation("set filter category", |s| {
+            let category_id = s.get_or_create_category(&category_path)?;
+            s.set_filter_category(filter_id, Some(category_id))
+        }) {
+            self.clear_category_popup();
+            self.reapply_filters();
+            self.restore_after_filter_modal(filter_id);
+        }
+    }
+
+    fn selected_category_path(&self) -> Option<String> {
+        if !self.category_suggestions.is_empty() {
+            self.category_suggestions
+                .get(self.category_selected)
+                .map(|cat| cat.path.clone())
+        } else if !self.category_input.is_empty() {
+            Some(self.category_input.clone())
+        } else {
+            None
+        }
     }
 
     /// Persist a manual category for `tx`, then offer to bulk-apply it to
@@ -300,35 +387,15 @@ impl App {
 
     pub fn start_category_rename(&mut self) {
         if let Some(cat) = self.selected_category().cloned() {
-            self.category_edit_input = Input::new(cat.path.clone());
-            self.editing_category = Some(cat);
-            self.input_mode = InputMode::CategoryEdit;
+            self.open_text_prompt(
+                "Rename category",
+                cat.path.clone(),
+                TextPromptTarget::CategoryRename(cat),
+            );
         }
     }
 
-    pub fn handle_category_edit_input(&mut self, req: tui_input::InputRequest) {
-        self.category_edit_input.handle(req);
-    }
-
-    pub fn category_edit_value(&self) -> &str {
-        self.category_edit_input.value()
-    }
-
-    pub fn category_edit_cursor(&self) -> usize {
-        self.category_edit_input.visual_cursor()
-    }
-
-    pub fn category_edit_scroll(&self, width: usize) -> usize {
-        self.category_edit_input.visual_scroll(width)
-    }
-
-    pub fn confirm_category_rename(&mut self) {
-        let Some(cat) = self.editing_category.take() else {
-            self.cancel_input();
-            return;
-        };
-
-        let new_path = self.category_edit_input.value().trim().to_string();
+    pub(super) fn confirm_category_rename(&mut self, cat: Category, new_path: String) {
         if new_path.is_empty() || new_path == cat.path {
             self.cancel_input();
             return;
@@ -339,7 +406,7 @@ impl App {
                 self.reload_categories();
                 self.move_cursor_to_category(&new_path);
                 self.input_mode = InputMode::Normal;
-                self.category_edit_input.reset();
+                self.clear_text_prompt();
             }
             Err(crate::Error::CategoryExists(existing_path)) => {
                 if let Ok(Some(target)) = self.store.get_category_by_path(&existing_path) {
@@ -357,16 +424,28 @@ impl App {
                         source_id: cat.id,
                         target_id: target.id,
                     });
-                    self.editing_category = Some(cat);
+                    self.restore_text_prompt(
+                        "Rename category",
+                        new_path,
+                        TextPromptTarget::CategoryRename(cat),
+                    );
                     self.input_mode = InputMode::ConfirmMerge;
                 } else {
                     self.error_message = Some(format!("Category \"{}\" already exists", new_path));
-                    self.editing_category = Some(cat);
+                    self.restore_text_prompt(
+                        "Rename category",
+                        new_path,
+                        TextPromptTarget::CategoryRename(cat),
+                    );
                 }
             }
             Err(e) => {
                 self.error_message = Some(format!("Failed to rename: {}", e));
-                self.editing_category = Some(cat);
+                self.restore_text_prompt(
+                    "Rename category",
+                    new_path,
+                    TextPromptTarget::CategoryRename(cat),
+                );
             }
         }
     }
@@ -393,19 +472,18 @@ impl App {
             }
         }
 
-        self.clear_category_edit();
+        self.clear_text_prompt();
         self.clear_confirm();
         self.input_mode = InputMode::Normal;
     }
 
     pub fn cancel_merge(&mut self) {
         self.clear_confirm();
-        self.input_mode = InputMode::CategoryEdit;
-    }
-
-    pub(super) fn clear_category_edit(&mut self) {
-        self.editing_category = None;
-        self.category_edit_input.reset();
+        self.input_mode = if self.text_prompt.is_some() {
+            InputMode::TextPrompt
+        } else {
+            InputMode::Normal
+        };
     }
 
     fn reload_categories(&mut self) {
@@ -434,6 +512,14 @@ impl App {
     fn move_cursor_to_category(&mut self, path: &str) {
         if let Some(pos) = self.lists.categories.iter().position(|c| c.path == path) {
             self.selected_index = pos;
+        }
+    }
+
+    fn filter_edit_filter_for_category(&self) -> Option<&crate::Filter> {
+        if self.input_mode == InputMode::FilterEdit {
+            self.selected_filter()
+        } else {
+            None
         }
     }
 }

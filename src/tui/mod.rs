@@ -50,7 +50,7 @@ pub fn run(store: TransactionStore, refresh_rx: Receiver<Result<RefreshReport>>)
 }
 
 /// Translate a key event into the text-editing request shared by every
-/// text-input mode (DB search, fuzzy search, category rename). Mode-specific
+/// text-input mode (DB search, fuzzy search, text prompt). Mode-specific
 /// keys (Esc, Enter, Tab, arrows-as-navigation) are handled before falling
 /// back to this.
 fn text_edit_request(key: &KeyEvent) -> Option<InputRequest> {
@@ -67,6 +67,12 @@ fn text_edit_request(key: &KeyEvent) -> Option<InputRequest> {
         KeyCode::End => Some(InputRequest::GoToEnd),
         _ => None,
     }
+}
+
+fn ctrl_char(key: &KeyEvent, expected: char) -> bool {
+    matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
 fn run_app(
@@ -122,6 +128,7 @@ fn run_app(
                 && matches!(
                     app.input_mode,
                     InputMode::Normal
+                        | InputMode::FilterEdit
                         | InputMode::ConfirmMerge
                         | InputMode::Confirm
                         | InputMode::BulkApply
@@ -136,6 +143,11 @@ fn run_app(
             match app.input_mode {
                 InputMode::Normal => keymap::dispatch_normal(app, key),
                 InputMode::DbSearch => {
+                    if ctrl_char(&key, 's') {
+                        app.start_filter_from_search();
+                        continue;
+                    }
+
                     // Handle autocomplete popup navigation when active
                     if app.filter_autocomplete_active() {
                         match key.code {
@@ -201,6 +213,61 @@ fn run_app(
                         }
                     }
                 },
+                InputMode::FilterEdit => {
+                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                    if ctrl {
+                        match key.code {
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                app.save_filter_edit();
+                                continue;
+                            }
+                            KeyCode::Char('e') | KeyCode::Char('E') => {
+                                app.start_filter_rename();
+                                continue;
+                            }
+                            KeyCode::Char('c') | KeyCode::Char('C') => {
+                                app.start_category_edit();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if app.filter_edit_autocomplete_active() {
+                        match key.code {
+                            KeyCode::Down => {
+                                app.filter_edit_autocomplete_next();
+                                continue;
+                            }
+                            KeyCode::Up => {
+                                app.filter_edit_autocomplete_prev();
+                                continue;
+                            }
+                            KeyCode::Tab | KeyCode::Enter
+                                if app.filter_edit_autocomplete_select() =>
+                            {
+                                continue;
+                            }
+                            KeyCode::Esc => {
+                                app.filter_edit_autocomplete_close();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    match key.code {
+                        KeyCode::Esc => app.exit_filter_edit(),
+                        KeyCode::Down => app.filter_edit_preview_next(),
+                        KeyCode::Up => app.filter_edit_preview_prev(),
+                        KeyCode::Enter => {}
+                        _ => {
+                            if let Some(req) = text_edit_request(&key) {
+                                app.filter_edit_input(req);
+                            }
+                        }
+                    }
+                }
                 InputMode::Category => match key.code {
                     KeyCode::Esc => app.cancel_input(),
                     KeyCode::Enter => app.confirm_category(),
@@ -219,12 +286,12 @@ fn run_app(
                     KeyCode::Char('k') | KeyCode::Up => app.bulk_apply_prev(),
                     _ => {}
                 },
-                InputMode::CategoryEdit => match key.code {
+                InputMode::TextPrompt => match key.code {
                     KeyCode::Esc => app.cancel_input(),
-                    KeyCode::Enter => app.confirm_category_rename(),
+                    KeyCode::Enter => app.confirm_text_prompt(),
                     _ => {
                         if let Some(req) = text_edit_request(&key) {
-                            app.handle_category_edit_input(req);
+                            app.handle_text_prompt_input(req);
                         }
                     }
                 },

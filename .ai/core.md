@@ -44,6 +44,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 | Tab definitions / per-tab data & dispatch | `src/tui/app/tabs.rs` |
 | DB-search / fuzzy-search behaviour in the app | `src/tui/app/search.rs`; Categories search is applied in memory by `src/tui/app/tabs.rs` (`/` path boundary-prefix, `~` path fuzzy) |
 | Category actions (assign, rename, merge, AI review) | `src/tui/app/categories.rs` |
+| Filter actions (create, rename, categorise, override/review/delete) | `src/tui/app/filters.rs` |
 | Transfer actions (mark, confirm, delete) | `src/tui/app/transfers.rs` |
 | Search-bar widget (rendering, cursor-context keys, autocomplete) | `src/tui/search_bar.rs` |
 | SQL queries / store methods | `src/store.rs` |
@@ -88,6 +89,7 @@ src/
         ├── tabs.rs         # Tab/TodoSubTab enums + TabLists (per-tab dispatch)
         ├── search.rs       # TabSearchState + search/autocomplete actions
         ├── categories.rs   # Category popup, AI review, rename/merge
+        ├── filters.rs      # Saved-search filter management
         └── transfers.rs    # Transfer marking, confirmation, deletion
 
 tools/                      # Generic, checked-in helper tools (no user data)
@@ -128,6 +130,7 @@ Transaction {
 - `Category { id, path, created_at }` — Hierarchical paths like "Food/Groceries"
 - `TransactionEnrichment` — Links transaction to category, tracks source (manual/ai/rule) and confirmation status
 - `TransactionWithEnrichment` — Transaction + enrichment + resolved category
+- `Filter { name, query, category_id, override_mode, review_required }` — Saved search that can apply rule-sourced categories via `store.apply_filters()`
 
 ### Transfer
 - `Transfer { from_transaction_id, to_transaction_id, source, confirmed, ai_confidence }` — Links two transactions as a transfer
@@ -144,6 +147,7 @@ Transaction {
 - `categories` — `id, path, created_at`
 - `transaction_enrichments` — `id, transaction_id, category_id, category_source, category_confirmed, ai_confidence, created_at, updated_at`
 - `transfers` — `id, from_transaction_id, to_transaction_id, source, confirmed, ai_confidence, created_at`
+- `filters` — `id, name, query, category_id, override_mode, review_required, position, created_at`
 
 **Import tracking:**
 - `imported_files` — `id, account_id, path, content_hash, imported_at, import_batch_id`
@@ -188,6 +192,13 @@ prompts to break the existing transfer(s). Both prompts run through the generic
 `InputMode::Confirm` / `ConfirmAction` flow (`App::confirm_proceed`). Transfer
 candidate search (`store.transfer_candidates`) therefore no longer hides
 already-linked transactions — it offers them and the caller confirms.
+
+### Saved filters
+
+Filters are saved searches. When a filter has a category, `store.apply_filters()`
+re-derives rule-sourced categories from the saved filter set.
+On Transactions, `Ctrl-S` saves the active DB search as a new filter and opens
+the filter edit screen for it.
 
 ### Money as Cents (i64)
 All monetary values are integers in cents to avoid floating-point errors.
@@ -331,13 +342,17 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `[` / `]` | Previous/next subtab (Todo) |
 | `/` | Start DB search |
 | `~` | Start fuzzy search |
-| `c` | Set category on transaction (including Todo → AI Review); categorising a transfer prompts to unlink it first |
-| `e` | Rename category (Categories tab) |
+| `Ctrl-S` | Save current Transactions DB search as a filter |
+| `n` | Create filter (Filters tab) |
+| `c` | Set category on transaction (including Todo → AI Review), or set/clear filter category (Filters tab); categorising a transfer prompts to unlink it first |
+| `e` | Rename category (Categories tab), or rename filter (Filters tab) |
+| `o` | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`) |
+| `v` | Toggle filter review requirement (Filters tab) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
-| `d` / `Delete` | Delete transfer (Transfers tab) |
+| `d` / `Delete` | Delete transfer (Transfers tab), or delete filter (Filters tab) |
 | `Delete` | Transactions tab: unlink transfer, else remove category. AI Review: remove category. Transfer Review: unlink transfer |
 | `M` | Toggle source + metadata lines in the transaction detail (Transactions tab, Todo → Uncategorised) |
-| `Enter` | Confirm (AI review, transfer review) |
+| `Enter` | Confirm (AI review, transfer review), or open filter edit (Filters tab) |
 | `Esc` | Clear active search (fuzzy first, then DB) |
 | `?` | Show keybind popover |
 | `Alt-?` | Toggle bottom key-hint bar |
@@ -347,10 +362,24 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 |-----|--------|
 | `Esc` | Clear search and exit |
 | `Enter` | Confirm search |
+| `Ctrl-S` | Save current Transactions DB search as a filter |
 | `↑` / `↓` | Navigate results |
 | `Tab` | Switch tabs (keeps search active) |
 | Standard text editing | Left/Right, Ctrl+Left/Right, Home/End, Backspace, Delete |
 | `Alt-?` | Toggle bottom key-hint bar |
+
+### Filter Edit
+Opened with `Enter` on a Filters-tab row. Full-screen DB-query editor with a
+live read-only transaction preview.
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-S` | Save query and reapply filters |
+| `Ctrl-E` | Rename filter |
+| `Ctrl-C` | Set or clear filter category |
+| `↑` / `↓` | Scroll preview; search cursor stays in the bar |
+| `Tab` / `Enter` | Accept autocomplete suggestion when the popup is open |
+| `Esc` | Discard unsaved query edits and return to the Filters table |
 
 ### Category Popup
 | Key | Action |
@@ -404,6 +433,8 @@ Full reference: the `src/search/mod.rs` doc comment (canonical).
   in-memory, case-insensitive boundary-prefix filter over the category path
   (boundaries are the start of the path or positions after non-alphanumeric
   characters). **Fuzzy search (`~`)** is fuzzy over the path.
+- On the Filters tab, **DB search (`/`)** and **fuzzy search (`~`)** are
+  in-memory fuzzy matches over the filter name and saved query text.
 
 ## Common Store Operations
 

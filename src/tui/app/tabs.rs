@@ -4,15 +4,15 @@
 //! how fuzzy filtering matches its rows, which tabs expose selectable
 //! transactions — lives in this file. Adding a tab means: extend the enums, add
 //! a `FilteredList` field, extend each `TabLists` method, then add a draw
-//! function in `ui.rs` (see "Adding a New Tab" in CLAUDE.md).
+//! function in `ui.rs` (see "Adding a New Tab" in `.ai/core.md`).
 
 use std::collections::HashMap;
 
 use crate::search::ParsedQuery;
 use crate::tui::filtered_list::FilteredList;
 use crate::{
-    Category, FuzzyMatcher, Result, Transaction, TransactionStore, TransactionWithEnrichment,
-    Transfer, TransferWithTransactions,
+    Category, Filter, FuzzyMatcher, Result, Transaction, TransactionStore,
+    TransactionWithEnrichment, Transfer, TransferWithTransactions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +21,7 @@ pub enum Tab {
     Transfers,
     Categories,
     Todo,
+    Filters,
 }
 
 impl Tab {
@@ -30,6 +31,7 @@ impl Tab {
             Tab::Transfers,
             Tab::Categories,
             Tab::Todo,
+            Tab::Filters,
         ]
     }
 
@@ -39,6 +41,7 @@ impl Tab {
             Tab::Transfers => "Transfers",
             Tab::Categories => "Categories",
             Tab::Todo => "Todo",
+            Tab::Filters => "Filters",
         }
     }
 }
@@ -99,6 +102,7 @@ pub struct TabLists {
     pub uncategorised: FilteredList<Transaction>,
     pub ai_reviews: FilteredList<TransactionWithEnrichment>,
     pub transfer_reviews: FilteredList<Transfer>,
+    pub filters: FilteredList<Filter>,
 }
 
 impl TabLists {
@@ -114,13 +118,14 @@ impl TabLists {
             uncategorised: FilteredList::new(store.get_uncategorised_transactions(&query, limit)?),
             ai_reviews: FilteredList::new(store.get_pending_ai_reviews(&query, limit)?),
             transfer_reviews: FilteredList::new(store.get_pending_transfer_reviews(&query, limit)?),
+            filters: FilteredList::new(store.list_filters()?),
         })
     }
 
     /// Reload the list behind `key` from the database with the given search
     /// query. On error the existing items are left untouched, so the caller
     /// can surface the error without the user losing their place.
-    /// (Categories ignore search queries; they reload via
+    /// (Categories ignore search queries here; they reload via
     /// `App::reload_categories`.)
     pub(super) fn reload(
         &mut self,
@@ -137,6 +142,7 @@ impl TabLists {
                 .linked_transfers
                 .set_items(store.list_transfers_with_transactions(true, query, limit)?),
             (Tab::Categories, _) => {}
+            (Tab::Filters, _) => self.filters.set_items(store.list_filters()?),
             (Tab::Todo, sub) => match sub.unwrap_or(TodoSubTab::Uncategorised) {
                 TodoSubTab::Uncategorised => self
                     .uncategorised
@@ -158,6 +164,7 @@ impl TabLists {
             (Tab::Transactions, _) => self.transactions.len(),
             (Tab::Transfers, _) => self.linked_transfers.len(),
             (Tab::Categories, _) => self.categories.len(),
+            (Tab::Filters, _) => self.filters.len(),
             (Tab::Todo, sub) => match sub.unwrap_or(TodoSubTab::Uncategorised) {
                 TodoSubTab::Uncategorised => self.uncategorised.len(),
                 TodoSubTab::AiReview => self.ai_reviews.len(),
@@ -180,28 +187,37 @@ impl TabLists {
         matcher: &mut FuzzyMatcher,
         tx_by_id: &HashMap<i64, Transaction>,
     ) {
-        let mut any_match =
-            |fields: &[&str]| fields.iter().any(|f| matcher.fuzzy_matches(pattern, f));
+        let mut any_match = |pattern: &str, fields: &[&str]| {
+            fields.iter().any(|f| matcher.fuzzy_matches(pattern, f))
+        };
 
         match key {
             (Tab::Transactions, _) => refilter_by(&mut self.transactions, pattern, |tx| {
-                any_match(&[&tx.description])
+                any_match(pattern, &[&tx.description])
             }),
             (Tab::Transfers, _) => refilter_by(&mut self.linked_transfers, pattern, |twt| {
-                any_match(&[
-                    &twt.from_transaction.description,
-                    &twt.to_transaction.description,
-                ])
+                any_match(
+                    pattern,
+                    &[
+                        &twt.from_transaction.description,
+                        &twt.to_transaction.description,
+                    ],
+                )
             }),
-            (Tab::Categories, _) => self
-                .categories
-                .refilter(|c| category_boundary_prefix(&c.path, db_query) && any_match(&[&c.path])),
+            (Tab::Categories, _) => self.categories.refilter(|c| {
+                category_boundary_prefix(&c.path, db_query) && any_match(pattern, &[&c.path])
+            }),
+            (Tab::Filters, _) => self.filters.refilter(|filter| {
+                [db_query, pattern]
+                    .into_iter()
+                    .all(|p| p.is_empty() || any_match(p, &[&filter.name, &filter.query]))
+            }),
             (Tab::Todo, sub) => match sub.unwrap_or(TodoSubTab::Uncategorised) {
                 TodoSubTab::Uncategorised => refilter_by(&mut self.uncategorised, pattern, |tx| {
-                    any_match(&[&tx.description])
+                    any_match(pattern, &[&tx.description])
                 }),
                 TodoSubTab::AiReview => refilter_by(&mut self.ai_reviews, pattern, |r| {
-                    any_match(&[&r.transaction.description])
+                    any_match(pattern, &[&r.transaction.description])
                 }),
                 TodoSubTab::TransferReview => {
                     refilter_by(&mut self.transfer_reviews, pattern, |tr| {
@@ -210,7 +226,7 @@ impl TabLists {
                             tx_by_id.get(&tr.to_transaction_id),
                         ) {
                             (Some(from), Some(to)) => {
-                                any_match(&[&from.description, &to.description])
+                                any_match(pattern, &[&from.description, &to.description])
                             }
                             // If we couldn't load the referenced transactions, keep the
                             // entry visible — hiding it would silently drop work.

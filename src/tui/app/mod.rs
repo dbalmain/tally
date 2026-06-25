@@ -7,9 +7,11 @@
 //! - `tabs` — Tab/TodoSubTab enums + `TabLists` (all per-tab dispatch)
 //! - `search` — per-tab search state, DB/fuzzy search, autocomplete
 //! - `categories` — category popup, AI review, rename/merge
+//! - `filters` — saved-search filter management
 //! - `transfers` — transfer marking, confirmation, deletion
 
 mod categories;
+mod filters;
 mod search;
 mod tabs;
 mod transfers;
@@ -23,6 +25,7 @@ use tui_input::Input;
 
 use crate::classify::{SimilarityIndex, normalise};
 use crate::search::ParsedQuery;
+use crate::tui::search_bar::SearchBar;
 use crate::{
     Account, Bank, Category, FuzzyMatcher, Result, Transaction, TransactionStore, Transfer,
 };
@@ -37,8 +40,9 @@ pub enum InputMode {
     Normal,
     DbSearch,
     FuzzySearch,
+    FilterEdit,
     Category,
-    CategoryEdit,
+    TextPrompt,
     BulkApply,
     ConfirmMerge,
     /// Generic yes/no confirmation driven by `confirm_action` (the
@@ -71,6 +75,37 @@ pub enum ConfirmAction {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CategoryTarget {
+    #[default]
+    Transaction,
+    Filter(i64),
+}
+
+#[derive(Debug, Clone)]
+pub enum TextPromptTarget {
+    CategoryRename(Category),
+    FilterCreate,
+    FilterCreateFromQuery(String),
+    FilterRename(i64),
+}
+
+#[derive(Debug, Clone)]
+pub struct TextPrompt {
+    title: &'static str,
+    input: Input,
+    target: TextPromptTarget,
+    return_mode: InputMode,
+}
+
+pub struct FilterEditState {
+    pub(super) filter_id: i64,
+    pub(super) name: String,
+    pub(super) search_bar: SearchBar,
+    pub(super) preview: Vec<Transaction>,
+    pub(super) preview_scroll: usize,
+}
+
 pub struct App {
     pub store: TransactionStore,
     pub current_tab: Tab,
@@ -91,6 +126,7 @@ pub struct App {
     pub category_input: String,
     pub category_suggestions: Vec<Category>,
     pub category_selected: usize,
+    pub category_target: CategoryTarget,
     // Transfer marking state
     pub pending_transfer_tx: Option<Transaction>,
     pub transfer_candidates: Vec<Transaction>,
@@ -104,9 +140,10 @@ pub struct App {
     transfer_by_tx_id: HashMap<i64, Transfer>,
     category_tx_count: HashMap<i64, usize>,
     similarity_candidates: HashMap<i64, Transaction>,
-    // Category editing state (Categories tab)
-    pub editing_category: Option<Category>,
-    pub category_edit_input: Input,
+    // Shared single-line text prompt state
+    text_prompt: Option<TextPrompt>,
+    // Dedicated saved-filter query editor state
+    filter_edit: Option<FilterEditState>,
     // Confirmation popup state
     pub confirm_message: Option<String>,
     pub confirm_action: Option<ConfirmAction>,
@@ -167,6 +204,7 @@ impl App {
             category_input: String::new(),
             category_suggestions: Vec::new(),
             category_selected: 0,
+            category_target: CategoryTarget::Transaction,
             pending_transfer_tx: None,
             transfer_candidates: Vec::new(),
             error_message: None,
@@ -178,8 +216,8 @@ impl App {
             transfer_by_tx_id: HashMap::new(),
             category_tx_count: HashMap::new(),
             similarity_candidates: HashMap::new(),
-            editing_category: None,
-            category_edit_input: Input::default(),
+            text_prompt: None,
+            filter_edit: None,
             confirm_message: None,
             confirm_action: None,
             tab_search_state: HashMap::new(),
@@ -305,6 +343,15 @@ impl App {
 
     pub fn get_cached_category(&self, tx_id: i64) -> Option<&str> {
         self.category_by_tx_id.get(&tx_id).map(|s| s.as_str())
+    }
+
+    pub fn category_path(&self, category_id: i64) -> Option<&str> {
+        self.lists
+            .categories
+            .items()
+            .iter()
+            .find(|c| c.id == category_id)
+            .map(|c| c.path.as_str())
     }
 
     pub fn get_cached_transfer(&self, tx_id: i64) -> Option<&Transfer> {
@@ -570,14 +617,139 @@ impl App {
 
     // ==================== Input ====================
 
+    pub(super) fn open_text_prompt(
+        &mut self,
+        title: &'static str,
+        value: String,
+        target: TextPromptTarget,
+    ) {
+        let return_mode = self.input_mode;
+        self.open_text_prompt_with_return(title, value, target, return_mode);
+    }
+
+    pub(super) fn open_text_prompt_with_return(
+        &mut self,
+        title: &'static str,
+        value: String,
+        target: TextPromptTarget,
+        return_mode: InputMode,
+    ) {
+        self.text_prompt = Some(TextPrompt {
+            title,
+            input: Input::new(value),
+            target,
+            return_mode,
+        });
+        self.input_mode = InputMode::TextPrompt;
+    }
+
+    pub(super) fn restore_text_prompt(
+        &mut self,
+        title: &'static str,
+        value: String,
+        target: TextPromptTarget,
+    ) {
+        let return_mode = if self.filter_edit.is_some() {
+            InputMode::FilterEdit
+        } else {
+            InputMode::Normal
+        };
+        self.restore_text_prompt_with_return(title, value, target, return_mode);
+    }
+
+    pub(super) fn restore_text_prompt_with_return(
+        &mut self,
+        title: &'static str,
+        value: String,
+        target: TextPromptTarget,
+        return_mode: InputMode,
+    ) {
+        self.open_text_prompt_with_return(title, value, target, return_mode);
+    }
+
+    pub fn handle_text_prompt_input(&mut self, req: tui_input::InputRequest) {
+        if let Some(prompt) = self.text_prompt.as_mut() {
+            prompt.input.handle(req);
+        }
+    }
+
+    pub fn text_prompt_title(&self) -> &'static str {
+        self.text_prompt
+            .as_ref()
+            .map(|prompt| prompt.title)
+            .unwrap_or("")
+    }
+
+    pub fn text_prompt_value(&self) -> &str {
+        self.text_prompt
+            .as_ref()
+            .map(|prompt| prompt.input.value())
+            .unwrap_or("")
+    }
+
+    pub fn text_prompt_cursor(&self) -> usize {
+        self.text_prompt
+            .as_ref()
+            .map(|prompt| prompt.input.visual_cursor())
+            .unwrap_or(0)
+    }
+
+    pub fn text_prompt_scroll(&self, width: usize) -> usize {
+        self.text_prompt
+            .as_ref()
+            .map(|prompt| prompt.input.visual_scroll(width))
+            .unwrap_or(0)
+    }
+
+    pub fn confirm_text_prompt(&mut self) {
+        let Some(prompt) = self.text_prompt.take() else {
+            self.cancel_input();
+            return;
+        };
+        let value = prompt.input.value().trim().to_string();
+        let return_mode = prompt.return_mode;
+        match prompt.target {
+            TextPromptTarget::CategoryRename(category) => {
+                self.confirm_category_rename(category, value);
+            }
+            TextPromptTarget::FilterCreate => self.confirm_filter_create(value),
+            TextPromptTarget::FilterCreateFromQuery(query) => {
+                self.confirm_filter_from_query(value, query, return_mode);
+            }
+            TextPromptTarget::FilterRename(id) => self.confirm_filter_rename(id, value),
+        }
+    }
+
+    pub(super) fn clear_text_prompt(&mut self) {
+        self.text_prompt = None;
+    }
+
     pub fn cancel_input(&mut self) {
-        self.input_mode = InputMode::Normal;
-        self.category_input.clear();
-        self.category_suggestions.clear();
-        self.category_selected = 0;
+        let text_prompt_return_mode = (self.input_mode == InputMode::TextPrompt).then(|| {
+            self.text_prompt
+                .as_ref()
+                .map(|prompt| prompt.return_mode)
+                .unwrap_or(InputMode::Normal)
+        });
+        let return_to_filter_edit = self.filter_edit.is_some()
+            && matches!(
+                self.input_mode,
+                InputMode::Category
+                    | InputMode::TextPrompt
+                    | InputMode::BulkApply
+                    | InputMode::Confirm
+                    | InputMode::ConfirmMerge
+                    | InputMode::TransferNoMatch
+            );
+        self.input_mode = text_prompt_return_mode.unwrap_or(if return_to_filter_edit {
+            InputMode::FilterEdit
+        } else {
+            InputMode::Normal
+        });
+        self.clear_category_popup();
         self.error_message = None;
         self.clear_transfer_mode();
-        self.clear_category_edit();
+        self.clear_text_prompt();
         self.clear_confirm();
         self.bulk_apply = None;
     }

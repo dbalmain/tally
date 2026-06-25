@@ -142,8 +142,18 @@ impl SearchBar {
 
     /// Handle an input request and return whether it was handled.
     pub fn handle_input(&mut self, req: InputRequest) -> KeyResult {
+        self.handle_input_with(req, true)
+    }
+
+    /// Handle input as a pure DB query editor, without treating `~` as a
+    /// mode-switch key.
+    pub fn handle_input_without_fuzzy_transition(&mut self, req: InputRequest) -> KeyResult {
+        self.handle_input_with(req, false)
+    }
+
+    fn handle_input_with(&mut self, req: InputRequest, allow_fuzzy_transition: bool) -> KeyResult {
         // Check for special context-aware behavior
-        match self.handle_special_input(&req) {
+        match self.handle_special_input(&req, allow_fuzzy_transition) {
             KeyResult::NotHandled => {}
             res => {
                 self.reparse();
@@ -327,7 +337,11 @@ impl SearchBar {
 
     /// Handle special input cases based on context.
     /// Returns the result of handling the input.
-    fn handle_special_input(&mut self, req: &InputRequest) -> KeyResult {
+    fn handle_special_input(
+        &mut self,
+        req: &InputRequest,
+        allow_fuzzy_transition: bool,
+    ) -> KeyResult {
         match req {
             InputRequest::InsertChar(':') => {
                 if self.handle_colon_insert() {
@@ -343,7 +357,7 @@ impl SearchBar {
                     KeyResult::NotHandled
                 }
             }
-            InputRequest::InsertChar('~') => {
+            InputRequest::InsertChar('~') if allow_fuzzy_transition => {
                 if self.handle_tilde_insert() {
                     KeyResult::TransitionToFuzzy
                 } else {

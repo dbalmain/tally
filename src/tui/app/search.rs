@@ -60,8 +60,8 @@ impl App {
     /// Build SearchConfig for a given TabKey. The category filter is omitted
     /// on tabs whose rows have no category (Uncategorised) or where the
     /// filter is meaningless (raw transfer lists).
-    fn build_search_config(&self, key: TabKey) -> SearchConfig {
-        if matches!(key, (Tab::Categories, _)) {
+    pub(super) fn build_search_config(&self, key: TabKey) -> SearchConfig {
+        if matches!(key, (Tab::Categories | Tab::Filters, _)) {
             return SearchConfig::new(Vec::new());
         }
 
@@ -95,6 +95,12 @@ impl App {
         for key in keys {
             let config = self.build_search_config(key);
             if let Some(state) = self.tab_search_state.get_mut(&key) {
+                state.search_bar.set_config(config);
+            }
+        }
+        if self.filter_edit.is_some() {
+            let config = self.build_search_config((Tab::Transactions, None));
+            if let Some(state) = self.filter_edit.as_mut() {
                 state.search_bar.set_config(config);
             }
         }

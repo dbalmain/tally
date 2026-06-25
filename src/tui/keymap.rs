@@ -11,6 +11,7 @@ use super::app::{App, InputMode, Tab, TodoSubTab};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     Char(char),
+    Ctrl(char),
     Code(KeyCode),
 }
 
@@ -22,6 +23,11 @@ impl Trigger {
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            }
+            Trigger::Ctrl(c) => {
+                matches!(key.code, KeyCode::Char(k) if k.eq_ignore_ascii_case(&c))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
             }
             Trigger::Code(code) => key.code == code,
         }
@@ -41,6 +47,13 @@ pub enum Act {
     FuzzySearch,
     Categorise,
     RenameCategory,
+    CreateFilter,
+    SaveSearchAsFilter,
+    RenameFilter,
+    EditFilter,
+    CycleFilterOverride,
+    ToggleFilterReview,
+    DeleteFilter,
     MarkTransfer,
     DeleteTransfer,
     DeleteTxLink,
@@ -116,6 +129,57 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
 
     if app.selected_category().is_some() {
         out.push(b(&[Char('e')], "e", "rename", true, true, RenameCategory));
+    }
+
+    if app.current_tab == Tab::Filters {
+        out.push(b(&[Char('n')], "n", "new", true, true, CreateFilter));
+        if app.selected_filter().is_some() {
+            out.push(b(
+                &[Code(KeyCode::Enter)],
+                "Enter",
+                "edit",
+                true,
+                true,
+                EditFilter,
+            ));
+            out.push(b(&[Char('e')], "e", "rename", true, true, RenameFilter));
+            out.push(b(&[Char('c')], "c", "category", true, true, Categorise));
+            out.push(b(
+                &[Char('o')],
+                "o",
+                "override",
+                true,
+                true,
+                CycleFilterOverride,
+            ));
+            out.push(b(
+                &[Char('v')],
+                "v",
+                "review",
+                true,
+                true,
+                ToggleFilterReview,
+            ));
+            out.push(b(
+                &[Char('d'), Code(KeyCode::Delete)],
+                "d",
+                "delete",
+                true,
+                true,
+                DeleteFilter,
+            ));
+        }
+    }
+
+    if can_save_search_as_filter(app) {
+        out.push(b(
+            &[Ctrl('s')],
+            "Ctrl-S",
+            "save filter",
+            true,
+            true,
+            SaveSearchAsFilter,
+        ));
     }
 
     if app.current_tab == Tab::Transactions && app.selected_transaction().is_some() {
@@ -250,6 +314,12 @@ fn is_transaction_view(app: &App) -> bool {
         || (app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::Uncategorised)
 }
 
+fn can_save_search_as_filter(app: &App) -> bool {
+    app.current_tab == Tab::Transactions
+        && app.db_search_active()
+        && !app.db_search_value().is_empty()
+}
+
 fn confirm_desc(app: &App) -> Option<&'static str> {
     if app.current_tab != Tab::Todo {
         return None;
@@ -295,6 +365,13 @@ fn run_normal(app: &mut App, act: Act) {
         Act::FuzzySearch => app.start_fuzzy_search(),
         Act::Categorise => app.start_category_edit(),
         Act::RenameCategory => app.start_category_rename(),
+        Act::CreateFilter => app.start_filter_create(),
+        Act::SaveSearchAsFilter => app.start_filter_from_search(),
+        Act::RenameFilter => app.start_filter_rename(),
+        Act::EditFilter => app.open_filter_edit(),
+        Act::CycleFilterOverride => app.cycle_filter_override(),
+        Act::ToggleFilterReview => app.toggle_filter_review(),
+        Act::DeleteFilter => app.delete_filter(),
         Act::MarkTransfer => app.start_transfer_mark(),
         Act::DeleteTransfer => app.delete_transfer(),
         Act::DeleteTxLink => app.delete_selected_tx_link(),
@@ -320,12 +397,29 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             out
         }
         InputMode::DbSearch if app.filter_autocomplete_active() => {
-            vec![("↑/↓", "select"), ("Tab/Enter", "accept"), ("Esc", "close")]
+            let mut hints = vec![("↑/↓", "select"), ("Tab/Enter", "accept"), ("Esc", "close")];
+            if can_save_search_as_filter(app) {
+                hints.push(("Ctrl-S", "save filter"));
+            }
+            hints
         }
-        InputMode::DbSearch => vec![("Enter", "apply"), ("Esc", "clear & exit")],
+        InputMode::DbSearch => {
+            let mut hints = vec![("Enter", "apply"), ("Esc", "clear & exit")];
+            if can_save_search_as_filter(app) {
+                hints.push(("Ctrl-S", "save filter"));
+            }
+            hints
+        }
         InputMode::FuzzySearch => vec![("Enter", "keep filter"), ("Esc", "clear & exit")],
+        InputMode::FilterEdit => vec![
+            ("Ctrl-S", "save"),
+            ("Ctrl-E", "rename"),
+            ("Ctrl-C", "category"),
+            ("↑/↓", "preview"),
+            ("Esc", "back"),
+        ],
         InputMode::Category => vec![("↑/↓", "select"), ("Enter", "assign"), ("Esc", "cancel")],
-        InputMode::CategoryEdit => vec![("Enter", "save"), ("Esc", "cancel")],
+        InputMode::TextPrompt => vec![("Enter", "save"), ("Esc", "cancel")],
         InputMode::BulkApply => vec![
             ("↑/↓", "select"),
             ("Space", "toggle"),
@@ -356,8 +450,9 @@ pub fn help_lines(app: &App) -> Vec<HelpLine> {
         InputMode::Normal => normal_lines(app, &mut lines),
         InputMode::DbSearch => db_search_lines(app, &mut lines),
         InputMode::FuzzySearch => fuzzy_search_lines(&mut lines),
+        InputMode::FilterEdit => filter_edit_lines(&mut lines),
         InputMode::Category => category_lines(&mut lines),
-        InputMode::CategoryEdit => category_edit_lines(&mut lines),
+        InputMode::TextPrompt => text_prompt_lines(app, &mut lines),
         InputMode::BulkApply => bulk_apply_lines(&mut lines),
         InputMode::ConfirmMerge => confirm_merge_lines(&mut lines),
         InputMode::Confirm => confirm_lines(&mut lines),
@@ -388,6 +483,9 @@ fn db_search_lines(app: &App, lines: &mut Vec<HelpLine>) {
     bind_line(lines, "Backspace/Delete", "delete text");
     bind_line(lines, "Arrows/Home/End", "move cursor");
     bind_line(lines, "Enter", "apply");
+    if can_save_search_as_filter(app) {
+        bind_line(lines, "Ctrl-S", "save current search as filter");
+    }
     bind_line(lines, "Esc", "clear & exit");
     bind_line(lines, "Tab/S-Tab", "switch tab");
 }
@@ -403,6 +501,17 @@ fn fuzzy_search_lines(lines: &mut Vec<HelpLine>) {
     bind_line(lines, "Tab/S-Tab", "switch tab");
 }
 
+fn filter_edit_lines(lines: &mut Vec<HelpLine>) {
+    group(lines, "Filter Edit");
+    bind_line(lines, "Type", "edit DB query");
+    bind_line(lines, "Ctrl-S", "save query");
+    bind_line(lines, "Ctrl-E", "rename filter");
+    bind_line(lines, "Ctrl-C", "set category");
+    bind_line(lines, "↑/↓", "scroll preview");
+    bind_line(lines, "Tab/Enter", "accept autocomplete");
+    bind_line(lines, "Esc", "back");
+}
+
 fn category_lines(lines: &mut Vec<HelpLine>) {
     group(lines, "Category");
     bind_line(lines, "Type", "filter or create category");
@@ -412,9 +521,9 @@ fn category_lines(lines: &mut Vec<HelpLine>) {
     bind_line(lines, "Esc", "cancel");
 }
 
-fn category_edit_lines(lines: &mut Vec<HelpLine>) {
-    group(lines, "Rename Category");
-    bind_line(lines, "Type", "edit path");
+fn text_prompt_lines(app: &App, lines: &mut Vec<HelpLine>) {
+    group(lines, app.text_prompt_title());
+    bind_line(lines, "Type", "edit text");
     bind_line(lines, "Arrows/Home/End", "move cursor");
     bind_line(lines, "Backspace/Delete", "delete text");
     bind_line(lines, "Enter", "save");
@@ -471,10 +580,11 @@ mod tests {
     use super::*;
     use crate::tui::filtered_list::FilteredList;
     use crate::{
-        Category, Transaction, TransactionStore, TransactionWithEnrichment, Transfer,
-        TransferSource, TransferWithTransactions,
+        Category, Filter, FilterOverride, Transaction, TransactionStore, TransactionWithEnrichment,
+        Transfer, TransferSource, TransferWithTransactions,
     };
     use chrono::{NaiveDate, Utc};
+    use tui_input::InputRequest;
 
     #[test]
     fn normal_binds_have_no_duplicate_triggers_per_context() {
@@ -553,6 +663,94 @@ mod tests {
     }
 
     #[test]
+    fn filters_tab_binds_resolve() {
+        let mut app = app_with_rows();
+        app.current_tab = Tab::Filters;
+
+        let binds = normal_binds(&app);
+        assert!(has_act_trigger(
+            &binds,
+            Act::CreateFilter,
+            Trigger::Char('n')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::RenameFilter,
+            Trigger::Char('e')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::EditFilter,
+            Trigger::Code(KeyCode::Enter)
+        ));
+        assert!(has_act_trigger(&binds, Act::Categorise, Trigger::Char('c')));
+        assert!(has_act_trigger(
+            &binds,
+            Act::CycleFilterOverride,
+            Trigger::Char('o')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::ToggleFilterReview,
+            Trigger::Char('v')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::DeleteFilter,
+            Trigger::Char('d')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::DeleteFilter,
+            Trigger::Code(KeyCode::Delete)
+        ));
+    }
+
+    #[test]
+    fn filters_tab_enter_dispatches_to_filter_edit() {
+        let mut app = app_with_rows();
+        app.current_tab = Tab::Filters;
+
+        dispatch_normal(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.input_mode, InputMode::FilterEdit);
+    }
+
+    #[test]
+    fn transactions_search_can_be_saved_as_filter() {
+        let mut app = app_with_rows();
+        app.current_tab = Tab::Transactions;
+        app.start_db_search();
+        app.handle_db_search_input(InputRequest::InsertChar('x'));
+        app.confirm_db_search();
+
+        let binds = normal_binds(&app);
+        assert!(has_act_trigger(
+            &binds,
+            Act::SaveSearchAsFilter,
+            Trigger::Ctrl('s')
+        ));
+        assert!(footer_hints(&app).contains(&("Ctrl-S", "save filter")));
+    }
+
+    #[test]
+    fn filter_edit_footer_hints_resolve() {
+        let mut app = app_with_rows();
+        app.input_mode = InputMode::FilterEdit;
+
+        assert_eq!(
+            footer_hints(&app),
+            vec![
+                ("Ctrl-S", "save"),
+                ("Ctrl-E", "rename"),
+                ("Ctrl-C", "category"),
+                ("↑/↓", "preview"),
+                ("Esc", "back"),
+            ]
+        );
+    }
+
+    #[test]
     fn normal_footer_hints_map_to_dispatch_binds() {
         for (tab, subtab) in contexts() {
             let mut app = app_with_rows();
@@ -577,7 +775,7 @@ mod tests {
         }
     }
 
-    fn contexts() -> [(Tab, TodoSubTab); 6] {
+    fn contexts() -> [(Tab, TodoSubTab); 7] {
         [
             (Tab::Transactions, TodoSubTab::Uncategorised),
             (Tab::Transfers, TodoSubTab::Uncategorised),
@@ -585,6 +783,7 @@ mod tests {
             (Tab::Todo, TodoSubTab::Uncategorised),
             (Tab::Todo, TodoSubTab::AiReview),
             (Tab::Todo, TodoSubTab::TransferReview),
+            (Tab::Filters, TodoSubTab::Uncategorised),
         ]
     }
 
@@ -613,6 +812,7 @@ mod tests {
             to_transaction: tx2,
         }]);
         app.lists.categories = FilteredList::new(vec![category]);
+        app.lists.filters = FilteredList::new(vec![filter(1)]);
         app
     }
 
@@ -636,6 +836,19 @@ mod tests {
         Category {
             id,
             path: "Food/Groceries".to_string(),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn filter(id: i64) -> Filter {
+        Filter {
+            id,
+            name: "Groceries".to_string(),
+            query: "woolworths".to_string(),
+            category_id: Some(1),
+            override_mode: FilterOverride::Uncategorised,
+            review_required: false,
+            position: 0,
             created_at: Utc::now(),
         }
     }
