@@ -143,6 +143,55 @@ pub struct TransactionEnrichment {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Whether a category-bearing filter may overwrite an existing enrichment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterOverride {
+    /// Only categorise transactions that have no enrichment at all.
+    Uncategorised,
+    /// Categorise uncategorised transactions and overwrite AI suggestions.
+    Ai,
+    /// Overwrite any enrichment (manual, AI, or rule).
+    All,
+}
+
+impl FilterOverride {
+    /// Convert to string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FilterOverride::Uncategorised => "uncategorised",
+            FilterOverride::Ai => "ai",
+            FilterOverride::All => "all",
+        }
+    }
+}
+
+impl std::str::FromStr for FilterOverride {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "uncategorised" => Ok(FilterOverride::Uncategorised),
+            "ai" => Ok(FilterOverride::Ai),
+            "all" => Ok(FilterOverride::All),
+            _ => Err(()),
+        }
+    }
+}
+
+/// A saved search. When it carries a `category_id`, matching transactions are
+/// auto-categorised by `TransactionStore::apply_filters`.
+#[derive(Debug, Clone)]
+pub struct Filter {
+    pub id: i64,
+    pub name: String,
+    pub query: String,
+    pub category_id: Option<i64>,
+    pub override_mode: FilterOverride,
+    pub review_required: bool,
+    pub position: i64,
+    pub created_at: DateTime<Utc>,
+}
+
 /// How a transfer between transactions was detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferSource {

@@ -29,6 +29,7 @@ const RECURRING_LOW_CONFIDENCE: f64 = 0.40;
 /// Counts produced by one local classification run.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ClassifyReport {
+    pub filtered: usize,
     pub transfers: usize,
     pub exact: usize,
     pub recurring: usize,

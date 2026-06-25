@@ -1,6 +1,6 @@
 use chrono::{NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params, types::Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::db::{build_searchable_text, init_db};
@@ -8,11 +8,12 @@ use crate::import::{
     compute_hash, find_csv_files, find_import_script, find_pull_script, hash_file,
     run_import_script, run_pull_script,
 };
-use crate::search::{ParsedQuery, SqlContext};
+use crate::search::{ParsedQuery, SearchConfig, SqlContext, parse};
 use crate::{
     Account, Bank, Category, CategorySource, ConfirmedCategoryExample, ConfirmedTransferExample,
-    Error, FuzzyMatcher, RawTransaction, RefreshReport, Result, Transaction, TransactionEnrichment,
-    TransactionWithEnrichment, Transfer, TransferSource, TransferWithTransactions,
+    Error, Filter, FilterOverride, FuzzyMatcher, RawTransaction, RefreshReport, Result,
+    Transaction, TransactionEnrichment, TransactionWithEnrichment, Transfer, TransferSource,
+    TransferWithTransactions,
 };
 
 /// Column list for selecting a full `Transaction` from `transactions_view`
@@ -865,6 +866,172 @@ impl TransactionStore {
         Ok(())
     }
 
+    // ==================== Filters ====================
+
+    /// List all saved filters, ordered for display and apply precedence.
+    pub fn list_filters(&self) -> Result<Vec<Filter>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, query, category_id, override_mode, review_required, position, created_at
+             FROM filters
+             ORDER BY position ASC, id ASC",
+        )?;
+        let filters = stmt
+            .query_map([], parse_filter)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(filters)
+    }
+
+    /// Create a filter (no category, no override) appended after the last one.
+    pub fn create_filter(&mut self, name: &str, query: &str) -> Result<i64> {
+        let position: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM filters",
+            [],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO filters (name, query, override_mode, review_required, position, created_at)
+             VALUES (?, ?, 'uncategorised', 0, ?, ?)",
+            params![name, query, position, Utc::now().to_rfc3339()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Rename a filter.
+    pub fn rename_filter(&mut self, id: i64, name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE filters SET name = ? WHERE id = ?",
+            params![name, id],
+        )?;
+        Ok(())
+    }
+
+    /// Replace a filter's search query.
+    pub fn set_filter_query(&mut self, id: i64, query: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE filters SET query = ? WHERE id = ?",
+            params![query, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set (or clear) the category a filter auto-applies.
+    pub fn set_filter_category(&mut self, id: i64, category_id: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE filters SET category_id = ? WHERE id = ?",
+            params![category_id, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a filter's override mode.
+    pub fn set_filter_override(&mut self, id: i64, mode: FilterOverride) -> Result<()> {
+        self.conn.execute(
+            "UPDATE filters SET override_mode = ? WHERE id = ?",
+            params![mode.as_str(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Set whether a filter's applied categories require review (unconfirmed).
+    pub fn set_filter_review(&mut self, id: i64, review: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE filters SET review_required = ? WHERE id = ?",
+            params![review, id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a filter.
+    pub fn delete_filter(&mut self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM filters WHERE id = ?", [id])?;
+        Ok(())
+    }
+
+    /// Auto-categorise transactions matching category-bearing filters.
+    ///
+    /// Shared entry point for `tally classify` and (later) the TUI. Rule-sourced
+    /// unconfirmed enrichments are wiped first so the result is a pure function
+    /// of the current filter set; confirmed enrichments are never deleted.
+    /// Filters apply in order with first-match-wins per transaction, and never
+    /// touch a transfer leg. Returns the number of transactions categorised.
+    pub fn apply_filters(&mut self) -> Result<usize> {
+        self.conn.execute(
+            "DELETE FROM transaction_enrichments
+             WHERE category_source = 'rule' AND category_confirmed = 0",
+            [],
+        )?;
+
+        let config = SearchConfig::standard(Vec::new(), None);
+        let mut claimed: HashSet<i64> = HashSet::new();
+        let mut applied = 0;
+
+        for filter in self.list_filters()? {
+            let Some(category_id) = filter.category_id else {
+                continue;
+            };
+            let parsed = parse(&config, &filter.query, 0).0;
+            for tx in self.query_transactions(&parsed, None)? {
+                if !claimed.insert(tx.id) {
+                    continue;
+                }
+                if self.get_transfer_for_transaction(tx.id)?.is_some() {
+                    continue;
+                }
+                if self.filter_applies(category_id, filter.override_mode, tx.id)? {
+                    self.set_category(
+                        tx.id,
+                        category_id,
+                        CategorySource::Rule,
+                        !filter.review_required,
+                        None,
+                    )?;
+                    applied += 1;
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    /// Decide whether a filter may categorise `tx_id` given its override mode
+    /// and the transaction's existing enrichment.
+    fn filter_applies(&self, category_id: i64, mode: FilterOverride, tx_id: i64) -> Result<bool> {
+        let Some((source, confirmed, existing_category)) = self.get_enrichment_meta(tx_id)? else {
+            return Ok(true);
+        };
+        // Preserve a user's confirmation of this very category across runs.
+        if confirmed && existing_category == Some(category_id) {
+            return Ok(false);
+        }
+        Ok(match mode {
+            FilterOverride::Uncategorised => false,
+            FilterOverride::Ai => source == Some(CategorySource::Ai),
+            FilterOverride::All => true,
+        })
+    }
+
+    /// Enrichment source, confirmed flag, and category id for a transaction.
+    fn get_enrichment_meta(&self, tx_id: i64) -> Result<Option<EnrichmentMeta>> {
+        self.conn
+            .query_row(
+                "SELECT category_source, category_confirmed, category_id
+                 FROM transaction_enrichments WHERE transaction_id = ?",
+                [tx_id],
+                |row| {
+                    let source = row
+                        .get::<_, Option<String>>(0)?
+                        .and_then(|s| s.parse().ok());
+                    Ok((
+                        source,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Return all user-confirmed category assignments as classifier examples.
     pub fn get_confirmed_examples(&self) -> Result<Vec<ConfirmedCategoryExample>> {
         let mut stmt = self.conn.prepare(
@@ -1487,6 +1654,30 @@ fn parse_transfer(row: &rusqlite::Row) -> rusqlite::Result<Transfer> {
     })
 }
 
+/// An enrichment's category source, confirmed flag, and category id.
+type EnrichmentMeta = (Option<CategorySource>, bool, Option<i64>);
+
+fn parse_filter(row: &rusqlite::Row) -> rusqlite::Result<Filter> {
+    let override_str: String = row.get(4)?;
+    let override_mode = override_str.parse().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            format!("invalid filter override: {}", override_str).into(),
+        )
+    })?;
+    Ok(Filter {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        query: row.get(2)?,
+        category_id: row.get(3)?,
+        override_mode,
+        review_required: row.get::<_, i32>(5)? != 0,
+        position: row.get(6)?,
+        created_at: parse_datetime(&row.get::<_, String>(7)?)?,
+    })
+}
+
 fn parse_date(date_str: &str) -> Result<NaiveDate> {
     if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
         return Ok(date);
@@ -1501,7 +1692,6 @@ fn parse_date(date_str: &str) -> Result<NaiveDate> {
 mod tests {
     use super::*;
     use crate::TransferSource;
-    use crate::search::{SearchConfig, parse};
     use std::fs;
     use tempfile::TempDir;
 
@@ -2418,5 +2608,235 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
         // Invariant: a transfer is never categorised.
         assert!(store.get_transaction_category(from).unwrap().is_none());
         assert!(store.get_transaction_category(to).unwrap().is_none());
+    }
+
+    // ----- Filter tests -----
+
+    fn tx_id_of(store: &TransactionStore, desc: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT id FROM transactions WHERE description = ? LIMIT 1",
+                [desc],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Source, confirmed, category path for a transaction's enrichment.
+    fn enrichment(store: &TransactionStore, desc: &str) -> Option<(CategorySource, bool, String)> {
+        let id = tx_id_of(store, desc);
+        let (source, confirmed, cat_id) = store.get_enrichment_meta(id).unwrap()?;
+        let path = store.get_category(cat_id.unwrap()).unwrap().unwrap().path;
+        Some((source.unwrap(), confirmed, path))
+    }
+
+    /// Add a category-bearing filter and return its id.
+    fn add_filter(
+        store: &mut TransactionStore,
+        name: &str,
+        query: &str,
+        category: &str,
+        mode: FilterOverride,
+        review: bool,
+    ) -> i64 {
+        let cat = store.get_or_create_category(category).unwrap();
+        let id = store.create_filter(name, query).unwrap();
+        store.set_filter_category(id, Some(cat)).unwrap();
+        store.set_filter_override(id, mode).unwrap();
+        store.set_filter_review(id, review).unwrap();
+        id
+    }
+
+    #[test]
+    fn filter_applies_rule_to_uncategorised_match_only() {
+        let (_t, mut store) = setup_rich_fixture();
+        // "Interest" is the only uncategorised, non-transfer transaction.
+        add_filter(
+            &mut store,
+            "interest",
+            "Interest",
+            "Income/Interest",
+            FilterOverride::Uncategorised,
+            false,
+        );
+
+        assert_eq!(store.apply_filters().unwrap(), 1);
+        assert_eq!(
+            enrichment(&store, "Interest"),
+            Some((CategorySource::Rule, true, "Income/Interest".into()))
+        );
+        // A non-matching uncategorised-elsewhere row is untouched; the manual
+        // Grocery enrichment keeps its source.
+        assert_eq!(
+            enrichment(&store, "Grocery Store").map(|e| e.0),
+            Some(CategorySource::Manual)
+        );
+    }
+
+    #[test]
+    fn filter_review_required_leaves_unconfirmed() {
+        let (_t, mut store) = setup_rich_fixture();
+        add_filter(
+            &mut store,
+            "interest",
+            "Interest",
+            "Income/Interest",
+            FilterOverride::Uncategorised,
+            true,
+        );
+        store.apply_filters().unwrap();
+        assert_eq!(
+            enrichment(&store, "Interest"),
+            Some((CategorySource::Rule, false, "Income/Interest".into()))
+        );
+    }
+
+    #[test]
+    fn override_modes_respect_existing_enrichment() {
+        let (_t, mut store) = setup_rich_fixture();
+        // Grocery Store is Manual+confirmed; Coffee Bean is AI+unconfirmed.
+        add_filter(
+            &mut store,
+            "uncat",
+            "Grocery",
+            "Override/Uncat",
+            FilterOverride::Uncategorised,
+            false,
+        );
+        add_filter(
+            &mut store,
+            "ai-on-ai",
+            "Coffee Bean",
+            "Override/Ai",
+            FilterOverride::Ai,
+            false,
+        );
+        store.apply_filters().unwrap();
+        // Uncategorised never overrides a manual category.
+        assert_eq!(
+            enrichment(&store, "Grocery Store").map(|e| e.0),
+            Some(CategorySource::Manual)
+        );
+        // Ai overrides an existing AI enrichment.
+        assert_eq!(
+            enrichment(&store, "Coffee Bean"),
+            Some((CategorySource::Rule, true, "Override/Ai".into()))
+        );
+
+        // A fresh All-mode filter overrides a manual category (Salary, which no
+        // earlier filter claims).
+        add_filter(
+            &mut store,
+            "all",
+            "Salary",
+            "Override/All",
+            FilterOverride::All,
+            false,
+        );
+        store.apply_filters().unwrap();
+        assert_eq!(
+            enrichment(&store, "Salary"),
+            Some((CategorySource::Rule, true, "Override/All".into()))
+        );
+
+        // Ai mode must NOT override the manual Grocery category. The earlier
+        // Uncategorised "uncat" filter claims Grocery first, but even alone an
+        // Ai filter would skip a manual enrichment.
+        add_filter(
+            &mut store,
+            "ai-on-manual",
+            "Coffee Shop",
+            "Override/AiManual",
+            FilterOverride::Ai,
+            false,
+        );
+        store.apply_filters().unwrap();
+        // Coffee Shop is Manual+confirmed; Ai mode leaves it.
+        assert_eq!(
+            enrichment(&store, "Coffee Shop").map(|e| e.0),
+            Some(CategorySource::Manual)
+        );
+    }
+
+    #[test]
+    fn first_matching_filter_wins() {
+        let (_t, mut store) = setup_rich_fixture();
+        // Both match "Interest"; the earlier (lower position) filter wins.
+        add_filter(
+            &mut store,
+            "first",
+            "Interest",
+            "Win/First",
+            FilterOverride::All,
+            false,
+        );
+        add_filter(
+            &mut store,
+            "second",
+            "Interest",
+            "Win/Second",
+            FilterOverride::All,
+            false,
+        );
+        store.apply_filters().unwrap();
+        assert_eq!(
+            enrichment(&store, "Interest").map(|e| e.2),
+            Some("Win/First".into())
+        );
+    }
+
+    #[test]
+    fn apply_filters_is_idempotent_and_preserves_confirmed() {
+        let (_t, mut store) = setup_rich_fixture();
+        let filter_id = add_filter(
+            &mut store,
+            "interest",
+            "Interest",
+            "Income/Interest",
+            FilterOverride::Uncategorised,
+            false,
+        );
+
+        assert_eq!(store.apply_filters().unwrap(), 1);
+        // User confirms the rule assignment.
+        store
+            .confirm_category(tx_id_of(&store, "Interest"))
+            .unwrap();
+        // Switching the filter to require review must not re-touch the now
+        // user-confirmed same-category row.
+        store.set_filter_review(filter_id, true).unwrap();
+
+        assert_eq!(store.apply_filters().unwrap(), 0);
+        assert_eq!(
+            enrichment(&store, "Interest"),
+            Some((CategorySource::Rule, true, "Income/Interest".into()))
+        );
+        // Exactly one enrichment row for the transaction.
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM transaction_enrichments WHERE transaction_id = ?",
+                [tx_id_of(&store, "Interest")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn filter_never_categorises_transfer_leg() {
+        let (_t, mut store) = setup_rich_fixture();
+        add_filter(
+            &mut store,
+            "xfer",
+            "Transfer",
+            "Should/NotApply",
+            FilterOverride::All,
+            false,
+        );
+        assert_eq!(store.apply_filters().unwrap(), 0);
+        assert!(enrichment(&store, "Transfer Out").is_none());
+        assert!(enrichment(&store, "Transfer In").is_none());
     }
 }

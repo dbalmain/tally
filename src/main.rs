@@ -164,6 +164,7 @@ fn run_classify(vault_root: &Path, db_path: &Path, exports_dir: &Path) {
     let report = tally::classify::classify(&mut store, vault_root).expect("Failed to classify");
 
     println!("Classification complete:");
+    println!("  Filter auto-categorised: {}", report.filtered);
     println!("  Transfers detected: {}", report.transfers);
     println!("  Exact-amount suggestions: {}", report.exact);
     println!("  Recurring-biller suggestions: {}", report.recurring);

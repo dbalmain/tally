@@ -76,6 +76,17 @@ CREATE TABLE IF NOT EXISTS transfers (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS filters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    query TEXT NOT NULL,
+    category_id INTEGER REFERENCES categories(id),
+    override_mode TEXT NOT NULL DEFAULT 'uncategorised',
+    review_required INTEGER NOT NULL DEFAULT 0,
+    position INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_transactions_account_date ON transactions(account_id, date);
 CREATE INDEX IF NOT EXISTS idx_transactions_hash ON transactions(hash);
 CREATE INDEX IF NOT EXISTS idx_accounts_bank ON accounts(bank_id);

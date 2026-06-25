@@ -10,7 +10,10 @@ use super::{
 
 /// Classify all currently uncategorized, non-transfer transactions in a collection.
 pub fn classify(store: &mut TransactionStore, _collection_root: &Path) -> Result<ClassifyReport> {
-    let mut report = ClassifyReport::default();
+    let mut report = ClassifyReport {
+        filtered: store.apply_filters()?,
+        ..Default::default()
+    };
 
     let transfer_history: Vec<_> = store
         .get_confirmed_transfer_examples()?
