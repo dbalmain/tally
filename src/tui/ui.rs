@@ -10,7 +10,7 @@ use crate::{FilterOverride, Transaction, TransactionWithEnrichment, TransferWith
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
-use super::modal::{Modal, hint_line};
+use super::modal::{MODAL_CHROME_HEIGHT, Modal, hint_line};
 use super::search_bar::SearchBar;
 use super::table::{ScrollTable, aligned_table, calculate_scroll_offset};
 
@@ -1067,7 +1067,9 @@ fn draw_keybind_popup(f: &mut Frame, app: &App) {
     let help = keymap::help_lines(app);
     let screen = f.area();
     let width = 64.min(screen.width.saturating_sub(2)).max(20);
-    let desired_height = (help.len() as u16).saturating_add(4).max(8);
+    let desired_height = (help.len() as u16)
+        .saturating_add(MODAL_CHROME_HEIGHT)
+        .max(8);
     let height = desired_height.min(screen.height.saturating_sub(2).max(1));
     let area = centered_rect_size(width, height, screen);
     let hints = [("Esc/Enter", "close"), ("Alt-?", "toggle bar")];
@@ -1110,7 +1112,8 @@ fn help_line(line: HelpLine) -> Line<'static> {
 }
 
 fn draw_text_prompt_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect_fixed_height(50, 6, f.area());
+    // One input line plus the shared modal chrome.
+    let area = centered_rect_fixed_height(50, MODAL_CHROME_HEIGHT + 1, f.area());
     let hints = keymap::footer_hints(app);
     let body = Modal {
         title: app.text_prompt_title(),
@@ -1135,15 +1138,9 @@ fn draw_text_prompt_popup(f: &mut Frame, app: &App) {
 }
 
 fn draw_confirm_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect_fixed_height(60, 8, f.area());
-    let hints = keymap::footer_hints(app);
-    let body = Modal {
-        title: "Confirm",
-        hints: &hints,
-        border: Color::Cyan,
-    }
-    .draw(f, area);
     let message = app.confirm_message.as_deref().unwrap_or("Confirm action?");
+    let hints = keymap::footer_hints(app);
+    let body = message_modal(f, "Confirm", Color::Cyan, message, &hints, 60);
 
     let msg_line = Paragraph::new(message)
         .style(Style::default().fg(Color::Yellow))
@@ -1363,15 +1360,6 @@ fn draw_search_autocomplete_popup(f: &mut Frame, search_bar: &SearchBar, search_
 }
 
 fn draw_no_match_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect(40, 20, f.area());
-    let hints = keymap::footer_hints(app);
-    let body = Modal {
-        title: "No match",
-        hints: &hints,
-        border: Color::Cyan,
-    }
-    .draw(f, area);
-
     let tx = app.pending_transfer_tx.as_ref();
     let msg = if let Some(tx) = tx {
         format!(
@@ -1383,21 +1371,22 @@ fn draw_no_match_popup(f: &mut Frame, app: &App) {
         "No matching transaction found.".to_string()
     };
 
-    let paragraph = Paragraph::new(msg).style(Style::default().fg(Color::White));
+    let hints = keymap::footer_hints(app);
+    let body = message_modal(f, "No match", Color::Cyan, &msg, &hints, 40);
+
+    let paragraph = Paragraph::new(msg)
+        .style(Style::default().fg(Color::White))
+        .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(paragraph, body);
 }
 
 fn draw_error_popup(f: &mut Frame, msg: &str) {
-    let area = centered_rect(40, 15, f.area());
     let hints = [("Esc", "dismiss")];
-    let body = Modal {
-        title: "Error",
-        hints: &hints,
-        border: Color::Red,
-    }
-    .draw(f, area);
+    let body = message_modal(f, "Error", Color::Red, msg, &hints, 40);
 
-    let paragraph = Paragraph::new(msg).style(Style::default().fg(Color::White));
+    let paragraph = Paragraph::new(msg)
+        .style(Style::default().fg(Color::White))
+        .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(paragraph, body);
 }
 
@@ -1423,6 +1412,37 @@ fn centered_rect_size(width: u16, height: u16, r: Rect) -> Rect {
     let x = (r.width - popup_width) / 2;
     let y = (r.height - popup_height) / 2;
     Rect::new(r.x + x, r.y + y, popup_width, popup_height)
+}
+
+/// Number of rows `text` occupies once wrapped to `width`, honouring embedded
+/// newlines. Used to size text modals so the shared spacing lands exactly.
+fn count_wrapped_lines(text: &str, width: usize) -> usize {
+    text.split('\n').map(|line| wrap_text(line, width).len()).sum()
+}
+
+/// Draw a short text modal sized to its (wrapped) message, following the shared
+/// modal style, and return the body rect the caller should render the message
+/// into. `width_pct` is the modal width as a percentage of the screen.
+fn message_modal(
+    f: &mut Frame,
+    title: &str,
+    border: Color,
+    message: &str,
+    hints: &[(&str, &str)],
+    width_pct: u16,
+) -> Rect {
+    let screen = f.area();
+    let width = (screen.width * width_pct / 100).clamp(20.min(screen.width), screen.width);
+    let body_width = width.saturating_sub(4).max(1) as usize;
+    let lines = count_wrapped_lines(message, body_width) as u16;
+    let height = lines.saturating_add(MODAL_CHROME_HEIGHT).min(screen.height);
+    let area = centered_rect_size(width, height, screen);
+    Modal {
+        title,
+        hints,
+        border,
+    }
+    .draw(f, area)
 }
 
 fn format_cents(cents: i64) -> String {

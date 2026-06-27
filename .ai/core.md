@@ -247,7 +247,12 @@ handling and data flow stay uniform:
 - **Rendering never queries the DB** — `ui.rs` reads `App` state and the
   caches (`get_cached_transaction/category/transfer`).
 - **Overlay modals use shared chrome** — use `src/tui/modal.rs` `Modal`; modal
-  keybind hints render inside the modal and hide the global hint bar.
+  keybind hints render inside the modal and hide the global hint bar. `Modal`
+  enforces the house spacing for every modal: a blank line under the title, one
+  space of horizontal padding each side, and two blank lines between the body
+  and the bottom hint row. Size text modals to `MODAL_CHROME_HEIGHT + lines`
+  (the `message_modal` helper in `ui.rs` does this for short message popups) so
+  that spacing lands exactly; table/list modals just fill the body rect.
 - **Tables use `ScrollTable`** (`src/tui/table.rs`) — it owns scroll-offset
   math, inline detail placement, and column geometry; per-view closures own row
   content, styling, and optional detail rendering.
