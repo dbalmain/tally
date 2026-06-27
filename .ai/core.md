@@ -359,7 +359,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `v` | Toggle filter review requirement (Filters tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
 | `d` / `Delete` | Delete transfer (Transfers tab), or delete filter (Filters tab; prompts to confirm) |
-| `u` | Transactions tab: uncategorise / unlink (unlink transfer, else remove category) |
+| `u` | Transactions tab: unlink the selected transfer, else uncategorise the transaction (prompts to confirm). The hint reads "unlink" on a linked transfer and "uncategorise" otherwise, and is hidden when the row has neither |
 | `Delete` | AI Review: remove category. Transfer Review: unlink transfer |
 | `Enter` | Confirm (AI review, transfer review), or open filter edit (Filters tab) |
 | `Esc` | Clear active search (fuzzy first, then DB) |

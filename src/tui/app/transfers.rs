@@ -140,26 +140,28 @@ impl App {
         }
     }
 
-    /// On a plain-transaction view, `Delete` removes the selected
-    /// transaction's transfer link, or — if it isn't a transfer — its category.
-    /// (A transaction is never both; transfer takes precedence so legacy rows
-    /// that ended up with both can be cleared with two presses.)
+    /// On a plain-transaction view, `u` removes the selected transaction's
+    /// transfer link, or — if it isn't a transfer — its category, after a
+    /// confirmation prompt. (A transaction is never both; transfer takes
+    /// precedence so legacy rows that ended up with both can be cleared with two
+    /// presses.) The work itself happens in [`App::confirm_proceed`].
     pub fn delete_selected_tx_link(&mut self) {
         let Some(tx_id) = self.selected_transaction().map(|tx| tx.id) else {
             return;
         };
         if let Some(transfer_id) = self.get_cached_transfer(tx_id).map(|t| t.id) {
-            if self.try_mutation("delete transfer", |s| s.delete_transfer(transfer_id)) {
-                self.refresh_data();
-            }
+            self.confirm_message = Some("Unlink this transfer?".to_string());
+            self.confirm_action = Some(ConfirmAction::UnlinkTransfer { transfer_id });
+            self.input_mode = InputMode::Confirm;
             return;
         }
         if self
             .get_cached_category(tx_id)
             .is_some_and(|c| !c.is_empty())
-            && self.try_mutation("remove category", |s| s.delete_enrichment(tx_id))
         {
-            self.refresh_data();
+            self.confirm_message = Some("Uncategorise this transaction?".to_string());
+            self.confirm_action = Some(ConfirmAction::Uncategorise { tx_id });
+            self.input_mode = InputMode::Confirm;
         }
     }
 

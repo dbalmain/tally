@@ -80,6 +80,10 @@ pub enum ConfirmAction {
     DiscardFilterEdit,
     /// Deleting a saved filter from the Filters tab.
     DeleteFilter(i64),
+    /// Unlinking the selected transaction's transfer (`u` on Transactions).
+    UnlinkTransfer { transfer_id: i64 },
+    /// Removing the selected transaction's category (`u` on Transactions).
+    Uncategorise { tx_id: i64 },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -289,8 +293,9 @@ impl App {
 
     /// Rebuild the per-transaction caches (`tx_by_id`, `category_by_tx_id`,
     /// `transfer_by_tx_id`) from currently-loaded list contents. Cheap: no
-    /// per-row DB queries — at most one bulk lookup plus a few singletons for
-    /// transfer-review sides that aren't already in the loaded data.
+    /// per-row DB queries — two bulk lookups (categories and transfers for the
+    /// loaded transactions) plus a few singletons for transfer-review sides that
+    /// aren't already in the loaded data.
     fn rebuild_tx_caches(&mut self) {
         self.tx_by_id.clear();
         for tx in self.lists.transactions.items() {
@@ -338,13 +343,16 @@ impl App {
             s.get_categories_for_transactions(&tx_ids)
         });
 
-        self.transfer_by_tx_id.clear();
-        for twt in self.lists.linked_transfers.items() {
-            self.transfer_by_tx_id
-                .insert(twt.from_transaction.id, twt.transfer.clone());
-            self.transfer_by_tx_id
-                .insert(twt.to_transaction.id, twt.transfer.clone());
-        }
+        // Load transfer links straight from the DB for every loaded
+        // transaction, so an unlink (which only touches the `transfers` table)
+        // is reflected even on tabs that don't reload `linked_transfers`.
+        let all_tx_ids: Vec<i64> = self.tx_by_id.keys().copied().collect();
+        self.transfer_by_tx_id = self.load_or_show("load transaction transfers", |s| {
+            s.get_transfers_for_transactions(&all_tx_ids)
+        });
+        // Pending transfer reviews carry their Transfer directly and may
+        // reference transactions outside the loaded lists; keep them as a
+        // fallback for any endpoint the bulk lookup didn't cover.
         for tr in self.lists.transfer_reviews.items() {
             self.transfer_by_tx_id
                 .entry(tr.from_transaction_id)
@@ -827,6 +835,18 @@ impl App {
                 if applied {
                     self.refresh_data();
                 }
+            }
+            ConfirmAction::UnlinkTransfer { transfer_id } => {
+                if self.try_mutation("unlink transfer", |s| s.delete_transfer(transfer_id)) {
+                    self.refresh_data();
+                }
+                self.input_mode = InputMode::Normal;
+            }
+            ConfirmAction::Uncategorise { tx_id } => {
+                if self.try_mutation("remove category", |s| s.delete_enrichment(tx_id)) {
+                    self.refresh_data();
+                }
+                self.input_mode = InputMode::Normal;
             }
             ConfirmAction::DiscardFilterEdit => self.exit_filter_edit(),
             ConfirmAction::DeleteFilter(filter_id) => {

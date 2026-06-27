@@ -1272,6 +1272,52 @@ impl TransactionStore {
             .map_err(Into::into)
     }
 
+    /// Map each of `transaction_ids` that is part of a transfer to that
+    /// transfer. Both endpoints of a matching transfer are inserted, so a row
+    /// can resolve its own link whether it is the "from" or "to" side. Mirrors
+    /// [`Self::get_categories_for_transactions`] so per-transaction caches can
+    /// be rebuilt from the DB rather than from a separately-loaded list.
+    pub fn get_transfers_for_transactions(
+        &self,
+        transaction_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Transfer>> {
+        use std::collections::HashMap;
+
+        if transaction_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = transaction_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT {TRANSFER_COLS}
+             FROM transfers tr
+             WHERE tr.from_transaction_id IN ({placeholders})
+                OR tr.to_transaction_id IN ({placeholders})"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        // The placeholder list appears twice (from_… and to_…), so bind the ids
+        // twice in order.
+        let params: Vec<&dyn rusqlite::ToSql> = transaction_ids
+            .iter()
+            .chain(transaction_ids.iter())
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), parse_transfer)?;
+
+        let mut result = HashMap::new();
+        for row in rows {
+            let transfer = row?;
+            result.insert(transfer.from_transaction_id, transfer.clone());
+            result.insert(transfer.to_transaction_id, transfer);
+        }
+        Ok(result)
+    }
+
     /// Find potential matching transactions for a transfer.
     ///
     /// Prefers candidates in *other* accounts (the common transfer case). Only
@@ -2626,6 +2672,35 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
         // Invariant: a transfer is never categorised.
         assert!(store.get_transaction_category(from).unwrap().is_none());
         assert!(store.get_transaction_category(to).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_transfers_for_transactions_maps_both_endpoints_and_reflects_deletion() {
+        let (_tmp, mut store, a1, a2) = store_with_two_accounts();
+        let from = insert_tx(&store, a1, "2024-03-10", -5000);
+        let to = insert_tx(&store, a2, "2024-03-10", 5000);
+        store
+            .create_transfer(from, to, TransferSource::Manual, true, None)
+            .unwrap();
+
+        // Both endpoints resolve to the same transfer, even when only one id is
+        // queried.
+        let map = store.get_transfers_for_transactions(&[from]).unwrap();
+        assert_eq!(map.len(), 2);
+        let transfer = &map[&from];
+        assert_eq!(transfer.from_transaction_id, from);
+        assert_eq!(transfer.to_transaction_id, to);
+        assert_eq!(map[&to].id, transfer.id);
+
+        // After deleting the transfer the lookup is empty — the source of the
+        // bug where an unlink wasn't reflected until restart.
+        store.delete_transfer(transfer.id).unwrap();
+        assert!(
+            store
+                .get_transfers_for_transactions(&[from, to])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ----- Filter tests -----

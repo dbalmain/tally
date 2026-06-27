@@ -184,15 +184,16 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
         ));
     }
 
-    if app.current_tab == Tab::Transactions && app.selected_transaction().is_some() {
-        out.push(b(
-            &[Char('u')],
-            "u",
-            "uncategorise / unlink",
-            true,
-            true,
-            DeleteTxLink,
-        ));
+    // `u` removes the selected transaction's transfer link or its category
+    // (whichever it has), so the hint names whichever applies.
+    if app.current_tab == Tab::Transactions
+        && let Some(tx) = app.selected_transaction()
+    {
+        if app.get_cached_transfer(tx.id).is_some() {
+            out.push(b(&[Char('u')], "u", "unlink", true, true, DeleteTxLink));
+        } else if app.get_cached_category(tx.id).is_some_and(|c| !c.is_empty()) {
+            out.push(b(&[Char('u')], "u", "uncategorise", true, true, DeleteTxLink));
+        }
     }
 
     if is_transaction_view(app) && app.selected_transaction().is_some() {
