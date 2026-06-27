@@ -23,12 +23,12 @@ impl LinearSvm {
         }
         let mut classes: Vec<_> = counts.keys().copied().collect();
         classes.sort_unstable();
+        // With a single class the model has nothing to discriminate: a one-vs-rest
+        // SVM would assign every input that class with a meaningless fixed margin.
+        // Abstain instead so callers fall back to history (or report it
+        // unclassified) rather than emitting a confidently-wrong suggestion.
         if classes.len() == 1 {
-            return Some(Self {
-                classes,
-                weights: vec![vec![0.0; feature_count]],
-                biases: vec![1.0],
-            });
+            return None;
         }
 
         let mut weights = vec![vec![0.0; feature_count]; classes.len()];

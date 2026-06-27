@@ -125,6 +125,42 @@ fn model_classifies_novel_descriptions() {
 }
 
 #[test]
+fn model_abstains_with_single_category() {
+    // Every confirmed example is in one category, so the model has nothing to
+    // discriminate. A novel biller (no history match) must get no suggestion
+    // rather than the lone category at a meaningless fixed confidence.
+    let classifier = train(&[
+        example("coffee shop", 100, "2025-01-01", 1),
+        example("coffee beans", 100, "2025-01-02", 1),
+        example("grocery market", 100, "2025-01-03", 1),
+    ]);
+
+    assert!(
+        predict(
+            &classifier,
+            &Input {
+                norm: "tea house".into(),
+                amount_cents: 100,
+                date: date("2025-02-01"),
+            },
+        )
+        .is_none()
+    );
+
+    // History still tags a known biller even though the model abstains.
+    let known = predict(
+        &classifier,
+        &Input {
+            norm: "coffee shop".into(),
+            amount_cents: 100,
+            date: date("2025-02-01"),
+        },
+    )
+    .unwrap();
+    assert_eq!(known.category_id, 1);
+}
+
+#[test]
 #[ignore = "requires TALLY_EVAL_CSV"]
 fn classify_eval_csv_accuracy() {
     let Some(path) = std::env::var_os("TALLY_EVAL_CSV") else {
