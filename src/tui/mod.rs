@@ -131,6 +131,7 @@ fn run_app(
                         | InputMode::FilterEdit
                         | InputMode::ConfirmMerge
                         | InputMode::Confirm
+                        | InputMode::ConfirmApplyFilters
                         | InputMode::BulkApply
                         | InputMode::TransferPending
                         | InputMode::TransferNoMatch
@@ -265,7 +266,7 @@ fn run_app(
                     }
 
                     match key.code {
-                        KeyCode::Esc => app.exit_filter_edit(),
+                        KeyCode::Esc => app.request_exit_filter_edit(),
                         KeyCode::Down => app.filter_edit_preview_next(),
                         KeyCode::Up => app.filter_edit_preview_prev(),
                         KeyCode::Enter => app.save_filter_edit(),
@@ -319,6 +320,17 @@ fn run_app(
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                         app.cancel_input();
                     }
+                    _ => {}
+                },
+                InputMode::ConfirmApplyFilters => match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        app.apply_filters_confirm();
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.cancel_input();
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => app.apply_filters_preview_next(),
+                    KeyCode::Char('k') | KeyCode::Up => app.apply_filters_preview_prev(),
                     _ => {}
                 },
                 InputMode::TransferPending => match key.code {

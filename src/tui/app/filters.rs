@@ -5,7 +5,7 @@ use tui_input::InputRequest;
 use crate::tui::search_bar::SearchBar;
 use crate::{Filter, FilterOverride, Transaction};
 
-use super::{App, FilterEditState, InputMode, Tab, TextPromptTarget};
+use super::{App, ApplyFiltersPreview, FilterEditState, InputMode, Tab, TextPromptTarget};
 
 const FILTER_EDIT_PREVIEW_LIMIT: usize = 500;
 
@@ -118,10 +118,84 @@ impl App {
         }
     }
 
-    /// Re-derive rule categories from the saved filter set (Ctrl-A).
+    /// Open the Ctrl-A confirmation modal listing the transactions the current
+    /// filter set would (re)categorise. Available on the Filters tab and the
+    /// filter edit screen; confirming runs the real apply.
     pub fn apply_filter_categories(&mut self) {
-        if self.current_tab == Tab::Filters || self.filter_edit.is_some() {
-            self.reapply_filters();
+        if self.current_tab != Tab::Filters && self.filter_edit.is_none() {
+            return;
+        }
+        let rows = match self.store.preview_filters() {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to preview filters: {e}"));
+                return;
+            }
+        };
+        self.apply_filters_preview = Some(ApplyFiltersPreview { rows, scroll: 0 });
+        self.input_mode = InputMode::ConfirmApplyFilters;
+    }
+
+    pub fn apply_filters_preview_rows(&self) -> &[Transaction] {
+        self.apply_filters_preview
+            .as_ref()
+            .map(|p| p.rows.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn apply_filters_preview_scroll(&self) -> usize {
+        self.apply_filters_preview
+            .as_ref()
+            .map(|p| p.scroll)
+            .unwrap_or(0)
+    }
+
+    pub fn apply_filters_preview_next(&mut self) {
+        if let Some(p) = self.apply_filters_preview.as_mut()
+            && !p.rows.is_empty()
+        {
+            p.scroll = (p.scroll + 1) % p.rows.len();
+        }
+    }
+
+    pub fn apply_filters_preview_prev(&mut self) {
+        if let Some(p) = self.apply_filters_preview.as_mut()
+            && !p.rows.is_empty()
+        {
+            p.scroll = (p.scroll + p.rows.len() - 1) % p.rows.len();
+        }
+    }
+
+    /// Confirm the Ctrl-A modal: run the real apply, then return to the screen
+    /// the modal was opened from.
+    pub fn apply_filters_confirm(&mut self) {
+        self.apply_filters_preview = None;
+        self.reapply_filters();
+        self.input_mode = if self.filter_edit.is_some() {
+            InputMode::FilterEdit
+        } else {
+            InputMode::Normal
+        };
+    }
+
+    /// Whether the in-edit query differs from the saved filter's query.
+    pub fn filter_edit_dirty(&self) -> bool {
+        let Some(state) = self.filter_edit.as_ref() else {
+            return false;
+        };
+        let saved = self.filter_edit_filter().map(|f| f.query.as_str());
+        saved != Some(state.search_bar.value())
+    }
+
+    /// Esc on the edit screen: prompt before discarding unsaved query edits,
+    /// otherwise exit straight away.
+    pub fn request_exit_filter_edit(&mut self) {
+        if self.filter_edit_dirty() {
+            self.confirm_message = Some("Discard unsaved changes?".to_string());
+            self.confirm_action = Some(super::ConfirmAction::DiscardFilterEdit);
+            self.input_mode = InputMode::Confirm;
+        } else {
+            self.exit_filter_edit();
         }
     }
 
@@ -354,17 +428,18 @@ impl App {
         }
     }
 
+    /// Prompt before deleting the selected filter; the delete itself runs in
+    /// `confirm_proceed` for `ConfirmAction::DeleteFilter`.
     pub fn delete_filter(&mut self) {
-        let Some(filter_id) = self.selected_filter().map(|filter| filter.id) else {
+        let Some((id, name)) = self
+            .selected_filter()
+            .map(|filter| (filter.id, filter.name.clone()))
+        else {
             return;
         };
-
-        if self.try_mutation("delete filter", |s| s.delete_filter(filter_id)) {
-            self.reapply_filters();
-            if self.selected_index >= self.lists.filters.len() && self.selected_index > 0 {
-                self.selected_index -= 1;
-            }
-        }
+        self.confirm_message = Some(format!("Delete filter '{name}'?"));
+        self.confirm_action = Some(super::ConfirmAction::DeleteFilter(id));
+        self.input_mode = InputMode::Confirm;
     }
 
     /// Persist nothing itself; re-derive rule categories and reload everything.
@@ -537,6 +612,38 @@ mod tests {
         assert_eq!(state.search_bar.value(), "Test");
         assert_eq!(state.preview.len(), 1);
         assert_eq!(state.preview[0].description, "Test transaction");
+    }
+
+    #[test]
+    fn esc_prompts_only_when_filter_edit_query_is_dirty() {
+        let (_temp, mut store) = store_with_imported_transaction();
+        store.create_filter("Test filter", "Test").unwrap();
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Filters;
+
+        // Unchanged query exits straight to Normal.
+        app.open_filter_edit();
+        assert!(!app.filter_edit_dirty());
+        app.request_exit_filter_edit();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.filter_edit.is_none());
+
+        // A dirty query routes to the discard confirmation instead of exiting.
+        app.open_filter_edit();
+        app.filter_edit
+            .as_mut()
+            .unwrap()
+            .search_bar
+            .set_value("Changed");
+        assert!(app.filter_edit_dirty());
+        app.request_exit_filter_edit();
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        assert!(app.filter_edit.is_some());
+
+        // Confirming the discard leaves the edit screen.
+        app.confirm_proceed();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.filter_edit.is_none());
     }
 
     fn store_with_imported_transaction() -> (TempDir, TransactionStore) {

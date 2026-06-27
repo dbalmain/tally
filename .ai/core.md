@@ -197,8 +197,16 @@ already-linked transactions — it offers them and the caller confirms.
 
 Filters are saved searches. When a filter has a category, `store.apply_filters()`
 re-derives rule-sourced categories from the saved filter set.
+`store.preview_filters()` is the dry-run: it runs the real apply body inside a
+SQLite savepoint and rolls back, returning the transactions that *would* be
+(re)categorised without persisting anything.
 On Transactions, `Ctrl-S` saves the active DB search as a new filter and opens
-the filter edit screen for it.
+the filter edit screen for it. Applying filter categories (`a` on the Filters
+tab, `Ctrl-A` on the Filter Edit screen) opens a scrollable confirmation modal
+listing the affected transactions (date/description/amount) before applying.
+Deleting a filter (`d`/`Delete`) and
+leaving the edit screen with unsaved query edits (`Esc`) both prompt for
+confirmation first.
 
 ### Money as Cents (i64)
 All monetary values are integers in cents to avoid floating-point errors.
@@ -343,14 +351,14 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `/` | Start DB search |
 | `~` | Start fuzzy search |
 | `Ctrl-S` | Save current Transactions DB search as a filter |
-| `Ctrl-N` | Create filter (Filters tab) |
-| `Ctrl-A` | Apply filter categories — reapply the saved filter set to transactions (Filters tab and Filter Edit) |
+| `n` | Create filter (Filters tab) |
+| `a` | Apply filter categories (Filters tab) — opens a scrollable confirmation modal listing the affected transactions (date/description/amount) before applying. On the Filter Edit screen this is `Ctrl-A` |
 | `c` | Set category on transaction (including Todo → AI Review), or set/clear filter category (Filters tab); categorising a transfer prompts to unlink it first |
 | `e` / `r` | Rename category (`e`, Categories tab), or rename filter (`r`, Filters tab) |
 | `o` | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`) |
 | `v` | Toggle filter review requirement (Filters tab) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
-| `d` / `Delete` | Delete transfer (Transfers tab), or delete filter (Filters tab) |
+| `d` / `Delete` | Delete transfer (Transfers tab), or delete filter (Filters tab; prompts to confirm) |
 | `Delete` | Transactions tab: unlink transfer, else remove category. AI Review: remove category. Transfer Review: unlink transfer |
 | `M` | Toggle source + metadata lines in the transaction detail (Transactions tab, Todo → Uncategorised) |
 | `Enter` | Confirm (AI review, transfer review), or open filter edit (Filters tab) |
@@ -382,10 +390,10 @@ feedback.
 | `Ctrl-C` | Set or clear filter category |
 | `Ctrl-O` | Cycle filter override mode (only when a category is set) |
 | `Ctrl-V` | Toggle filter review requirement (only when a category is set) |
-| `Ctrl-A` | Apply filter categories — reapply the saved filter set to transactions |
+| `Ctrl-A` | Apply filter categories — opens a confirmation modal listing the affected transactions before applying |
 | `Tab` | Accept autocomplete suggestion when the popup is open |
 | `↑` / `↓` | Scroll preview; search cursor stays in the bar (no hint shown) |
-| `Esc` | Discard unsaved query edits and return to the Filters table |
+| `Esc` | Return to the Filters table; prompts to confirm if the query has unsaved edits |
 
 ### Category Popup
 | Key | Action |

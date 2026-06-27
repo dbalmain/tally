@@ -133,8 +133,8 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     }
 
     if app.current_tab == Tab::Filters {
-        out.push(b(&[Ctrl('n')], "Ctrl-N", "new", true, true, CreateFilter));
-        out.push(b(&[Ctrl('a')], "Ctrl-A", "apply", true, true, ApplyFilters));
+        out.push(b(&[Char('n')], "n", "new", true, true, CreateFilter));
+        out.push(b(&[Char('a')], "a", "apply", true, true, ApplyFilters));
         if app.selected_filter().is_some() {
             out.push(b(
                 &[Code(KeyCode::Enter)],
@@ -418,8 +418,8 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("Enter", "save"),
             ("Ctrl-E", "rename"),
             ("Ctrl-C", "category"),
-            ("Ctrl-O", "override"),
-            ("Ctrl-V", "review"),
+            ("Ctrl-O", "override?"),
+            ("Ctrl-V", "review?"),
             ("Ctrl-A", "apply"),
             ("Esc", "back"),
         ],
@@ -434,6 +434,9 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ],
         InputMode::ConfirmMerge => vec![("y", "merge"), ("n", "cancel")],
         InputMode::Confirm => vec![("y", "confirm"), ("n", "cancel")],
+        InputMode::ConfirmApplyFilters => {
+            vec![("↑/↓", "scroll"), ("y/Enter", "apply"), ("Esc", "cancel")]
+        }
         InputMode::TransferPending => with_keys(vec![
             ("↑/↓", "select"),
             ("T/Enter", "link"),
@@ -461,6 +464,7 @@ pub fn help_lines(app: &App) -> Vec<HelpLine> {
         InputMode::BulkApply => bulk_apply_lines(&mut lines),
         InputMode::ConfirmMerge => confirm_merge_lines(&mut lines),
         InputMode::Confirm => confirm_lines(&mut lines),
+        InputMode::ConfirmApplyFilters => apply_filters_lines(&mut lines),
         InputMode::TransferPending => transfer_pending_lines(&mut lines),
         InputMode::TransferNoMatch => transfer_no_match_lines(&mut lines),
     }
@@ -555,6 +559,13 @@ fn confirm_merge_lines(lines: &mut Vec<HelpLine>) {
 fn confirm_lines(lines: &mut Vec<HelpLine>) {
     group(lines, "Confirm");
     bind_line(lines, "y/Enter", "confirm");
+    bind_line(lines, "n/Esc", "cancel");
+}
+
+fn apply_filters_lines(lines: &mut Vec<HelpLine>) {
+    group(lines, "Apply Filters");
+    bind_line(lines, "↑/↓ or j/k", "scroll list");
+    bind_line(lines, "y/Enter", "apply");
     bind_line(lines, "n/Esc", "cancel");
 }
 
@@ -678,12 +689,12 @@ mod tests {
         assert!(has_act_trigger(
             &binds,
             Act::CreateFilter,
-            Trigger::Ctrl('n')
+            Trigger::Char('n')
         ));
         assert!(has_act_trigger(
             &binds,
             Act::ApplyFilters,
-            Trigger::Ctrl('a')
+            Trigger::Char('a')
         ));
         assert!(has_act_trigger(
             &binds,
@@ -756,8 +767,8 @@ mod tests {
                 ("Enter", "save"),
                 ("Ctrl-E", "rename"),
                 ("Ctrl-C", "category"),
-                ("Ctrl-O", "override"),
-                ("Ctrl-V", "review"),
+                ("Ctrl-O", "override?"),
+                ("Ctrl-V", "review?"),
                 ("Ctrl-A", "apply"),
                 ("Esc", "back"),
             ]

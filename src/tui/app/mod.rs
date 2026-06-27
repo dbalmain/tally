@@ -49,6 +49,9 @@ pub enum InputMode {
     /// transfer/category-breaking flows). `ConfirmMerge` predates this and
     /// keeps its own handlers.
     Confirm,
+    /// Scrollable confirmation listing the transactions `apply_filters` would
+    /// (re)categorise (Ctrl-A). Confirm applies; cancel does nothing.
+    ConfirmApplyFilters,
     TransferPending,
     TransferNoMatch,
 }
@@ -73,6 +76,10 @@ pub enum ConfirmAction {
         from_id: i64,
         to_id: i64,
     },
+    /// Leaving the filter edit screen with unsaved query changes.
+    DiscardFilterEdit,
+    /// Deleting a saved filter from the Filters tab.
+    DeleteFilter(i64),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -116,6 +123,7 @@ pub struct App {
     pub input_mode: InputMode,
     pub similarity_index: Option<SimilarityIndex>,
     pub bulk_apply: Option<BulkApplyState>,
+    pub apply_filters_preview: Option<ApplyFiltersPreview>,
     pub should_quit: bool,
     pub refreshing: bool,
     pub keybind_help_open: bool,
@@ -149,6 +157,14 @@ pub struct App {
     pub confirm_action: Option<ConfirmAction>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
+}
+
+/// Preview backing the Ctrl-A apply-filters confirmation modal: the
+/// transactions `apply_filters` would (re)categorise, plus the list scroll
+/// position.
+pub struct ApplyFiltersPreview {
+    pub rows: Vec<Transaction>,
+    pub scroll: usize,
 }
 
 pub struct BulkApplyState {
@@ -196,6 +212,7 @@ impl App {
             input_mode: InputMode::Normal,
             similarity_index: None,
             bulk_apply: None,
+            apply_filters_preview: None,
             should_quit: false,
             refreshing,
             keybind_help_open: false,
@@ -738,6 +755,7 @@ impl App {
                     | InputMode::TextPrompt
                     | InputMode::BulkApply
                     | InputMode::Confirm
+                    | InputMode::ConfirmApplyFilters
                     | InputMode::ConfirmMerge
                     | InputMode::TransferNoMatch
             );
@@ -752,6 +770,7 @@ impl App {
         self.clear_text_prompt();
         self.clear_confirm();
         self.bulk_apply = None;
+        self.apply_filters_preview = None;
     }
 
     fn clear_confirm(&mut self) {
@@ -805,6 +824,18 @@ impl App {
                 self.input_mode = InputMode::Normal;
                 if applied {
                     self.refresh_data();
+                }
+            }
+            ConfirmAction::DiscardFilterEdit => self.exit_filter_edit(),
+            ConfirmAction::DeleteFilter(filter_id) => {
+                if self.try_mutation("delete filter", |s| s.delete_filter(filter_id)) {
+                    self.input_mode = InputMode::Normal;
+                    self.reapply_filters();
+                    if self.selected_index >= self.lists.filters.len() && self.selected_index > 0 {
+                        self.selected_index -= 1;
+                    }
+                } else {
+                    self.input_mode = InputMode::Normal;
                 }
             }
         }

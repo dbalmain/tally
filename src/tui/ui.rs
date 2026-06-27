@@ -69,6 +69,13 @@ const FILTER_EDIT_PREVIEW_COLS: [Constraint; 5] = [
     Constraint::Length(12),
 ];
 
+const APPLY_FILTERS_COLS: [Constraint; 4] = [
+    Constraint::Length(12),
+    Constraint::Min(24),
+    Constraint::Min(18),
+    Constraint::Length(12),
+];
+
 pub fn draw(f: &mut Frame, app: &App) {
     if app.filter_edit_visible() {
         draw_filter_edit_takeover(f, app);
@@ -165,6 +172,7 @@ fn overlay_open(app: &App) -> bool {
             | InputMode::TextPrompt
             | InputMode::BulkApply
             | InputMode::Confirm
+            | InputMode::ConfirmApplyFilters
             | InputMode::ConfirmMerge
             | InputMode::TransferNoMatch
     ) || app.error_message.is_some()
@@ -191,6 +199,10 @@ fn draw_overlays(
 
     if matches!(app.input_mode, InputMode::ConfirmMerge | InputMode::Confirm) {
         draw_confirm_popup(f, app);
+    }
+
+    if app.input_mode == InputMode::ConfirmApplyFilters {
+        draw_apply_filters_popup(f, app);
     }
 
     if app.input_mode == InputMode::TransferNoMatch {
@@ -281,11 +293,14 @@ fn draw_filter_edit_heading(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(label, Style::default().fg(Color::Cyan)));
     }
     if let Some(review_required) = app.filter_edit_review_required() {
-        spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "  require review ",
+            Style::default().fg(Color::DarkGray),
+        ));
         let (text, color) = if review_required {
             ("review", Color::Yellow)
         } else {
-            ("auto", Color::DarkGray)
+            ("commit", Color::DarkGray)
         };
         spans.push(Span::styled(text, Style::default().fg(color)));
     }
@@ -982,6 +997,52 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
                 .style(Style::default().fg(amount_color)),
             Cell::from(format_confidence_percent(f64::from(row.score)))
                 .style(Style::default().fg(Color::Cyan)),
+        ])
+        .style(Style::default().bg(bg))
+    });
+}
+
+fn draw_apply_filters_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect(60, 70, f.area());
+    let rows = app.apply_filters_preview_rows();
+    let title = format!("Apply filters ({} to update)", rows.len());
+    let hints = keymap::footer_hints(app);
+    let body = Modal {
+        title: &title,
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
+
+    if rows.is_empty() {
+        draw_empty_message(f, "No transactions to update.", body);
+        return;
+    }
+
+    let selected = app.apply_filters_preview_scroll();
+    ScrollTable::new(rows, selected, &APPLY_FILTERS_COLS).render(f, body, |i, tx| {
+        let bg = if i == selected {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
+        let amount_color = if tx.amount_cents < 0 {
+            Color::Red
+        } else {
+            Color::Green
+        };
+        let account = format!(
+            "{} / {}",
+            app.bank_name(tx.bank_id),
+            app.account_name(tx.account_id)
+        );
+
+        Row::new(vec![
+            Cell::from(tx.date.to_string()),
+            Cell::from(tx.description.as_str()),
+            Cell::from(account).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
+                .style(Style::default().fg(amount_color)),
         ])
         .style(Style::default().bg(bg))
     });

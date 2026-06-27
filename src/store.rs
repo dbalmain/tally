@@ -956,6 +956,24 @@ impl TransactionStore {
     /// Filters apply in order with first-match-wins per transaction, and never
     /// touch a transfer leg. Returns the number of transactions categorised.
     pub fn apply_filters(&mut self) -> Result<usize> {
+        Ok(self.apply_filters_inner()?.len())
+    }
+
+    /// Dry-run of [`apply_filters`]: return the transactions it would
+    /// (re)categorise, in apply order, leaving the database unchanged. Runs the
+    /// real apply inside a savepoint and rolls back, so the leading delete of
+    /// unconfirmed rule rows and every override check match production exactly.
+    pub fn preview_filters(&mut self) -> Result<Vec<Transaction>> {
+        self.conn.execute_batch("SAVEPOINT preview_filters")?;
+        let result = self.apply_filters_inner();
+        self.conn
+            .execute_batch("ROLLBACK TO preview_filters; RELEASE preview_filters")?;
+        result
+    }
+
+    /// Shared body of [`apply_filters`] / [`preview_filters`]: re-derive rule
+    /// categories and return the affected transactions in apply order.
+    fn apply_filters_inner(&mut self) -> Result<Vec<Transaction>> {
         self.conn.execute(
             "DELETE FROM transaction_enrichments
              WHERE category_source = 'rule' AND category_confirmed = 0",
@@ -964,7 +982,7 @@ impl TransactionStore {
 
         let config = SearchConfig::standard(Vec::new(), None);
         let mut claimed: HashSet<i64> = HashSet::new();
-        let mut applied = 0;
+        let mut applied = Vec::new();
 
         for filter in self.list_filters()? {
             let Some(category_id) = filter.category_id else {
@@ -986,7 +1004,7 @@ impl TransactionStore {
                         !filter.review_required,
                         None,
                     )?;
-                    applied += 1;
+                    applied.push(tx);
                 }
             }
         }
@@ -2822,6 +2840,47 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn preview_filters_matches_apply_and_leaves_db_unchanged() {
+        let (_t, mut store) = setup_rich_fixture();
+        add_filter(
+            &mut store,
+            "interest",
+            "Interest",
+            "Income/Interest",
+            FilterOverride::Uncategorised,
+            false,
+        );
+
+        let before = store
+            .get_uncategorised_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        let preview: Vec<i64> = store
+            .preview_filters()
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        // The dry-run touched nothing.
+        let after = store
+            .get_uncategorised_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        assert_eq!(
+            before.iter().map(|t| t.id).collect::<Vec<_>>(),
+            after.iter().map(|t| t.id).collect::<Vec<_>>()
+        );
+        assert!(enrichment(&store, "Interest").is_none());
+
+        // The real apply categorises exactly the previewed transactions.
+        let applied = store.preview_filters().unwrap();
+        assert_eq!(applied.iter().map(|t| t.id).collect::<Vec<_>>(), preview);
+        assert_eq!(store.apply_filters().unwrap(), preview.len());
+        assert_eq!(
+            enrichment(&store, "Interest"),
+            Some((CategorySource::Rule, true, "Income/Interest".into()))
+        );
     }
 
     #[test]
