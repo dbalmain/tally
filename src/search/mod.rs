@@ -47,6 +47,7 @@ mod filter;
 pub mod filters;
 mod fuzzy;
 mod parse;
+pub(crate) mod placeholders;
 mod query;
 mod render;
 mod tokenize;

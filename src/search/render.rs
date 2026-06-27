@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use rusqlite::types::Value;
 
 use super::FilterResult;
+use super::placeholders as ph;
 use super::query::{ParsedQuery, QueryPart};
 
 /// Maps placeholder names like `"date"` to SQL column references like `"t.date"`.
@@ -42,39 +43,77 @@ impl SqlContext {
     /// placeholder is missing from the context (signal to drop the clause).
     pub fn render_template(&self, template: &str) -> Option<String> {
         let mut out = String::with_capacity(template.len());
-        let mut chars = template.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c != '{' {
-                out.push(c);
-                continue;
-            }
-            // Allow literal '{' via "{{".
-            if chars.peek() == Some(&'{') {
-                chars.next();
-                out.push('{');
-                continue;
-            }
-            let mut name = String::new();
-            let mut closed = false;
-            for nc in chars.by_ref() {
-                if nc == '}' {
-                    closed = true;
-                    break;
+        for part in template_parts(template) {
+            match part {
+                TemplatePart::Text(text) => out.push_str(text),
+                TemplatePart::Placeholder(name) => {
+                    let sql = self.columns.get(name)?;
+                    out.push_str(sql);
                 }
-                name.push(nc);
             }
-            if !closed {
-                // Unterminated placeholder — treat as literal to avoid
-                // silent SQL corruption.
-                out.push('{');
-                out.push_str(&name);
-                continue;
-            }
-            let sql = self.columns.get(name.as_str())?;
-            out.push_str(sql);
         }
         Some(out)
     }
+}
+
+enum TemplatePart<'a> {
+    Text(&'a str),
+    Placeholder(&'a str),
+}
+
+struct TemplateParts<'a> {
+    template: &'a str,
+    pos: usize,
+}
+
+fn template_parts(template: &str) -> TemplateParts<'_> {
+    TemplateParts { template, pos: 0 }
+}
+
+impl<'a> Iterator for TemplateParts<'a> {
+    type Item = TemplatePart<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.template.len() {
+            return None;
+        }
+
+        let rest = &self.template[self.pos..];
+        let Some(open_rel) = rest.find('{') else {
+            self.pos = self.template.len();
+            return Some(TemplatePart::Text(rest));
+        };
+
+        if open_rel > 0 {
+            let start = self.pos;
+            self.pos += open_rel;
+            return Some(TemplatePart::Text(&self.template[start..self.pos]));
+        }
+
+        let open = self.pos;
+        let after_open = open + '{'.len_utf8();
+        if self.template[after_open..].starts_with('{') {
+            self.pos = after_open + '{'.len_utf8();
+            return Some(TemplatePart::Text("{"));
+        }
+
+        let placeholder_rest = &self.template[after_open..];
+        let Some(close_rel) = placeholder_rest.find('}') else {
+            self.pos = self.template.len();
+            return Some(TemplatePart::Text(&self.template[open..]));
+        };
+
+        let close = after_open + close_rel;
+        self.pos = close + '}'.len_utf8();
+        Some(TemplatePart::Placeholder(&self.template[after_open..close]))
+    }
+}
+
+fn placeholders(template: &str) -> impl Iterator<Item = &str> {
+    template_parts(template).filter_map(|part| match part {
+        TemplatePart::Placeholder(name) => Some(name),
+        TemplatePart::Text(_) => None,
+    })
 }
 
 /// Result of rendering a [`ParsedQuery`] against a [`SqlContext`].
@@ -174,7 +213,8 @@ impl ParsedQuery {
                     valid: true,
                     ..
                 } => {
-                    let Some(rendered) = ctx.render_template("regexp(?, {description})") else {
+                    let template = format!("regexp(?, {})", ph::reference(ph::DESCRIPTION));
+                    let Some(rendered) = ctx.render_template(&template) else {
                         continue;
                     };
                     clauses.push(rendered);
@@ -183,7 +223,8 @@ impl ParsedQuery {
                 QueryPart::Fts {
                     query, valid: true, ..
                 } if !query.is_empty() => {
-                    let Some(rendered) = ctx.render_template("{fts_match}") else {
+                    let template = ph::reference(ph::FTS_MATCH);
+                    let Some(rendered) = ctx.render_template(&template) else {
                         continue;
                     };
                     clauses.push(rendered);
@@ -202,27 +243,14 @@ impl ParsedQuery {
             QueryPart::Filter {
                 result: FilterResult::Valid { sql, .. },
                 ..
-            } => template_uses(sql, placeholder),
-            QueryPart::Regex { valid: true, .. } => placeholder == "description",
+            } => placeholders(sql).any(|name| name == placeholder),
+            QueryPart::Regex { valid: true, .. } => placeholder == ph::DESCRIPTION,
             QueryPart::Fts {
                 query, valid: true, ..
-            } if !query.is_empty() => placeholder == "fts_match",
+            } if !query.is_empty() => placeholder == ph::FTS_MATCH,
             _ => false,
         })
     }
-}
-
-fn template_uses(template: &str, placeholder: &str) -> bool {
-    let needle_open = format!("{{{}", placeholder);
-    let mut rest = template;
-    while let Some(idx) = rest.find(&needle_open) {
-        let after = &rest[idx + needle_open.len()..];
-        if after.starts_with('}') {
-            return true;
-        }
-        rest = &rest[idx + needle_open.len()..];
-    }
-    false
 }
 
 #[cfg(test)]
@@ -232,13 +260,13 @@ mod tests {
 
     fn ctx_full() -> SqlContext {
         SqlContext::new()
-            .with("date", "t.date")
-            .with("amount_cents", "t.amount_cents")
-            .with("description", "t.description")
-            .with("bank_name", "b.name")
-            .with("account_name", "a.name")
-            .with("category_path", "c.path")
-            .with("fts_match", "transactions_fts MATCH ?")
+            .with(ph::DATE, "t.date")
+            .with(ph::AMOUNT_CENTS, "t.amount_cents")
+            .with(ph::DESCRIPTION, "t.description")
+            .with(ph::BANK_NAME, "b.name")
+            .with(ph::ACCOUNT_NAME, "a.name")
+            .with(ph::CATEGORY_PATH, "c.path")
+            .with(ph::FTS_MATCH, "transactions_fts MATCH ?")
     }
 
     fn make_filter(sql: &str, params: Vec<Value>) -> QueryPart {
@@ -266,7 +294,7 @@ mod tests {
 
     #[test]
     fn render_template_unknown_placeholder_returns_none() {
-        let ctx = SqlContext::new().with("date", "t.date");
+        let ctx = SqlContext::new().with(ph::DATE, "t.date");
         assert!(
             ctx.render_template("{date} > ? AND {amount_cents} > ?")
                 .is_none()
@@ -291,7 +319,7 @@ mod tests {
 
     #[test]
     fn render_drops_filter_with_missing_placeholder() {
-        let ctx = SqlContext::new().with("date", "t.date");
+        let ctx = SqlContext::new().with(ph::DATE, "t.date");
         let query = ParsedQuery {
             parts: vec![
                 make_filter("{date} >= ?", vec![Value::Text("2024-01-01".into())]),
@@ -330,7 +358,7 @@ mod tests {
 
     #[test]
     fn render_regex_uses_description_placeholder() {
-        let ctx = SqlContext::new().with("description", "t.description");
+        let ctx = SqlContext::new().with(ph::DESCRIPTION, "t.description");
         let query = ParsedQuery {
             parts: vec![QueryPart::Regex {
                 original: "/foo/".into(),
@@ -346,7 +374,7 @@ mod tests {
 
     #[test]
     fn render_regex_dropped_without_description_placeholder() {
-        let ctx = SqlContext::new().with("date", "t.date");
+        let ctx = SqlContext::new().with(ph::DATE, "t.date");
         let query = ParsedQuery {
             parts: vec![QueryPart::Regex {
                 original: "/foo/".into(),
@@ -361,7 +389,7 @@ mod tests {
 
     #[test]
     fn render_fts_emits_match() {
-        let ctx = SqlContext::new().with("fts_match", "transactions_fts MATCH ?");
+        let ctx = SqlContext::new().with(ph::FTS_MATCH, "transactions_fts MATCH ?");
         let query = ParsedQuery {
             parts: vec![QueryPart::Fts {
                 original: "coffee".into(),
@@ -377,7 +405,7 @@ mod tests {
 
     #[test]
     fn render_fts_dropped_without_fts_placeholder() {
-        let ctx = SqlContext::new().with("date", "t.date");
+        let ctx = SqlContext::new().with(ph::DATE, "t.date");
         let query = ParsedQuery {
             parts: vec![QueryPart::Fts {
                 original: "coffee".into(),
@@ -392,8 +420,8 @@ mod tests {
 
     #[test]
     fn render_transfers_combines_with_or() {
-        let lhs = SqlContext::new().with("date", "ft.date");
-        let rhs = SqlContext::new().with("date", "tt.date");
+        let lhs = SqlContext::new().with(ph::DATE, "ft.date");
+        let rhs = SqlContext::new().with(ph::DATE, "tt.date");
         let query = ParsedQuery {
             parts: vec![make_filter(
                 "{date} >= ?",
@@ -419,7 +447,7 @@ mod tests {
     fn render_transfers_falls_back_when_one_side_empty() {
         // If only the lhs supports the placeholder, result is just the lhs clause
         // (no spurious OR with empty side).
-        let lhs = SqlContext::new().with("date", "t.date");
+        let lhs = SqlContext::new().with(ph::DATE, "t.date");
         let rhs = SqlContext::new();
         let query = ParsedQuery {
             parts: vec![make_filter(
@@ -438,11 +466,11 @@ mod tests {
         // subquery scoped to that side's transactions). render_transfers should
         // OR those two side-scoped predicates without any special-casing here.
         let lhs = SqlContext::new().with(
-            "fts_match",
+            ph::FTS_MATCH,
             "ft.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
         );
         let rhs = SqlContext::new().with(
-            "fts_match",
+            ph::FTS_MATCH,
             "tt.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
         );
         let query = ParsedQuery {
@@ -470,8 +498,8 @@ mod tests {
         let query = ParsedQuery {
             parts: vec![make_filter("{category_path} LIKE ?", vec![])],
         };
-        assert!(query.uses_placeholder("category_path"));
-        assert!(!query.uses_placeholder("date"));
+        assert!(query.uses_placeholder(ph::CATEGORY_PATH));
+        assert!(!query.uses_placeholder(ph::DATE));
     }
 
     #[test]
@@ -492,8 +520,8 @@ mod tests {
                 },
             ],
         };
-        assert!(query.uses_placeholder("fts_match"));
-        assert!(query.uses_placeholder("description"));
+        assert!(query.uses_placeholder(ph::FTS_MATCH));
+        assert!(query.uses_placeholder(ph::DESCRIPTION));
     }
 
     #[test]
@@ -502,7 +530,7 @@ mod tests {
         let query = ParsedQuery {
             parts: vec![make_filter("{date} >= ?", vec![])],
         };
-        assert!(query.uses_placeholder("date"));
+        assert!(query.uses_placeholder(ph::DATE));
         assert!(!query.uses_placeholder("dat"));
     }
 }

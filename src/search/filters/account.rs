@@ -1,12 +1,9 @@
 //! Account filter implementation.
 
-use nucleo_matcher::{
-    Matcher, Utf32Str,
-    pattern::{CaseMatching, Normalization, Pattern},
-};
 use rusqlite::types::Value;
 
-use crate::search::{Filter, FilterResult};
+use super::list::{complete_pipe_segments, parse_pipe_segments};
+use crate::search::{Filter, FilterResult, placeholders as ph};
 
 /// Filter for accounts using Bank/Account format.
 ///
@@ -22,18 +19,7 @@ pub struct AccountFilter {
 }
 
 impl AccountFilter {
-    pub fn new(banks: &[(i64, String)], accounts: &[(i64, i64, String)]) -> Self {
-        let mut options = Vec::new();
-        for (_account_id, bank_id, account_name) in accounts {
-            if let Some((_, bank_name)) = banks.iter().find(|(id, _)| id == bank_id) {
-                options.push(format!("{}/{}", bank_name, account_name));
-            }
-        }
-        Self { options }
-    }
-
-    /// Create from pre-formatted options (for testing).
-    pub fn with_options(options: Vec<String>) -> Self {
+    pub fn new(options: Vec<String>) -> Self {
         Self { options }
     }
 }
@@ -48,18 +34,7 @@ impl Filter for AccountFilter {
     }
 
     fn parse(&self, value: &str) -> FilterResult {
-        if value.is_empty() {
-            return FilterResult::Empty;
-        }
-
-        let mut clauses = Vec::new();
-        let mut params = Vec::new();
-
-        for pattern in value.split('|') {
-            if pattern.is_empty() {
-                continue;
-            }
-
+        parse_pipe_segments(value, |pattern| {
             // Validate against the loaded bank/account list when one exists.
             // We skip validation when options is empty (e.g. a fresh DB before
             // any imports) so the filter doesn't render red on every keystroke
@@ -67,103 +42,49 @@ impl Filter for AccountFilter {
             if !self.options.is_empty()
                 && let Err(msg) = validate_pattern(pattern, &self.options)
             {
-                return FilterResult::Invalid(msg);
+                return Err(msg);
             }
 
             if let Some((bank, account)) = pattern.split_once('/') {
                 // Bank/Account format
                 if bank.is_empty() {
                     // /Account - any bank, account prefix
-                    clauses.push("LOWER({account_name}) LIKE ?".to_string());
-                    params.push(Value::Text(format!("{}%", account.to_lowercase())));
+                    Ok((
+                        format!("LOWER({}) LIKE ?", ph::reference(ph::ACCOUNT_NAME)),
+                        vec![Value::Text(format!("{}%", account.to_lowercase()))],
+                    ))
                 } else if account.is_empty() {
                     // Bank/ - all accounts in bank
-                    clauses.push("LOWER({bank_name}) LIKE ?".to_string());
-                    params.push(Value::Text(format!("{}%", bank.to_lowercase())));
+                    Ok((
+                        format!("LOWER({}) LIKE ?", ph::reference(ph::BANK_NAME)),
+                        vec![Value::Text(format!("{}%", bank.to_lowercase()))],
+                    ))
                 } else {
                     // Bank/Account - both prefixes
-                    clauses.push(
-                        "(LOWER({bank_name}) LIKE ? AND LOWER({account_name}) LIKE ?)".to_string(),
-                    );
-                    params.push(Value::Text(format!("{}%", bank.to_lowercase())));
-                    params.push(Value::Text(format!("{}%", account.to_lowercase())));
+                    Ok((
+                        format!(
+                            "(LOWER({}) LIKE ? AND LOWER({}) LIKE ?)",
+                            ph::reference(ph::BANK_NAME),
+                            ph::reference(ph::ACCOUNT_NAME)
+                        ),
+                        vec![
+                            Value::Text(format!("{}%", bank.to_lowercase())),
+                            Value::Text(format!("{}%", account.to_lowercase())),
+                        ],
+                    ))
                 }
             } else {
                 // Bank only (prefix match)
-                clauses.push("LOWER({bank_name}) LIKE ?".to_string());
-                params.push(Value::Text(format!("{}%", pattern.to_lowercase())));
+                Ok((
+                    format!("LOWER({}) LIKE ?", ph::reference(ph::BANK_NAME)),
+                    vec![Value::Text(format!("{}%", pattern.to_lowercase()))],
+                ))
             }
-        }
-
-        if clauses.is_empty() {
-            return FilterResult::Empty;
-        }
-
-        let sql = if clauses.len() == 1 {
-            clauses.into_iter().next().unwrap()
-        } else {
-            format!("({})", clauses.join(" OR "))
-        };
-
-        FilterResult::Valid { sql, params }
+        })
     }
 
     fn completions(&self, value: &str, cursor: usize) -> Option<(Vec<String>, usize)> {
-        // Find the segment containing the cursor
-        let segments: Vec<(usize, &str)> = value
-            .split('|')
-            .scan(0, |pos, seg| {
-                let start = *pos;
-                *pos += seg.chars().count() + 1; // +1 for the |
-                Some((start, seg))
-            })
-            .collect();
-
-        // Find which segment the cursor is in
-        let (anchor_offset, current_segment) = segments
-            .iter()
-            .find(|(start, seg)| cursor >= *start && cursor <= start + seg.chars().count())
-            .map(|(start, seg)| (*start, *seg))
-            .unwrap_or((0, value));
-
-        // Get other segments to exclude from completions
-        let other_segments: Vec<&str> = segments
-            .iter()
-            .filter(|(start, _)| *start != anchor_offset)
-            .map(|(_, seg)| *seg)
-            .collect();
-
-        // Fuzzy match against options
-        let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-        let pattern = Pattern::new(
-            current_segment,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            nucleo_matcher::pattern::AtomKind::Fuzzy,
-        );
-
-        let mut scored: Vec<(u32, &String)> = self
-            .options
-            .iter()
-            .filter(|opt| !other_segments.contains(&opt.as_str()))
-            .filter_map(|opt| {
-                let mut buf = Vec::new();
-                let haystack = Utf32Str::new(opt, &mut buf);
-                pattern
-                    .score(haystack, &mut matcher)
-                    .map(|score| (score, opt))
-            })
-            .collect();
-
-        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
-
-        let suggestions: Vec<String> = scored.into_iter().map(|(_, s)| s.clone()).collect();
-
-        if suggestions.is_empty() {
-            None
-        } else {
-            Some((suggestions, anchor_offset))
-        }
+        complete_pipe_segments(&self.options, value, cursor)
     }
 }
 
@@ -242,7 +163,7 @@ mod tests {
     use super::*;
 
     fn filter() -> AccountFilter {
-        AccountFilter::with_options(vec![
+        AccountFilter::new(vec![
             "ING/Orange Everyday".to_string(),
             "ING/Savings Maximiser".to_string(),
             "NAB/Classic".to_string(),
@@ -371,7 +292,7 @@ mod tests {
     #[test]
     fn test_empty_options_skips_validation() {
         // Fresh DB with no banks yet: don't paint every filter red.
-        let f = AccountFilter::with_options(vec![]);
+        let f = AccountFilter::new(vec![]);
         assert!(matches!(
             f.parse("Anything/AtAll"),
             FilterResult::Valid { .. }
@@ -393,6 +314,14 @@ mod tests {
         let f = filter();
         let (suggestions, anchor) = f.completions("ING", 3).unwrap();
         assert_eq!(anchor, 0);
+        assert_eq!(
+            suggestions,
+            vec![
+                "ING/Orange Everyday".to_string(),
+                "ING/Savings Maximiser".to_string(),
+                "NAB/Savings".to_string(),
+            ]
+        );
         assert!(suggestions.iter().any(|s| s.contains("ING")));
     }
 
@@ -402,6 +331,15 @@ mod tests {
         // Cursor at position 5 is at end of "N" in second segment
         let (suggestions, anchor) = f.completions("ING|N", 5).unwrap();
         assert_eq!(anchor, 4); // After the |
+        assert_eq!(
+            suggestions,
+            vec![
+                "NAB/Classic".to_string(),
+                "NAB/Savings".to_string(),
+                "ING/Orange Everyday".to_string(),
+                "ING/Savings Maximiser".to_string(),
+            ]
+        );
         // Should prioritize NAB options for "N" prefix
         assert!(suggestions.iter().any(|s| s.starts_with("NAB")));
     }

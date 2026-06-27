@@ -36,10 +36,10 @@ impl SearchConfig {
         let mut filters: Vec<Box<dyn Filter>> = vec![
             Box::new(DateFilter),
             Box::new(AmountFilter),
-            Box::new(AccountFilter::with_options(account_options)),
+            Box::new(AccountFilter::new(account_options)),
         ];
         if let Some(options) = category_options {
-            filters.push(Box::new(CategoryFilter::with_options(options)));
+            filters.push(Box::new(CategoryFilter::new(options)));
         }
         Self::new(filters)
     }
@@ -321,21 +321,32 @@ fn process_fts_query(text: &str, cursor: Option<usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
+    use rusqlite::types::Value;
+
+    use crate::search::{
+        AccountFilter, AmountFilter, CategoryFilter, DateFilter, SqlContext, placeholders as ph,
+    };
 
     fn test_config() -> SearchConfig {
         SearchConfig::new(vec![
             Box::new(DateFilter),
             Box::new(AmountFilter),
-            Box::new(AccountFilter::with_options(vec![
+            Box::new(AccountFilter::new(vec![
                 "ING/Orange".to_string(),
                 "NAB/Classic".to_string(),
             ])),
-            Box::new(CategoryFilter::with_options(vec![
+            Box::new(CategoryFilter::new(vec![
                 "Food".to_string(),
                 "Transport".to_string(),
             ])),
         ])
+    }
+
+    fn test_sql_ctx() -> SqlContext {
+        SqlContext::new()
+            .with(ph::BANK_NAME, "t.bank_name")
+            .with(ph::ACCOUNT_NAME, "t.account_name")
+            .with(ph::CATEGORY_PATH, "c.path")
     }
 
     #[test]
@@ -443,6 +454,73 @@ mod tests {
         assert_eq!(filter_count, 2);
         assert_eq!(regex_count, 1);
         assert_eq!(fts_count, 1);
+    }
+
+    #[test]
+    fn test_render_account_single_value() {
+        let config = test_config();
+        let (query, _) = parse(&config, "account:ING/Orange", 18);
+        let rendered = query.render(&test_sql_ctx());
+
+        assert_eq!(
+            rendered.where_clause,
+            "(LOWER(t.bank_name) LIKE ? AND LOWER(t.account_name) LIKE ?)"
+        );
+        assert_eq!(
+            rendered.params,
+            vec![
+                Value::Text("ing%".to_string()),
+                Value::Text("orange%".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_render_account_multi_value_or() {
+        let config = test_config();
+        let (query, _) = parse(&config, "account:ING|NAB", 15);
+        let rendered = query.render(&test_sql_ctx());
+
+        assert_eq!(
+            rendered.where_clause,
+            "(LOWER(t.bank_name) LIKE ? OR LOWER(t.bank_name) LIKE ?)"
+        );
+        assert_eq!(
+            rendered.params,
+            vec![
+                Value::Text("ing%".to_string()),
+                Value::Text("nab%".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_render_category_single_value() {
+        let config = test_config();
+        let (query, _) = parse(&config, "category:Food", 13);
+        let rendered = query.render(&test_sql_ctx());
+
+        assert_eq!(rendered.where_clause, "LOWER(c.path) LIKE ?");
+        assert_eq!(rendered.params, vec![Value::Text("%food%".to_string())]);
+    }
+
+    #[test]
+    fn test_render_category_multi_value_or() {
+        let config = test_config();
+        let (query, _) = parse(&config, "category:Food|Transport", 23);
+        let rendered = query.render(&test_sql_ctx());
+
+        assert_eq!(
+            rendered.where_clause,
+            "(LOWER(c.path) LIKE ? OR LOWER(c.path) LIKE ?)"
+        );
+        assert_eq!(
+            rendered.params,
+            vec![
+                Value::Text("%food%".to_string()),
+                Value::Text("%transport%".to_string()),
+            ]
+        );
     }
 
     #[test]

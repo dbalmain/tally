@@ -8,7 +8,7 @@ use crate::import::{
     compute_hash, find_csv_files, find_import_script, find_pull_script, hash_file,
     run_import_script, run_pull_script,
 };
-use crate::search::{ParsedQuery, SearchConfig, SqlContext, parse};
+use crate::search::{ParsedQuery, SearchConfig, SqlContext, parse, placeholders as ph};
 use crate::{
     Account, Bank, Category, CategorySource, ConfirmedCategoryExample, ConfirmedTransferExample,
     Error, Filter, FilterOverride, FuzzyMatcher, RawTransaction, RefreshReport, Result,
@@ -93,15 +93,26 @@ struct PullJob {
 
 /// SQL context for queries rooted at `transactions_view t` (with optional
 /// `categories c` and `transactions_fts fts` joins).
+const SEARCHABLE_TRANSACTION_COLUMNS: [(&str, &str); 5] = [
+    (ph::DATE, "date"),
+    (ph::AMOUNT_CENTS, "amount_cents"),
+    (ph::DESCRIPTION, "description"),
+    (ph::BANK_NAME, "bank_name"),
+    (ph::ACCOUNT_NAME, "account_name"),
+];
+
+fn aliased_transaction_ctx(alias: &str) -> SqlContext {
+    let mut ctx = SqlContext::new();
+    for (placeholder, column) in SEARCHABLE_TRANSACTION_COLUMNS {
+        ctx = ctx.with(placeholder, format!("{alias}.{column}"));
+    }
+    ctx
+}
+
 fn transaction_ctx() -> SqlContext {
-    SqlContext::new()
-        .with("date", "t.date")
-        .with("amount_cents", "t.amount_cents")
-        .with("description", "t.description")
-        .with("bank_name", "t.bank_name")
-        .with("account_name", "t.account_name")
-        .with("category_path", "c.path")
-        .with("fts_match", "transactions_fts MATCH ?")
+    aliased_transaction_ctx("t")
+        .with(ph::CATEGORY_PATH, "c.path")
+        .with(ph::FTS_MATCH, "transactions_fts MATCH ?")
 }
 
 /// SQL context for one side of a transfer query, rooted at
@@ -112,18 +123,12 @@ fn transaction_ctx() -> SqlContext {
 /// subquery rather than a top-level JOIN, because each transfer pair has two
 /// transactions and we want a match on either side to qualify the row.
 fn transfer_side_ctx(alias: &str) -> SqlContext {
-    SqlContext::new()
-        .with("date", format!("{alias}.date"))
-        .with("amount_cents", format!("{alias}.amount_cents"))
-        .with("description", format!("{alias}.description"))
-        .with("bank_name", format!("{alias}.bank_name"))
-        .with("account_name", format!("{alias}.account_name"))
-        .with(
-            "fts_match",
-            format!(
-                "{alias}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)"
-            ),
-        )
+    aliased_transaction_ctx(alias).with(
+        ph::FTS_MATCH,
+        format!(
+            "{alias}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)"
+        ),
+    )
 }
 
 const TODO_TRANSACTION_JOINS: &str = " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
@@ -138,7 +143,7 @@ fn transaction_fts_join(parsed: &ParsedQuery) -> &'static str {
 }
 
 fn transaction_category_join(parsed: &ParsedQuery, enrichment_joined: bool) -> String {
-    if !parsed.uses_placeholder("category_path") {
+    if !parsed.uses_placeholder(ph::CATEGORY_PATH) {
         return String::new();
     }
 

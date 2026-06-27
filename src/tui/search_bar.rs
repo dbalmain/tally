@@ -773,11 +773,11 @@ mod tests {
         SearchConfig::new(vec![
             Box::new(DateFilter),
             Box::new(AmountFilter),
-            Box::new(AccountFilter::with_options(vec![
+            Box::new(AccountFilter::new(vec![
                 "ING/Orange".to_string(),
                 "NAB/Classic".to_string(),
             ])),
-            Box::new(CategoryFilter::with_options(vec![
+            Box::new(CategoryFilter::new(vec![
                 "Food".to_string(),
                 "Transport".to_string(),
             ])),
@@ -934,7 +934,7 @@ mod tests {
     fn test_unicode_input_uses_character_indices() {
         let mut bar = SearchBar::new(SearchConfig::new(vec![
             Box::new(DateFilter),
-            Box::new(CategoryFilter::with_options(vec![
+            Box::new(CategoryFilter::new(vec![
                 "Food/Cafe".to_string(),
                 "Food/Café".to_string(),
             ])),

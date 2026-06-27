@@ -2,7 +2,7 @@
 
 use rusqlite::types::Value;
 
-use crate::search::{Filter, FilterResult};
+use crate::search::{Filter, FilterResult, placeholders as ph};
 
 /// Filter for amount ranges.
 ///
@@ -62,12 +62,16 @@ impl Filter for AmountFilter {
                 let granularity = decimal_granularity(value);
                 if granularity == 1 {
                     FilterResult::Valid {
-                        sql: "ABS({amount_cents}) = ?".to_string(),
+                        sql: format!("ABS({}) = ?", ph::reference(ph::AMOUNT_CENTS)),
                         params: vec![Value::Integer(cents)],
                     }
                 } else {
                     FilterResult::Valid {
-                        sql: "ABS({amount_cents}) >= ? AND ABS({amount_cents}) < ?".to_string(),
+                        sql: format!(
+                            "ABS({}) >= ? AND ABS({}) < ?",
+                            ph::reference(ph::AMOUNT_CENTS),
+                            ph::reference(ph::AMOUNT_CENTS)
+                        ),
                         params: vec![Value::Integer(cents), Value::Integer(cents + granularity)],
                     }
                 }
@@ -98,7 +102,7 @@ impl AmountFilter {
     fn parse_comparison(&self, value: &str, op: &str) -> FilterResult {
         match parse_amount(value) {
             Some(cents) => {
-                let sql = format!("ABS({{amount_cents}}) {} ?", op);
+                let sql = format!("ABS({}) {} ?", ph::reference(ph::AMOUNT_CENTS), op);
                 FilterResult::Valid {
                     sql,
                     params: vec![Value::Integer(cents)],
@@ -129,15 +133,19 @@ impl AmountFilter {
 
         match (from_cents, to_cents) {
             (Some(from), Some(to)) => FilterResult::Valid {
-                sql: "ABS({amount_cents}) >= ? AND ABS({amount_cents}) <= ?".to_string(),
+                sql: format!(
+                    "ABS({}) >= ? AND ABS({}) <= ?",
+                    ph::reference(ph::AMOUNT_CENTS),
+                    ph::reference(ph::AMOUNT_CENTS)
+                ),
                 params: vec![Value::Integer(from), Value::Integer(to)],
             },
             (Some(from), None) => FilterResult::Valid {
-                sql: "ABS({amount_cents}) >= ?".to_string(),
+                sql: format!("ABS({}) >= ?", ph::reference(ph::AMOUNT_CENTS)),
                 params: vec![Value::Integer(from)],
             },
             (None, Some(to)) => FilterResult::Valid {
-                sql: "ABS({amount_cents}) <= ?".to_string(),
+                sql: format!("ABS({}) <= ?", ph::reference(ph::AMOUNT_CENTS)),
                 params: vec![Value::Integer(to)],
             },
             (None, None) => FilterResult::Empty,

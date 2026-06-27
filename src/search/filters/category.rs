@@ -1,12 +1,9 @@
 //! Category filter implementation.
 
-use nucleo_matcher::{
-    Matcher, Utf32Str,
-    pattern::{CaseMatching, Normalization, Pattern},
-};
 use rusqlite::types::Value;
 
-use crate::search::{Filter, FilterResult};
+use super::list::{complete_pipe_segments, parse_pipe_segments};
+use crate::search::{Filter, FilterResult, placeholders as ph};
 
 /// Filter for categories.
 ///
@@ -20,14 +17,7 @@ pub struct CategoryFilter {
 }
 
 impl CategoryFilter {
-    pub fn new(categories: &[(i64, String)]) -> Self {
-        Self {
-            options: categories.iter().map(|(_, path)| path.clone()).collect(),
-        }
-    }
-
-    /// Create from pre-formatted options (for testing).
-    pub fn with_options(options: Vec<String>) -> Self {
+    pub fn new(options: Vec<String>) -> Self {
         Self { options }
     }
 }
@@ -42,91 +32,16 @@ impl Filter for CategoryFilter {
     }
 
     fn parse(&self, value: &str) -> FilterResult {
-        if value.is_empty() {
-            return FilterResult::Empty;
-        }
-
-        let mut clauses = Vec::new();
-        let mut params = Vec::new();
-
-        for pattern in value.split('|') {
-            if pattern.is_empty() {
-                continue;
-            }
-
-            clauses.push("LOWER({category_path}) LIKE ?".to_string());
-            params.push(Value::Text(format!("%{}%", pattern.to_lowercase())));
-        }
-
-        if clauses.is_empty() {
-            return FilterResult::Empty;
-        }
-
-        let sql = if clauses.len() == 1 {
-            clauses.into_iter().next().unwrap()
-        } else {
-            format!("({})", clauses.join(" OR "))
-        };
-
-        FilterResult::Valid { sql, params }
+        parse_pipe_segments(value, |pattern| {
+            Ok((
+                format!("LOWER({}) LIKE ?", ph::reference(ph::CATEGORY_PATH)),
+                vec![Value::Text(format!("%{}%", pattern.to_lowercase()))],
+            ))
+        })
     }
 
     fn completions(&self, value: &str, cursor: usize) -> Option<(Vec<String>, usize)> {
-        // Find the segment containing the cursor
-        let segments: Vec<(usize, &str)> = value
-            .split('|')
-            .scan(0, |pos, seg| {
-                let start = *pos;
-                *pos += seg.chars().count() + 1; // +1 for the |
-                Some((start, seg))
-            })
-            .collect();
-
-        // Find which segment the cursor is in
-        let (anchor_offset, current_segment) = segments
-            .iter()
-            .find(|(start, seg)| cursor >= *start && cursor <= start + seg.chars().count())
-            .map(|(start, seg)| (*start, *seg))
-            .unwrap_or((0, value));
-
-        // Get other segments to exclude from completions
-        let other_segments: Vec<&str> = segments
-            .iter()
-            .filter(|(start, _)| *start != anchor_offset)
-            .map(|(_, seg)| *seg)
-            .collect();
-
-        // Fuzzy match against options
-        let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-        let pattern = Pattern::new(
-            current_segment,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            nucleo_matcher::pattern::AtomKind::Fuzzy,
-        );
-
-        let mut scored: Vec<(u32, &String)> = self
-            .options
-            .iter()
-            .filter(|opt| !other_segments.contains(&opt.as_str()))
-            .filter_map(|opt| {
-                let mut buf = Vec::new();
-                let haystack = Utf32Str::new(opt, &mut buf);
-                pattern
-                    .score(haystack, &mut matcher)
-                    .map(|score| (score, opt))
-            })
-            .collect();
-
-        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
-
-        let suggestions: Vec<String> = scored.into_iter().map(|(_, s)| s.clone()).collect();
-
-        if suggestions.is_empty() {
-            None
-        } else {
-            Some((suggestions, anchor_offset))
-        }
+        complete_pipe_segments(&self.options, value, cursor)
     }
 }
 
@@ -135,7 +50,7 @@ mod tests {
     use super::*;
 
     fn filter() -> CategoryFilter {
-        CategoryFilter::with_options(vec![
+        CategoryFilter::new(vec![
             "Food".to_string(),
             "Food/Groceries".to_string(),
             "Food/Restaurants".to_string(),
@@ -201,6 +116,14 @@ mod tests {
         let f = filter();
         let (suggestions, anchor) = f.completions("Foo", 3).unwrap();
         assert_eq!(anchor, 0);
+        assert_eq!(
+            suggestions,
+            vec![
+                "Food".to_string(),
+                "Food/Groceries".to_string(),
+                "Food/Restaurants".to_string(),
+            ]
+        );
         assert!(suggestions.iter().any(|s| s.starts_with("Food")));
     }
 
@@ -210,6 +133,15 @@ mod tests {
         // Cursor at position 6 is at end of "T" in second segment
         let (suggestions, anchor) = f.completions("Food|T", 6).unwrap();
         assert_eq!(anchor, 5); // After the |
+        assert_eq!(
+            suggestions,
+            vec![
+                "Transport".to_string(),
+                "Transport/Fuel".to_string(),
+                "Food/Restaurants".to_string(),
+                "Utilities".to_string(),
+            ]
+        );
         // Should prioritize Transport for "T" prefix
         assert!(suggestions.iter().any(|s| s.starts_with("Transport")));
     }

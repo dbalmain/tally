@@ -3,7 +3,7 @@
 use chrono::NaiveDate;
 use rusqlite::types::Value;
 
-use crate::search::{Filter, FilterResult};
+use crate::search::{Filter, FilterResult, placeholders as ph};
 
 /// Filter for date ranges.
 ///
@@ -38,7 +38,11 @@ impl Filter for DateFilter {
         // Single value - parse as date/month/year and expand to range
         match parse_date_spec(value) {
             Some((from, to)) => FilterResult::Valid {
-                sql: "{date} >= ? AND {date} <= ?".to_string(),
+                sql: format!(
+                    "{} >= ? AND {} <= ?",
+                    ph::reference(ph::DATE),
+                    ph::reference(ph::DATE)
+                ),
                 params: vec![Value::Text(from.to_string()), Value::Text(to.to_string())],
             },
             None => FilterResult::Invalid(format!("Invalid date: {}", value)),
@@ -68,15 +72,19 @@ impl DateFilter {
 
         match (from_date, to_date) {
             (Some(from), Some(to)) => FilterResult::Valid {
-                sql: "{date} >= ? AND {date} <= ?".to_string(),
+                sql: format!(
+                    "{} >= ? AND {} <= ?",
+                    ph::reference(ph::DATE),
+                    ph::reference(ph::DATE)
+                ),
                 params: vec![Value::Text(from.to_string()), Value::Text(to.to_string())],
             },
             (Some(from), None) => FilterResult::Valid {
-                sql: "{date} >= ?".to_string(),
+                sql: format!("{} >= ?", ph::reference(ph::DATE)),
                 params: vec![Value::Text(from.to_string())],
             },
             (None, Some(to)) => FilterResult::Valid {
-                sql: "{date} <= ?".to_string(),
+                sql: format!("{} <= ?", ph::reference(ph::DATE)),
                 params: vec![Value::Text(to.to_string())],
             },
             (None, None) => FilterResult::Empty,
