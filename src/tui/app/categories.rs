@@ -6,7 +6,7 @@ use crate::{Category, CategorySource, Transaction};
 
 use super::{
     App, BulkApplyState, BulkRow, CategoryTarget, ConfirmAction, InputMode, Tab, TextPromptTarget,
-    TodoSubTab,
+    TodoSubTab, next_wrapping, prev_wrapping,
 };
 
 const BULK_APPLY_MATCH_LIMIT: usize = 200;
@@ -94,16 +94,13 @@ impl App {
     }
 
     pub fn category_next(&mut self) {
-        if !self.category_suggestions.is_empty() {
-            self.category_selected = (self.category_selected + 1) % self.category_suggestions.len();
-        }
+        self.category_selected =
+            next_wrapping(self.category_selected, self.category_suggestions.len());
     }
 
     pub fn category_previous(&mut self) {
-        if !self.category_suggestions.is_empty() {
-            self.category_selected = (self.category_selected + self.category_suggestions.len() - 1)
-                % self.category_suggestions.len();
-        }
+        self.category_selected =
+            prev_wrapping(self.category_selected, self.category_suggestions.len());
     }
 
     pub fn confirm_category(&mut self) {
@@ -130,16 +127,15 @@ impl App {
         // first.
         if let Some(transfer_id) = self.get_cached_transfer(tx.id).map(|t| t.id) {
             self.clear_category_popup();
-            self.confirm_message = Some(
+            self.confirm(
                 "This transaction is part of a transfer. Categorising it will unlink the transfer. Continue?"
                     .to_string(),
+                ConfirmAction::BreakTransferForCategory {
+                    transfer_id,
+                    tx,
+                    category_path,
+                },
             );
-            self.confirm_action = Some(ConfirmAction::BreakTransferForCategory {
-                transfer_id,
-                tx,
-                category_path,
-            });
-            self.input_mode = InputMode::Confirm;
             return;
         }
 
@@ -253,9 +249,6 @@ impl App {
             return;
         }
         self.refresh_data();
-        if self.selected_index >= self.lists.ai_reviews.len() && self.selected_index > 0 {
-            self.selected_index -= 1;
-        }
     }
 
     fn open_bulk_apply_for(&mut self, tx: Transaction, category_id: i64, category_path: String) {
@@ -326,18 +319,14 @@ impl App {
         let Some(state) = self.bulk_apply.as_mut() else {
             return;
         };
-        if !state.rows.is_empty() {
-            state.cursor = (state.cursor + 1) % state.rows.len();
-        }
+        state.cursor = next_wrapping(state.cursor, state.rows.len());
     }
 
     pub fn bulk_apply_prev(&mut self) {
         let Some(state) = self.bulk_apply.as_mut() else {
             return;
         };
-        if !state.rows.is_empty() {
-            state.cursor = (state.cursor + state.rows.len() - 1) % state.rows.len();
-        }
+        state.cursor = prev_wrapping(state.cursor, state.rows.len());
     }
 
     pub fn bulk_apply_confirm(&mut self) {
@@ -405,22 +394,20 @@ impl App {
             .store
             .count_transactions_in_category(cat.id)
             .unwrap_or(0);
-        self.confirm_message = Some(format!(
-            "Delete category \"{}\"? {} transaction{} will be left without a category.",
-            cat.path,
-            count,
-            if count == 1 { "" } else { "s" }
-        ));
-        self.confirm_action = Some(ConfirmAction::DeleteCategory(cat.id));
-        self.input_mode = InputMode::Confirm;
+        self.confirm(
+            format!(
+                "Delete category \"{}\"? {} transaction{} will be left without a category.",
+                cat.path,
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+            ConfirmAction::DeleteCategory(cat.id),
+        );
     }
 
     /// Reload categories and keep the cursor in bounds after a deletion.
     pub(super) fn delete_category_after(&mut self) {
         self.reload_categories();
-        if self.selected_index >= self.lists.categories.len() && self.selected_index > 0 {
-            self.selected_index -= 1;
-        }
     }
 
     pub(super) fn confirm_category_rename(&mut self, cat: Category, new_path: String) {
@@ -442,22 +429,24 @@ impl App {
                         .store
                         .count_transactions_in_category(cat.id)
                         .unwrap_or(0);
-                    self.confirm_message = Some(format!(
-                        "Merge {} transaction{} into \"{}\"?",
-                        source_count,
-                        if source_count == 1 { "" } else { "s" },
-                        existing_path
-                    ));
-                    self.confirm_action = Some(ConfirmAction::MergeCategory {
-                        source_id: cat.id,
-                        target_id: target.id,
-                    });
+                    let source_id = cat.id;
                     self.restore_text_prompt(
                         "Rename category",
                         new_path,
                         TextPromptTarget::CategoryRename(cat),
                     );
-                    self.input_mode = InputMode::ConfirmMerge;
+                    self.confirm(
+                        format!(
+                            "Merge {} transaction{} into \"{}\"?",
+                            source_count,
+                            if source_count == 1 { "" } else { "s" },
+                            existing_path
+                        ),
+                        ConfirmAction::MergeCategory {
+                            source_id,
+                            target_id: target.id,
+                        },
+                    );
                 } else {
                     self.error_message = Some(format!("Category \"{}\" already exists", new_path));
                     self.restore_text_prompt(
@@ -478,48 +467,13 @@ impl App {
         }
     }
 
-    pub fn confirm_merge(&mut self) {
-        let Some(ConfirmAction::MergeCategory {
-            source_id,
-            target_id,
-        }) = self.confirm_action.take()
-        else {
-            self.cancel_input();
-            return;
-        };
-
-        match self.store.merge_categories(source_id, target_id) {
-            Ok(()) => {
-                self.reload_categories();
-                if let Ok(Some(target)) = self.store.get_category(target_id) {
-                    self.move_cursor_to_category(&target.path);
-                }
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to merge: {}", e));
-            }
-        }
-
-        self.clear_text_prompt();
-        self.clear_confirm();
-        self.input_mode = InputMode::Normal;
-    }
-
-    pub fn cancel_merge(&mut self) {
-        self.clear_confirm();
-        self.input_mode = if self.text_prompt.is_some() {
-            InputMode::TextPrompt
-        } else {
-            InputMode::Normal
-        };
-    }
-
-    fn reload_categories(&mut self) {
+    pub(super) fn reload_categories(&mut self) {
         let categories = self.load_or_show("load categories", |s| s.list_categories());
         self.lists.categories.set_items(categories);
         self.rebuild_search_configs();
         self.rebuild_category_counts();
         self.apply_fuzzy_filter();
+        self.clamp_selection();
     }
 
     /// Rebuild the per-category transaction count cache in one bulk query.
@@ -537,7 +491,7 @@ impl App {
             .unwrap_or(0)
     }
 
-    fn move_cursor_to_category(&mut self, path: &str) {
+    pub(super) fn move_cursor_to_category(&mut self, path: &str) {
         if let Some(pos) = self.lists.categories.iter().position(|c| c.path == path) {
             self.selected_index = pos;
         }

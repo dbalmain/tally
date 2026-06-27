@@ -6,7 +6,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, InputMode, Tab, TodoSubTab};
+use super::app::{App, ConfirmAction, InputMode, Tab, TodoSubTab};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
@@ -460,7 +460,7 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("Enter", "apply"),
             ("Esc", "cancel"),
         ],
-        InputMode::ConfirmMerge => vec![("y", "merge"), ("n", "cancel")],
+        InputMode::Confirm if confirming_merge(app) => vec![("y", "merge"), ("n", "cancel")],
         InputMode::Confirm => vec![("y", "confirm"), ("n", "cancel")],
         InputMode::ConfirmApplyFilters => {
             vec![("↑/↓", "scroll"), ("y/Enter", "apply"), ("Esc", "cancel")]
@@ -490,7 +490,7 @@ pub fn help_lines(app: &App) -> Vec<HelpLine> {
         InputMode::Category => category_lines(&mut lines),
         InputMode::TextPrompt => text_prompt_lines(app, &mut lines),
         InputMode::BulkApply => bulk_apply_lines(&mut lines),
-        InputMode::ConfirmMerge => confirm_merge_lines(&mut lines),
+        InputMode::Confirm if confirming_merge(app) => confirm_merge_lines(&mut lines),
         InputMode::Confirm => confirm_lines(&mut lines),
         InputMode::ConfirmApplyFilters => apply_filters_lines(&mut lines),
         InputMode::TransferPending => transfer_pending_lines(&mut lines),
@@ -576,6 +576,13 @@ fn bulk_apply_lines(lines: &mut Vec<HelpLine>) {
     bind_line(lines, "a", "toggle all");
     bind_line(lines, "Enter", "apply selected");
     bind_line(lines, "Esc", "cancel");
+}
+
+fn confirming_merge(app: &App) -> bool {
+    matches!(
+        app.confirm_action.as_ref(),
+        Some(ConfirmAction::MergeCategory { .. })
+    )
 }
 
 fn confirm_merge_lines(lines: &mut Vec<HelpLine>) {

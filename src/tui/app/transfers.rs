@@ -76,19 +76,20 @@ impl App {
 
         if !transfer_ids.is_empty() {
             let n = transfer_ids.len();
-            self.confirm_message = Some(format!(
-                "{} existing transfer{} will be unlinked. Continue?",
-                n,
-                if n == 1 { "" } else { "s" }
-            ));
-            self.confirm_action = Some(ConfirmAction::BreakTransfersForTransfer {
-                transfer_ids,
-                from_id,
-                to_id,
-            });
             self.pending_transfer_tx = None;
             self.transfer_candidates.clear();
-            self.input_mode = InputMode::Confirm;
+            self.confirm(
+                format!(
+                    "{} existing transfer{} will be unlinked. Continue?",
+                    n,
+                    if n == 1 { "" } else { "s" }
+                ),
+                ConfirmAction::BreakTransfersForTransfer {
+                    transfer_ids,
+                    from_id,
+                    to_id,
+                },
+            );
             return;
         }
 
@@ -150,18 +151,20 @@ impl App {
             return;
         };
         if let Some(transfer_id) = self.get_cached_transfer(tx_id).map(|t| t.id) {
-            self.confirm_message = Some("Unlink this transfer?".to_string());
-            self.confirm_action = Some(ConfirmAction::UnlinkTransfer { transfer_id });
-            self.input_mode = InputMode::Confirm;
+            self.confirm(
+                "Unlink this transfer?".to_string(),
+                ConfirmAction::UnlinkTransfer { transfer_id },
+            );
             return;
         }
         if self
             .get_cached_category(tx_id)
             .is_some_and(|c| !c.is_empty())
         {
-            self.confirm_message = Some("Uncategorise this transaction?".to_string());
-            self.confirm_action = Some(ConfirmAction::Uncategorise { tx_id });
-            self.input_mode = InputMode::Confirm;
+            self.confirm(
+                "Uncategorise this transaction?".to_string(),
+                ConfirmAction::Uncategorise { tx_id },
+            );
         }
     }
 
@@ -186,9 +189,5 @@ impl App {
             return;
         }
         self.refresh_data();
-        if self.selected_index >= self.lists.len(self.current_tab_key()) && self.selected_index > 0
-        {
-            self.selected_index -= 1;
-        }
     }
 }

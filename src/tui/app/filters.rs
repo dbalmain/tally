@@ -5,7 +5,10 @@ use tui_input::InputRequest;
 use crate::tui::search_bar::SearchBar;
 use crate::{Filter, FilterOverride, Transaction};
 
-use super::{App, ApplyFiltersPreview, FilterEditState, InputMode, Tab, TextPromptTarget};
+use super::{
+    App, ApplyFiltersPreview, ConfirmAction, FilterEditState, InputMode, Tab, TextPromptTarget,
+    next_wrapping, prev_wrapping,
+};
 
 const FILTER_EDIT_PREVIEW_LIMIT: usize = 500;
 
@@ -85,19 +88,14 @@ impl App {
         let Some(state) = self.filter_edit.as_mut() else {
             return;
         };
-        if !state.preview.is_empty() {
-            state.preview_scroll = (state.preview_scroll + 1) % state.preview.len();
-        }
+        state.preview_scroll = next_wrapping(state.preview_scroll, state.preview.len());
     }
 
     pub fn filter_edit_preview_prev(&mut self) {
         let Some(state) = self.filter_edit.as_mut() else {
             return;
         };
-        if !state.preview.is_empty() {
-            state.preview_scroll =
-                (state.preview_scroll + state.preview.len() - 1) % state.preview.len();
-        }
+        state.preview_scroll = prev_wrapping(state.preview_scroll, state.preview.len());
     }
 
     /// Save the in-edit query, reapply filters, and return to the Filters list.
@@ -154,7 +152,7 @@ impl App {
         if let Some(p) = self.apply_filters_preview.as_mut()
             && !p.rows.is_empty()
         {
-            p.scroll = (p.scroll + 1) % p.rows.len();
+            p.scroll = next_wrapping(p.scroll, p.rows.len());
         }
     }
 
@@ -162,7 +160,7 @@ impl App {
         if let Some(p) = self.apply_filters_preview.as_mut()
             && !p.rows.is_empty()
         {
-            p.scroll = (p.scroll + p.rows.len() - 1) % p.rows.len();
+            p.scroll = prev_wrapping(p.scroll, p.rows.len());
         }
     }
 
@@ -191,9 +189,10 @@ impl App {
     /// otherwise exit straight away.
     pub fn request_exit_filter_edit(&mut self) {
         if self.filter_edit_dirty() {
-            self.confirm_message = Some("Discard unsaved changes?".to_string());
-            self.confirm_action = Some(super::ConfirmAction::DiscardFilterEdit);
-            self.input_mode = InputMode::Confirm;
+            self.confirm(
+                "Discard unsaved changes?".to_string(),
+                ConfirmAction::DiscardFilterEdit,
+            );
         } else {
             self.exit_filter_edit();
         }
@@ -437,9 +436,10 @@ impl App {
         else {
             return;
         };
-        self.confirm_message = Some(format!("Delete filter '{name}'?"));
-        self.confirm_action = Some(super::ConfirmAction::DeleteFilter(id));
-        self.input_mode = InputMode::Confirm;
+        self.confirm(
+            format!("Delete filter '{name}'?"),
+            ConfirmAction::DeleteFilter(id),
+        );
     }
 
     /// Persist nothing itself; re-derive rule categories and reload everything.
@@ -453,6 +453,7 @@ impl App {
         let filters = self.load_or_show("load filters", |s| s.list_filters());
         self.lists.filters.set_items(filters);
         self.apply_fuzzy_filter();
+        self.clamp_selection();
     }
 
     fn move_cursor_to_filter(&mut self, id: i64) {

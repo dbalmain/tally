@@ -129,7 +129,6 @@ fn run_app(
                     app.input_mode,
                     InputMode::Normal
                         | InputMode::FilterEdit
-                        | InputMode::ConfirmMerge
                         | InputMode::Confirm
                         | InputMode::ConfirmApplyFilters
                         | InputMode::BulkApply
@@ -303,15 +302,6 @@ fn run_app(
                             app.handle_text_prompt_input(req);
                         }
                     }
-                },
-                InputMode::ConfirmMerge => match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                        app.confirm_merge();
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        app.cancel_merge();
-                    }
-                    _ => {}
                 },
                 InputMode::Confirm => match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {

@@ -162,7 +162,6 @@ fn overlay_open(app: &App) -> bool {
             | InputMode::BulkApply
             | InputMode::Confirm
             | InputMode::ConfirmApplyFilters
-            | InputMode::ConfirmMerge
             | InputMode::TransferNoMatch
     ) || app.error_message.is_some()
         || app.keybind_help_open
@@ -186,7 +185,7 @@ fn draw_overlays(
         draw_bulk_apply_popup(f, app);
     }
 
-    if matches!(app.input_mode, InputMode::ConfirmMerge | InputMode::Confirm) {
+    if app.input_mode == InputMode::Confirm {
         draw_confirm_popup(f, app);
     }
 

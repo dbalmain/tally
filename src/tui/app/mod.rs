@@ -35,6 +35,14 @@ use tabs::{tab_key, tab_title};
 /// Row limit for every list load.
 const LIST_LIMIT: usize = 500;
 
+fn next_wrapping(i: usize, len: usize) -> usize {
+    if len == 0 { 0 } else { (i + 1) % len }
+}
+
+fn prev_wrapping(i: usize, len: usize) -> usize {
+    if len == 0 { 0 } else { (i + len - 1) % len }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
@@ -44,10 +52,7 @@ pub enum InputMode {
     Category,
     TextPrompt,
     BulkApply,
-    ConfirmMerge,
-    /// Generic yes/no confirmation driven by `confirm_action` (the
-    /// transfer/category-breaking flows). `ConfirmMerge` predates this and
-    /// keeps its own handlers.
+    /// Generic yes/no confirmation driven by `confirm_action`.
     Confirm,
     /// Scrollable confirmation listing the transactions `apply_filters` would
     /// (re)categorise (Ctrl-A). Confirm applies; cancel does nothing.
@@ -297,6 +302,12 @@ impl App {
         tab_key(self.current_tab, self.todo_subtab)
     }
 
+    fn confirm(&mut self, message: String, action: ConfirmAction) {
+        self.confirm_message = Some(message);
+        self.confirm_action = Some(action);
+        self.input_mode = InputMode::Confirm;
+    }
+
     /// Rebuild the per-transaction caches (`tx_by_id`, `category_by_tx_id`,
     /// `transfer_by_tx_id`) from currently-loaded list contents. Cheap: no
     /// per-row DB queries — two bulk lookups (categories and transfers for the
@@ -413,7 +424,7 @@ impl App {
             .iter()
             .position(|&t| t == self.current_tab)
             .unwrap_or(0);
-        self.current_tab = tabs[(current_idx + 1) % tabs.len()];
+        self.current_tab = tabs[next_wrapping(current_idx, tabs.len())];
         self.restore_tab_state();
         self.clear_transfer_mode();
     }
@@ -425,7 +436,7 @@ impl App {
             .iter()
             .position(|&t| t == self.current_tab)
             .unwrap_or(0);
-        self.current_tab = tabs[(current_idx + tabs.len() - 1) % tabs.len()];
+        self.current_tab = tabs[prev_wrapping(current_idx, tabs.len())];
         self.restore_tab_state();
         self.clear_transfer_mode();
     }
@@ -440,7 +451,7 @@ impl App {
             .iter()
             .position(|&t| t == self.todo_subtab)
             .unwrap_or(0);
-        self.todo_subtab = subtabs[(current_idx + 1) % subtabs.len()];
+        self.todo_subtab = subtabs[next_wrapping(current_idx, subtabs.len())];
         self.restore_tab_state();
     }
 
@@ -454,7 +465,7 @@ impl App {
             .iter()
             .position(|&t| t == self.todo_subtab)
             .unwrap_or(0);
-        self.todo_subtab = subtabs[(current_idx + subtabs.len() - 1) % subtabs.len()];
+        self.todo_subtab = subtabs[prev_wrapping(current_idx, subtabs.len())];
         self.restore_tab_state();
     }
 
@@ -520,7 +531,7 @@ impl App {
                     }
                 }
             } else {
-                self.selected_index = (self.selected_index + 1) % len;
+                self.selected_index = next_wrapping(self.selected_index, len);
             }
         }
     }
@@ -545,13 +556,22 @@ impl App {
                     }
                 }
             } else {
-                self.selected_index = (self.selected_index + len - 1) % len;
+                self.selected_index = prev_wrapping(self.selected_index, len);
             }
         }
     }
 
     fn list_len(&self) -> usize {
         self.lists.len(self.current_tab_key())
+    }
+
+    fn clamp_selection(&mut self) {
+        let len = self.list_len();
+        if len == 0 {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = self.selected_index.min(len - 1);
+        }
     }
 
     fn get_current_transaction(&self, filtered_idx: usize) -> Option<&Transaction> {
@@ -597,6 +617,7 @@ impl App {
         }
         self.rebuild_tx_caches();
         self.apply_fuzzy_filter();
+        self.clamp_selection();
     }
 
     /// Apply fuzzy filter on top of loaded data for current tab only
@@ -758,12 +779,18 @@ impl App {
     }
 
     pub fn cancel_input(&mut self) {
-        let text_prompt_return_mode = (self.input_mode == InputMode::TextPrompt).then(|| {
-            self.text_prompt
-                .as_ref()
-                .map(|prompt| prompt.return_mode)
-                .unwrap_or(InputMode::Normal)
-        });
+        let return_to_text_prompt =
+            self.input_mode == InputMode::Confirm && self.text_prompt.is_some();
+        let text_prompt_return_mode = match self.input_mode {
+            InputMode::TextPrompt => Some(
+                self.text_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.return_mode)
+                    .unwrap_or(InputMode::Normal),
+            ),
+            InputMode::Confirm if return_to_text_prompt => Some(InputMode::TextPrompt),
+            _ => None,
+        };
         let return_to_filter_edit = self.filter_edit.is_some()
             && matches!(
                 self.input_mode,
@@ -772,7 +799,6 @@ impl App {
                     | InputMode::BulkApply
                     | InputMode::Confirm
                     | InputMode::ConfirmApplyFilters
-                    | InputMode::ConfirmMerge
                     | InputMode::TransferNoMatch
             );
         self.input_mode = text_prompt_return_mode.unwrap_or(if return_to_filter_edit {
@@ -783,7 +809,9 @@ impl App {
         self.clear_category_popup();
         self.error_message = None;
         self.clear_transfer_mode();
-        self.clear_text_prompt();
+        if !return_to_text_prompt {
+            self.clear_text_prompt();
+        }
         self.clear_confirm();
         self.bulk_apply = None;
         self.apply_filters_preview = None;
@@ -794,25 +822,31 @@ impl App {
         self.confirm_action = None;
     }
 
-    /// Carry out the pending `confirm_action` (the generic `InputMode::Confirm`
-    /// flows). `ConfirmMerge` predates this and keeps its own `confirm_merge`.
+    /// Carry out the pending `confirm_action`.
     pub fn confirm_proceed(&mut self) {
         let Some(action) = self.confirm_action.take() else {
             self.cancel_input();
             return;
         };
         self.confirm_message = None;
+        self.input_mode = InputMode::Normal;
         match action {
             ConfirmAction::MergeCategory {
                 source_id,
                 target_id,
             } => {
-                // Never routed through this mode, but keep merge working if it is.
-                self.confirm_action = Some(ConfirmAction::MergeCategory {
-                    source_id,
-                    target_id,
-                });
-                self.confirm_merge();
+                match self.store.merge_categories(source_id, target_id) {
+                    Ok(()) => {
+                        self.reload_categories();
+                        if let Ok(Some(target)) = self.store.get_category(target_id) {
+                            self.move_cursor_to_category(&target.path);
+                        }
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("Failed to merge: {}", e));
+                    }
+                }
+                self.clear_text_prompt();
             }
             ConfirmAction::BreakTransferForCategory {
                 transfer_id,
@@ -820,7 +854,6 @@ impl App {
                 category_path,
             } => {
                 if !self.try_mutation("unlink transfer", |s| s.delete_transfer(transfer_id)) {
-                    self.input_mode = InputMode::Normal;
                     return;
                 }
                 self.apply_category(tx, category_path);
@@ -837,7 +870,6 @@ impl App {
                     s.create_transfer(from_id, to_id, crate::TransferSource::Manual, true, None)?;
                     Ok(())
                 });
-                self.input_mode = InputMode::Normal;
                 if applied {
                     self.refresh_data();
                 }
@@ -846,13 +878,11 @@ impl App {
                 if self.try_mutation("unlink transfer", |s| s.delete_transfer(transfer_id)) {
                     self.refresh_data();
                 }
-                self.input_mode = InputMode::Normal;
             }
             ConfirmAction::Uncategorise { tx_id } => {
                 if self.try_mutation("remove category", |s| s.delete_enrichment(tx_id)) {
                     self.refresh_data();
                 }
-                self.input_mode = InputMode::Normal;
             }
             ConfirmAction::DeleteCategory(category_id) => {
                 if self.try_mutation("delete category", |s| {
@@ -860,20 +890,373 @@ impl App {
                 }) {
                     self.delete_category_after();
                 }
-                self.input_mode = InputMode::Normal;
             }
             ConfirmAction::DiscardFilterEdit => self.exit_filter_edit(),
             ConfirmAction::DeleteFilter(filter_id) => {
                 if self.try_mutation("delete filter", |s| s.delete_filter(filter_id)) {
-                    self.input_mode = InputMode::Normal;
                     self.reapply_filters();
-                    if self.selected_index >= self.lists.filters.len() && self.selected_index > 0 {
-                        self.selected_index -= 1;
-                    }
-                } else {
-                    self.input_mode = InputMode::Normal;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use crate::{CategorySource, TransactionStore, TransferSource};
+
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct FixtureTx {
+        description: &'static str,
+        amount_cents: i64,
+    }
+
+    #[test]
+    fn confirm_merge_category_merges_and_returns_to_normal() {
+        let (_temp, mut store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let source_id = store.get_or_create_category("Old").unwrap();
+        let target_id = store.get_or_create_category("New").unwrap();
+        let tx = tx_by_description(&store, "Coffee");
+        store
+            .set_category(tx.id, source_id, CategorySource::Manual, true, None)
+            .unwrap();
+
+        let mut app = App::new(store).unwrap();
+        app.input_mode = InputMode::Confirm;
+        app.confirm_message = Some("Merge?".to_string());
+        app.confirm_action = Some(ConfirmAction::MergeCategory {
+            source_id,
+            target_id,
+        });
+
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.store.get_category(source_id).unwrap().is_none());
+        assert_eq!(
+            app.store
+                .get_transaction_category(tx.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            target_id
+        );
+    }
+
+    #[test]
+    fn cancel_merge_from_rename_restores_rename_prompt() {
+        let (_temp, mut store) = store_with_transactions(&[]);
+        let source_id = store.get_or_create_category("Old").unwrap();
+        store.get_or_create_category("Existing").unwrap();
+        let source = store.get_category(source_id).unwrap().unwrap();
+        let mut app = App::new(store).unwrap();
+
+        app.confirm_category_rename(source, "Existing".to_string());
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        assert!(app.confirm_action.is_some());
+
+        cancel_current_confirmation(&mut app);
+
+        assert_eq!(app.input_mode, InputMode::TextPrompt);
+        assert_eq!(app.text_prompt_title(), "Rename category");
+        assert_eq!(app.text_prompt_value(), "Existing");
+        assert!(app.confirm_action.is_none());
+    }
+
+    #[test]
+    fn confirm_break_transfer_for_category_lands_in_normal() {
+        let (_temp, mut store) = store_with_transactions(&[
+            FixtureTx {
+                description: "Coffee shop",
+                amount_cents: -10000,
+            },
+            FixtureTx {
+                description: "Salary deposit",
+                amount_cents: 10000,
+            },
+        ]);
+        let tx = tx_by_description(&store, "Coffee shop");
+        let other = tx_by_description(&store, "Salary deposit");
+        let transfer_id = store
+            .create_transfer(tx.id, other.id, TransferSource::Manual, true, None)
+            .unwrap();
+        let mut app = App::new(store).unwrap();
+        app.input_mode = InputMode::Confirm;
+        app.confirm_message = Some("Break transfer?".to_string());
+        app.confirm_action = Some(ConfirmAction::BreakTransferForCategory {
+            transfer_id,
+            tx: tx.clone(),
+            category_path: "Food".to_string(),
+        });
+
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(
+            app.store
+                .get_transfer_for_transaction(tx.id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            app.store
+                .get_transaction_category(tx.id)
+                .unwrap()
+                .unwrap()
+                .path,
+            "Food"
+        );
+    }
+
+    #[test]
+    fn confirm_break_transfers_for_transfer_lands_in_normal() {
+        let (_temp, mut store) = store_with_transactions(&[
+            FixtureTx {
+                description: "New from",
+                amount_cents: -10000,
+            },
+            FixtureTx {
+                description: "New to",
+                amount_cents: 10000,
+            },
+            FixtureTx {
+                description: "Old from",
+                amount_cents: -20000,
+            },
+            FixtureTx {
+                description: "Old to",
+                amount_cents: 20000,
+            },
+        ]);
+        let from = tx_by_description(&store, "New from");
+        let to = tx_by_description(&store, "New to");
+        let old_from = tx_by_description(&store, "Old from");
+        let old_to = tx_by_description(&store, "Old to");
+        let first_transfer_id = store
+            .create_transfer(from.id, old_to.id, TransferSource::Manual, true, None)
+            .unwrap();
+        let second_transfer_id = store
+            .create_transfer(old_from.id, to.id, TransferSource::Manual, true, None)
+            .unwrap();
+        let mut app = App::new(store).unwrap();
+        app.input_mode = InputMode::Confirm;
+        app.confirm_message = Some("Break transfers?".to_string());
+        app.confirm_action = Some(ConfirmAction::BreakTransfersForTransfer {
+            transfer_ids: vec![first_transfer_id, second_transfer_id],
+            from_id: from.id,
+            to_id: to.id,
+        });
+
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        let transfer = app
+            .store
+            .get_transfer_for_transaction(from.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(transfer.from_transaction_id, from.id);
+        assert_eq!(transfer.to_transaction_id, to.id);
+        assert!(
+            app.store
+                .get_transfer_for_transaction(old_from.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            app.store
+                .get_transfer_for_transaction(old_to.id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn confirm_unlink_transfer_lands_in_normal() {
+        let (_temp, mut store) = store_with_transactions(&[
+            FixtureTx {
+                description: "Transfer out",
+                amount_cents: -10000,
+            },
+            FixtureTx {
+                description: "Transfer in",
+                amount_cents: 10000,
+            },
+        ]);
+        let from = tx_by_description(&store, "Transfer out");
+        let to = tx_by_description(&store, "Transfer in");
+        let transfer_id = store
+            .create_transfer(from.id, to.id, TransferSource::Manual, true, None)
+            .unwrap();
+        let mut app = App::new(store).unwrap();
+        app.input_mode = InputMode::Confirm;
+        app.confirm_message = Some("Unlink?".to_string());
+        app.confirm_action = Some(ConfirmAction::UnlinkTransfer { transfer_id });
+
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(
+            app.store
+                .get_transfer_for_transaction(from.id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn confirm_uncategorise_lands_in_normal() {
+        let (_temp, mut store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let tx = tx_by_description(&store, "Coffee");
+        let category_id = store.get_or_create_category("Food").unwrap();
+        store
+            .set_category(tx.id, category_id, CategorySource::Manual, true, None)
+            .unwrap();
+        let mut app = App::new(store).unwrap();
+        app.input_mode = InputMode::Confirm;
+        app.confirm_message = Some("Uncategorise?".to_string());
+        app.confirm_action = Some(ConfirmAction::Uncategorise { tx_id: tx.id });
+
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.store.get_transaction_category(tx.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn confirm_delete_category_lands_in_normal() {
+        let (_temp, mut store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let tx = tx_by_description(&store, "Coffee");
+        let category_id = store.get_or_create_category("Food").unwrap();
+        store
+            .set_category(tx.id, category_id, CategorySource::Manual, true, None)
+            .unwrap();
+        let mut app = App::new(store).unwrap();
+        app.input_mode = InputMode::Confirm;
+        app.confirm_message = Some("Delete category?".to_string());
+        app.confirm_action = Some(ConfirmAction::DeleteCategory(category_id));
+
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.store.get_category(category_id).unwrap().is_none());
+        assert!(app.store.get_transaction_category(tx.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn confirm_discard_filter_edit_lands_in_normal() {
+        let (_temp, mut store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        store.create_filter("Coffee", "Coffee").unwrap();
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Filters;
+        app.open_filter_edit();
+        app.input_mode = InputMode::Confirm;
+        app.confirm_message = Some("Discard?".to_string());
+        app.confirm_action = Some(ConfirmAction::DiscardFilterEdit);
+
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.filter_edit.is_none());
+    }
+
+    #[test]
+    fn confirm_delete_filter_lands_in_normal() {
+        let (_temp, mut store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let filter_id = store.create_filter("Coffee", "Coffee").unwrap();
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Filters;
+        app.selected_index = 0;
+        app.input_mode = InputMode::Confirm;
+        app.confirm_message = Some("Delete filter?".to_string());
+        app.confirm_action = Some(ConfirmAction::DeleteFilter(filter_id));
+
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.store.list_filters().unwrap().is_empty());
+    }
+
+    fn cancel_current_confirmation(app: &mut App) {
+        match app.input_mode {
+            InputMode::Confirm => app.cancel_input(),
+            mode => panic!("expected confirmation mode, got {mode:?}"),
+        }
+    }
+
+    fn store_with_transactions(rows: &[FixtureTx]) -> (TempDir, TransactionStore) {
+        let temp = TempDir::new().unwrap();
+        let account_dir = temp.path().join("TestBank").join("Checking");
+        fs::create_dir_all(&account_dir).unwrap();
+        fs::write(account_dir.join("transactions.csv"), "fixture\n").unwrap();
+
+        let imported: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, tx)| {
+                json!({
+                    "date": format!("2025-01-{:02}", idx + 1),
+                    "description": tx.description,
+                    "amount_cents": tx.amount_cents,
+                    "balance_cents": 50000 + tx.amount_cents,
+                    "hash": format!("fixture-{idx}"),
+                })
+            })
+            .collect();
+        let payload = serde_json::to_string(&imported).unwrap();
+        let import_script = account_dir.join("import");
+        fs::write(
+            &import_script,
+            format!("#!/usr/bin/env bash\ncat <<'JSON'\n{payload}\nJSON\n"),
+        )
+        .unwrap();
+        make_executable(&import_script);
+
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+        (temp, store)
+    }
+
+    fn tx_by_description(store: &TransactionStore, description: &str) -> Transaction {
+        store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap()
+            .into_iter()
+            .find(|tx| tx.description == description)
+            .unwrap_or_else(|| panic!("missing transaction {description:?}"))
+    }
+
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        #[cfg(not(unix))]
+        let _ = path;
     }
 }
