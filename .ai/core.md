@@ -43,7 +43,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 | App state, actions, data loading, caches | `src/tui/app/mod.rs` |
 | Tab definitions / per-tab data & dispatch | `src/tui/app/tabs.rs` |
 | DB-search / fuzzy-search behaviour in the app | `src/tui/app/search.rs`; Categories search is applied in memory by `src/tui/app/tabs.rs` (`/` path boundary-prefix, `~` path fuzzy) |
-| Category actions (assign, rename, merge, AI review) | `src/tui/app/categories.rs` |
+| Category actions (assign, rename, merge, delete, AI review) | `src/tui/app/categories.rs` |
 | Filter actions (create, rename, categorise, override/review/delete) | `src/tui/app/filters.rs` |
 | Transfer actions (mark, confirm, delete) | `src/tui/app/transfers.rs` |
 | Search-bar widget (rendering, cursor-context keys, autocomplete) | `src/tui/search_bar.rs` |
@@ -363,7 +363,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `o` | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`) |
 | `v` | Toggle filter review requirement (Filters tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
-| `d` / `Delete` | Delete transfer (Transfers tab), or delete filter (Filters tab; prompts to confirm) |
+| `d` / `Delete` | Delete transfer (Transfers tab), delete filter (Filters tab; prompts to confirm), or delete category (Categories tab; prompts to confirm, noting how many transactions will be left uncategorised) |
 | `u` | Transactions tab: unlink the selected transfer, else uncategorise the transaction (prompts to confirm). The hint reads "unlink" on a linked transfer and "uncategorise" otherwise, and is hidden when the row has neither |
 | `Delete` | AI Review: remove category. Transfer Review: unlink transfer |
 | `Enter` | Confirm (AI review, transfer review), or open filter edit (Filters tab) |

@@ -1181,6 +1181,19 @@ impl TransactionStore {
         Ok(())
     }
 
+    /// Delete a category, dropping its enrichments so those transactions fall
+    /// back to uncategorised. Returns the number of transactions that lost
+    /// their category.
+    pub fn delete_category(&mut self, category_id: i64) -> Result<usize> {
+        let affected = self.conn.execute(
+            "DELETE FROM transaction_enrichments WHERE category_id = ?",
+            [category_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM categories WHERE id = ?", [category_id])?;
+        Ok(affected)
+    }
+
     /// Get category by path.
     pub fn get_category_by_path(&self, path: &str) -> Result<Option<Category>> {
         let normalised = path.trim().trim_matches('/');
@@ -2495,6 +2508,26 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
         assert!(store.get_category(source_id).unwrap().is_none());
         let cat = store.get_transaction_category(tx_id).unwrap().unwrap();
         assert_eq!(cat.id, target_id);
+    }
+
+    #[test]
+    fn delete_category_drops_enrichments_and_reports_count() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        let cat_id = store.get_or_create_category("Doomed").unwrap();
+        let txs = store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        let tx_id = txs[0].id;
+        store
+            .set_category(tx_id, cat_id, CategorySource::Manual, true, None)
+            .unwrap();
+
+        assert_eq!(store.delete_category(cat_id).unwrap(), 1);
+        assert!(store.get_category(cat_id).unwrap().is_none());
+        assert!(store.get_transaction_category(tx_id).unwrap().is_none());
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub enum Act {
     FuzzySearch,
     Categorise,
     RenameCategory,
+    DeleteCategory,
     CreateFilter,
     ApplyFilters,
     SaveSearchAsFilter,
@@ -130,6 +131,14 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
 
     if app.selected_category().is_some() {
         out.push(b(&[Char('e')], "e", "rename", true, true, RenameCategory));
+        out.push(b(
+            &[Char('d'), Code(KeyCode::Delete)],
+            "d",
+            "delete",
+            true,
+            true,
+            DeleteCategory,
+        ));
     }
 
     if app.current_tab == Tab::Filters {
@@ -385,6 +394,7 @@ fn run_normal(app: &mut App, act: Act) {
         Act::FuzzySearch => app.start_fuzzy_search(),
         Act::Categorise => app.start_category_edit(),
         Act::RenameCategory => app.start_category_rename(),
+        Act::DeleteCategory => app.start_category_delete(),
         Act::CreateFilter => app.start_filter_create(),
         Act::ApplyFilters => app.apply_filter_categories(),
         Act::SaveSearchAsFilter => app.start_filter_from_search(),
@@ -654,6 +664,16 @@ mod tests {
             &binds,
             Act::RenameCategory,
             Trigger::Char('e')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::DeleteCategory,
+            Trigger::Char('d')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::DeleteCategory,
+            Trigger::Code(KeyCode::Delete)
         ));
         assert!(!has_act(&binds, Act::DeleteTransfer));
 

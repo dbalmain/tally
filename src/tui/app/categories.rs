@@ -395,6 +395,34 @@ impl App {
         }
     }
 
+    /// Prompt to delete the selected category, noting how many transactions
+    /// would be left uncategorised.
+    pub fn start_category_delete(&mut self) {
+        let Some(cat) = self.selected_category().cloned() else {
+            return;
+        };
+        let count = self
+            .store
+            .count_transactions_in_category(cat.id)
+            .unwrap_or(0);
+        self.confirm_message = Some(format!(
+            "Delete category \"{}\"? {} transaction{} will be left without a category.",
+            cat.path,
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
+        self.confirm_action = Some(ConfirmAction::DeleteCategory(cat.id));
+        self.input_mode = InputMode::Confirm;
+    }
+
+    /// Reload categories and keep the cursor in bounds after a deletion.
+    pub(super) fn delete_category_after(&mut self) {
+        self.reload_categories();
+        if self.selected_index >= self.lists.categories.len() && self.selected_index > 0 {
+            self.selected_index -= 1;
+        }
+    }
+
     pub(super) fn confirm_category_rename(&mut self, cat: Category, new_path: String) {
         if new_path.is_empty() || new_path == cat.path {
             self.cancel_input();

@@ -84,6 +84,8 @@ pub enum ConfirmAction {
     UnlinkTransfer { transfer_id: i64 },
     /// Removing the selected transaction's category (`u` on Transactions).
     Uncategorise { tx_id: i64 },
+    /// Deleting a category from the Categories tab.
+    DeleteCategory(i64),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -845,6 +847,13 @@ impl App {
             ConfirmAction::Uncategorise { tx_id } => {
                 if self.try_mutation("remove category", |s| s.delete_enrichment(tx_id)) {
                     self.refresh_data();
+                }
+                self.input_mode = InputMode::Normal;
+            }
+            ConfirmAction::DeleteCategory(category_id) => {
+                if self.try_mutation("delete category", |s| s.delete_category(category_id).map(|_| ()))
+                {
+                    self.delete_category_after();
                 }
                 self.input_mode = InputMode::Normal;
             }
