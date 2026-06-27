@@ -186,9 +186,9 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
 
     if app.current_tab == Tab::Transactions && app.selected_transaction().is_some() {
         out.push(b(
-            &[Code(KeyCode::Delete)],
-            "Del",
-            "remove link",
+            &[Char('u')],
+            "u",
+            "uncategorise / unlink",
             true,
             true,
             DeleteTxLink,
