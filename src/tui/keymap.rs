@@ -196,7 +196,14 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     }
 
     if is_transaction_view(app) && app.selected_transaction().is_some() {
-        out.push(b(&[Char('M')], "M", "details", true, true, ToggleDetails));
+        out.push(b(
+            &[Char('v')],
+            "v",
+            "view details?",
+            true,
+            true,
+            ToggleDetails,
+        ));
     }
 
     if app.current_tab == Tab::Transfers
@@ -384,7 +391,7 @@ fn run_normal(app: &mut App, act: Act) {
             app.confirm_transfer_review();
         }
         Act::ClearSearch => app.clear_search(),
-        Act::ToggleDetails => app.toggle_tx_details(),
+        Act::ToggleDetails => app.toggle_view_details(),
     }
 }
 

@@ -12,7 +12,7 @@ use super::app::{App, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
 use super::modal::{Modal, hint_line};
 use super::search_bar::SearchBar;
-use super::table::{ScrollTable, aligned_table, calculate_scroll_offset, column_span};
+use super::table::{ScrollTable, aligned_table, calculate_scroll_offset};
 
 const DETAILS_HEIGHT: u16 = 8;
 
@@ -40,17 +40,6 @@ const TRANSFER_REVIEW_COLS: [Constraint; 6] = [
     Constraint::Length(3),
     Constraint::Min(20),
     Constraint::Length(6),
-];
-
-/// Column layout shared by the transaction table and its inline detail, so the
-/// account/source/metadata lines land under the description column. The third
-/// column holds the category or transfer counterpart.
-const TRANSACTION_COLS: [Constraint; 5] = [
-    Constraint::Length(12),
-    Constraint::Min(20),
-    Constraint::Min(16),
-    Constraint::Length(12),
-    Constraint::Length(12),
 ];
 
 const FILTER_COLS: [Constraint; 5] = [
@@ -488,6 +477,78 @@ fn draw_empty_message(f: &mut Frame, message: &str, area: Rect) {
     f.render_widget(text, area);
 }
 
+/// Transaction-table columns, in no particular order. The display order and
+/// which columns are visible at a given width are decided by
+/// [`plan_transaction_columns`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxColumn {
+    Date,
+    Description,
+    Account,
+    Category,
+    Amount,
+    Balance,
+}
+
+/// Decide which transaction columns fit into `width` and how wide each is.
+///
+/// Columns are included greedily in priority order (Date, Description, Amount,
+/// Category, Account, Balance), each at a minimum width; the first that does
+/// not fit hides itself and every lower-priority column. Leftover width then
+/// grows Category and Account up to a comfortable cap, and Description takes
+/// whatever remains. The result is returned in display order.
+fn plan_transaction_columns(width: u16) -> Vec<(TxColumn, u16)> {
+    use TxColumn::*;
+
+    // (column, minimum width) in priority order, highest priority first.
+    let priority = [
+        (Date, 10u16),
+        (Description, 20),
+        (Amount, 12),
+        (Category, 10),
+        (Account, 10),
+        (Balance, 12),
+    ];
+
+    let mut included: Vec<(TxColumn, u16)> = Vec::new();
+    let mut used = 0u16;
+    for (col, min) in priority {
+        let need = if included.is_empty() {
+            min
+        } else {
+            min + COLUMN_SPACING
+        };
+        if used + need <= width {
+            used += need;
+            included.push((col, min));
+        } else {
+            break;
+        }
+    }
+
+    // Grow the truncatable columns up to a cap, then give the rest to the
+    // description (the elastic, highest-priority text column).
+    let mut leftover = width.saturating_sub(used);
+    for (col, cap) in [(Category, 24u16), (Account, 20u16)] {
+        if let Some(entry) = included.iter_mut().find(|(c, _)| *c == col) {
+            let grow = cap.saturating_sub(entry.1).min(leftover);
+            entry.1 += grow;
+            leftover -= grow;
+        }
+    }
+    if let Some(entry) = included.iter_mut().find(|(c, _)| *c == Description) {
+        entry.1 += leftover;
+    }
+
+    let display = [Date, Description, Account, Category, Amount, Balance];
+    display
+        .into_iter()
+        .filter_map(|col| included.iter().find(|(c, _)| *c == col).copied())
+        .collect()
+}
+
+const COLUMN_SPACING: u16 = 1;
+
 fn draw_transaction_table(
     f: &mut Frame,
     app: &App,
@@ -495,75 +556,111 @@ fn draw_transaction_table(
     selected: usize,
     area: Rect,
 ) {
-    let detail_height = transaction_detail_height(app, transactions.get(selected).copied());
+    let cols = plan_transaction_columns(area.width);
+    let constraints: Vec<Constraint> = cols.iter().map(|&(_, w)| Constraint::Length(w)).collect();
 
-    ScrollTable::new(transactions, selected, &TRANSACTION_COLS)
-        .detail(detail_height, |f, tx, area| {
-            draw_transaction_details(f, app, tx, area);
-        })
-        .render(f, area, |i, tx| {
-            let is_selected = i == selected;
-            let is_pending = app.is_pending_transfer_tx(tx.id);
-            let is_candidate = app.is_transfer_candidate(tx.id);
-            let is_disabled =
-                app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
+    // When "view details" (`v`) is on, prebuild the wrapped two-column detail
+    // for the selected row. Building it here (where the width is known) lets us
+    // reserve exactly as many rows as it occupies, since we wrap by hand.
+    let detail_lines = if app.view_details {
+        transactions
+            .get(selected)
+            .copied()
+            .map(|tx| build_detail_lines(app, tx, area.width))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
-            let bg = if is_pending {
-                Color::Blue
-            } else if is_selected && app.input_mode == InputMode::TransferPending {
-                Color::Green
-            } else if is_selected {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
-
-            let fg = if is_disabled {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
-
-            let amount_color = if is_disabled {
-                Color::DarkGray
-            } else if tx.amount_cents < 0 {
-                Color::Red
-            } else {
-                Color::Green
-            };
-
-            let amount = format_cents(tx.amount_cents);
-            let balance = format_cents(tx.balance_cents);
-
-            // The selected row shows the account here and moves the full
-            // (untruncated) description into the detail line below it.
-            let middle = if is_selected {
-                format!(
-                    "{} / {}",
-                    app.bank_name(tx.bank_id),
-                    app.account_name(tx.account_id)
-                )
-            } else {
-                tx.description.clone()
-            };
-
-            Row::new(vec![
-                Cell::from(tx.date.to_string()).style(Style::default().fg(fg)),
-                Cell::from(middle).style(Style::default().fg(fg)),
-                category_or_transfer_cell(app, tx, is_disabled),
-                Cell::from(Line::from(amount).alignment(Alignment::Right))
-                    .style(Style::default().fg(amount_color)),
-                Cell::from(Line::from(balance).alignment(Alignment::Right))
-                    .style(Style::default().fg(fg)),
-            ])
-            .style(Style::default().bg(bg))
+    let mut table = ScrollTable::new(transactions, selected, &constraints);
+    if !detail_lines.is_empty() {
+        table = table.detail(detail_lines.len() as u16, |f, _tx, area| {
+            f.render_widget(Paragraph::new(detail_lines.clone()), area);
         });
+    }
+
+    table.render(f, area, |i, tx| {
+        let is_selected = i == selected;
+        let is_pending = app.is_pending_transfer_tx(tx.id);
+        let is_candidate = app.is_transfer_candidate(tx.id);
+        let is_disabled =
+            app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
+
+        let bg = if is_pending {
+            Color::Blue
+        } else if is_selected && app.input_mode == InputMode::TransferPending {
+            Color::Green
+        } else if is_selected {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
+
+        let fg = if is_disabled {
+            Color::DarkGray
+        } else {
+            Color::Reset
+        };
+
+        let amount_color = if is_disabled {
+            Color::DarkGray
+        } else if tx.amount_cents < 0 {
+            Color::Red
+        } else {
+            Color::Green
+        };
+
+        let cells = cols
+            .iter()
+            .map(|&(col, w)| {
+                let w = w as usize;
+                match col {
+                    TxColumn::Date => {
+                        Cell::from(tx.date.to_string()).style(Style::default().fg(fg))
+                    }
+                    TxColumn::Description => {
+                        Cell::from(tx.description.clone()).style(Style::default().fg(fg))
+                    }
+                    TxColumn::Account => {
+                        let account = format!(
+                            "{}/{}",
+                            app.bank_name(tx.bank_id),
+                            app.account_name(tx.account_id)
+                        );
+                        // The account is contextual, so dim it whether or not
+                        // the row is disabled.
+                        Cell::from(fit_path(&account, w))
+                            .style(Style::default().fg(Color::DarkGray))
+                    }
+                    TxColumn::Category => match category_cell_text(app, tx, w) {
+                        Some((text, color)) => {
+                            let color = if is_disabled { Color::DarkGray } else { color };
+                            Cell::from(text).style(Style::default().fg(color))
+                        }
+                        None => Cell::from(""),
+                    },
+                    TxColumn::Amount => Cell::from(
+                        Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right),
+                    )
+                    .style(Style::default().fg(amount_color)),
+                    TxColumn::Balance => Cell::from(
+                        Line::from(format_cents(tx.balance_cents)).alignment(Alignment::Right),
+                    )
+                    .style(Style::default().fg(fg)),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Row::new(cells).style(Style::default().bg(bg))
+    });
 }
 
-/// The third transaction column: the category path (yellow, like the
-/// Categories tab) or, for a transfer, `to:`/`from:` the counterpart account
-/// (cyan). Dimmed to match a disabled row during transfer marking.
-fn category_or_transfer_cell(app: &App, tx: &Transaction, dimmed: bool) -> Cell<'static> {
+/// Text + colour for the category column: the category path (yellow, like the
+/// Categories tab) or, for a transfer, `to:`/`from:` the counterpart
+/// `bank/account` (cyan). `None` leaves the cell blank. The value is truncated
+/// to `width` via [`fit_path`]; for transfers the `to:`/`from:` label is kept
+/// intact and only the account portion is abbreviated.
+fn category_cell_text(app: &App, tx: &Transaction, width: usize) -> Option<(String, Color)> {
     if let Some(transfer) = app.get_cached_transfer(tx.id) {
         let (label, other_id) = if transfer.from_transaction_id == tx.id {
             ("to", transfer.to_transaction_id)
@@ -572,41 +669,201 @@ fn category_or_transfer_cell(app: &App, tx: &Transaction, dimmed: bool) -> Cell<
         };
         let account = app
             .get_cached_transaction(other_id)
-            .map(|other| app.account_name(other.account_id))
+            .map(|other| {
+                format!(
+                    "{}/{}",
+                    app.bank_name(other.bank_id),
+                    app.account_name(other.account_id)
+                )
+            })
             .unwrap_or_default();
-        let color = if dimmed { Color::DarkGray } else { Color::Cyan };
-        Cell::from(Line::from(format!("{label}:{account}")).alignment(Alignment::Right))
-            .style(Style::default().fg(color))
-    } else if let Some(category) = app.get_cached_category(tx.id).filter(|c| !c.is_empty()) {
-        let color = if dimmed {
-            Color::DarkGray
-        } else {
-            Color::Yellow
-        };
-        Cell::from(Line::from(category.to_string()).alignment(Alignment::Right))
-            .style(Style::default().fg(color))
+        let prefix = label.len() + 1; // "to:" / "from:"
+        let account = fit_path(&account, width.saturating_sub(prefix));
+        Some((format!("{label}:{account}"), Color::Cyan))
     } else {
-        Cell::from("")
+        app.get_cached_category(tx.id)
+            .filter(|c| !c.is_empty())
+            .map(|category| (fit_path(category, width), Color::Yellow))
     }
 }
 
-/// Height of the inline transaction detail: the full description line, the
-/// source and metadata lines when expanded (`M`), and a trailing blank. Zero
-/// when nothing is selected so the table renders without a detail block.
-fn transaction_detail_height(app: &App, selected: Option<&Transaction>) -> u16 {
-    match selected {
-        Some(tx) => {
-            let mut lines = 1; // description
-            if app.tx_details_expanded {
-                lines += 1; // source
-                if !tx.metadata.is_empty() {
-                    lines += 1; // metadata
-                }
+/// Abbreviate each `/`-separated segment longer than four characters to its
+/// first three characters plus an ellipsis (e.g. `Personal-Rentals` → `Per…`),
+/// leaving shorter segments untouched.
+fn abbreviate_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(|seg| {
+            if seg.chars().count() > 4 {
+                let head: String = seg.chars().take(3).collect();
+                format!("{head}…")
+            } else {
+                seg.to_string()
             }
-            lines + 1 // trailing blank
-        }
-        None => 0,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Hard-truncate `value` to `width` columns, adding a trailing ellipsis when
+/// the text is clipped.
+fn truncate_width(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
     }
+    match width {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let head: String = value.chars().take(width - 1).collect();
+            format!("{head}…")
+        }
+    }
+}
+
+/// Fit a `/`-separated value (category path or `bank/account`) into `width`:
+/// first try it as-is, then per-segment abbreviation, then a hard ellipsis
+/// truncation.
+fn fit_path(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    truncate_width(&abbreviate_path(value), width)
+}
+
+/// Every detail (name, value) pair for a transaction, in display order: the
+/// human-friendly fields first, then any metadata entries (sorted by key). This
+/// is the data shown by the "view details" (`v`) panel.
+fn transaction_detail_pairs(app: &App, tx: &Transaction) -> Vec<(String, String)> {
+    let mut pairs = vec![
+        ("ID".to_string(), tx.id.to_string()),
+        ("Date".to_string(), tx.date.to_string()),
+        (
+            "Account".to_string(),
+            format!(
+                "{}/{}",
+                app.bank_name(tx.bank_id),
+                app.account_name(tx.account_id)
+            ),
+        ),
+        ("Description".to_string(), tx.description.clone()),
+        ("Amount".to_string(), format_cents(tx.amount_cents)),
+        ("Balance".to_string(), format_cents(tx.balance_cents)),
+    ];
+
+    // The transaction is either part of a transfer or categorised, never both.
+    if let Some(transfer) = app.get_cached_transfer(tx.id) {
+        let (label, other_id) = if transfer.from_transaction_id == tx.id {
+            ("to", transfer.to_transaction_id)
+        } else {
+            ("from", transfer.from_transaction_id)
+        };
+        if let Some(other) = app.get_cached_transaction(other_id) {
+            pairs.push((
+                "Transfer".to_string(),
+                format!(
+                    "{label} {}/{}",
+                    app.bank_name(other.bank_id),
+                    app.account_name(other.account_id)
+                ),
+            ));
+        }
+    } else if let Some(category) = app.get_cached_category(tx.id).filter(|c| !c.is_empty()) {
+        pairs.push(("Category".to_string(), category.to_string()));
+    }
+
+    pairs.push(("Source".to_string(), tx.source_file.clone()));
+    pairs.push(("Hash".to_string(), tx.hash.clone()));
+    pairs.push(("Import batch".to_string(), tx.import_batch_id.to_string()));
+
+    let mut keys: Vec<&String> = tx.metadata.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = match &tx.metadata[key] {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        pairs.push((key.clone(), value));
+    }
+
+    pairs
+}
+
+/// Build the "view details" panel as a two-column layout: dimmed names on the
+/// left, values on the right wrapped (never truncated) to fill the remaining
+/// width. Returns one [`Line`] per rendered row so the caller can reserve the
+/// exact height.
+fn build_detail_lines(app: &App, tx: &Transaction, width: u16) -> Vec<Line<'static>> {
+    let pairs = transaction_detail_pairs(app, tx);
+    let width = width as usize;
+
+    // Size the name column to the longest label, but cap it so a stray long
+    // metadata key can't starve the value column.
+    let longest = pairs
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let label_width = longest.min(24).min(width.saturating_sub(8)).max(3);
+    const GAP: usize = 1;
+    let value_width = width.saturating_sub(label_width + GAP).max(1);
+
+    let mut lines = Vec::new();
+    for (label, value) in pairs {
+        for (i, chunk) in wrap_text(&value, value_width).into_iter().enumerate() {
+            let label_cell = if i == 0 {
+                let label = truncate_width(&label, label_width);
+                format!("{label:<label_width$}")
+            } else {
+                " ".repeat(label_width)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(label_cell, Style::default().fg(Color::DarkGray)),
+                Span::raw(" ".repeat(GAP)),
+                Span::raw(chunk),
+            ]));
+        }
+    }
+    lines
+}
+
+/// Word-wrap `text` to `width` columns, hard-breaking any single token longer
+/// than the width. Always returns at least one (possibly empty) line.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word.to_string();
+        // Break a token that can't fit on one line on its own.
+        while word.chars().count() > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let head: String = word.chars().take(width).collect();
+            lines.push(head);
+            word = word.chars().skip(width).collect();
+        }
+        if current.is_empty() {
+            current = word;
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(&word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
@@ -1179,42 +1436,6 @@ fn format_confidence_percent(confidence: f64) -> String {
     format!("{:.0}%", confidence * 100.0)
 }
 
-/// Inline transaction detail: the full (untruncated) description directly under
-/// the row's account, then (when expanded with `M`) the source file and
-/// metadata. Each line starts under the description column and spans the rest
-/// of the width; the final detail line is left blank.
-fn draw_transaction_details(f: &mut Frame, app: &App, tx: &Transaction, area: Rect) {
-    // The description is primary (default colour); source/metadata are dimmed.
-    let mut values = vec![(tx.description.clone(), Color::Reset)];
-
-    if app.tx_details_expanded {
-        values.push((tx.source_file.clone(), Color::DarkGray));
-        if !tx.metadata.is_empty() {
-            let metadata = serde_json::to_string(&tx.metadata).unwrap_or_default();
-            values.push((metadata, Color::DarkGray));
-        }
-    }
-
-    // Start each line under the description column (index 1) and span the rest
-    // of the row width, so long descriptions and metadata stay readable.
-    let (x, width) = column_span(&TRANSACTION_COLS, area, 1);
-    for (i, (value, color)) in values.into_iter().enumerate() {
-        if i as u16 >= area.height {
-            break;
-        }
-        let line_area = Rect {
-            x,
-            y: area.y + i as u16,
-            width,
-            height: 1,
-        };
-        f.render_widget(
-            Paragraph::new(Span::styled(value, Style::default().fg(color))),
-            line_area,
-        );
-    }
-}
-
 fn draw_transfer_details(f: &mut Frame, app: &App, twt: &TransferWithTransactions, area: Rect) {
     draw_transfer_pair(
         f,
@@ -1369,4 +1590,97 @@ fn draw_pending_transfer_details(f: &mut Frame, app: &App, transfer: &crate::Tra
         &TRANSFER_REVIEW_COLS,
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abbreviate_path_shortens_long_segments_only() {
+        // Segments longer than four chars collapse to three chars + ellipsis;
+        // "Bond" (exactly four) is left alone.
+        assert_eq!(
+            abbreviate_path("AllTax/Personal-Rentals/Campbell-Unit/Campbell/Bond"),
+            "All…/Per…/Cam…/Cam…/Bond"
+        );
+    }
+
+    #[test]
+    fn fit_path_tries_full_then_abbreviated_then_hard_truncates() {
+        // Fits as-is.
+        assert_eq!(fit_path("Food/Groceries", 20), "Food/Groceries");
+        // Needs abbreviation to fit.
+        assert_eq!(fit_path("Food/Groceries", 10), "Food/Gro…");
+        // Abbreviation still too long, so hard-truncate with an ellipsis.
+        assert_eq!(
+            fit_path("AllTax/Personal-Rentals/Campbell-Unit/Campbell/Bond", 8),
+            "All…/Pe…"
+        );
+    }
+
+    #[test]
+    fn wrap_text_word_wraps_and_hard_breaks_long_tokens() {
+        // Word wrapping at a boundary.
+        assert_eq!(
+            wrap_text("the quick brown fox", 10),
+            vec!["the quick", "brown fox"]
+        );
+        // A single token longer than the width is hard-broken.
+        assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // Empty input still yields one (empty) line so the label row renders.
+        assert_eq!(wrap_text("", 10), vec![""]);
+    }
+
+    #[test]
+    fn plan_columns_hides_lowest_priority_first() {
+        // Wide enough for everything: all six, in display order.
+        let cols: Vec<_> = plan_transaction_columns(120)
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(
+            cols,
+            vec![
+                TxColumn::Date,
+                TxColumn::Description,
+                TxColumn::Account,
+                TxColumn::Category,
+                TxColumn::Amount,
+                TxColumn::Balance,
+            ]
+        );
+
+        // Balance is the lowest priority, so it is the first to be dropped.
+        let cols: Vec<_> = plan_transaction_columns(70)
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert!(!cols.contains(&TxColumn::Balance));
+        assert!(cols.contains(&TxColumn::Account));
+
+        // Very narrow: only Date and Description survive (Description is second
+        // priority), and Amount/Category/Account/Balance are all gone.
+        let cols: Vec<_> = plan_transaction_columns(31)
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(cols, vec![TxColumn::Date, TxColumn::Description]);
+    }
+
+    #[test]
+    fn plan_columns_widths_fit_within_area() {
+        for width in [10u16, 31, 44, 55, 66, 79, 100, 200] {
+            let cols = plan_transaction_columns(width);
+            if cols.is_empty() {
+                continue;
+            }
+            let spacing = COLUMN_SPACING * (cols.len() as u16 - 1);
+            let total: u16 = cols.iter().map(|&(_, w)| w).sum::<u16>() + spacing;
+            assert!(
+                total <= width,
+                "columns total {total} exceed width {width}: {cols:?}"
+            );
+        }
+    }
 }

@@ -356,11 +356,10 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `c` | Set category on transaction (including Todo → AI Review), or set/clear filter category (Filters tab); categorising a transfer prompts to unlink it first |
 | `e` / `r` | Rename category (`e`, Categories tab), or rename filter (`r`, Filters tab) |
 | `o` | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`) |
-| `v` | Toggle filter review requirement (Filters tab) |
+| `v` | Toggle filter review requirement (Filters tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
 | `d` / `Delete` | Delete transfer (Transfers tab), or delete filter (Filters tab; prompts to confirm) |
 | `Delete` | Transactions tab: unlink transfer, else remove category. AI Review: remove category. Transfer Review: unlink transfer |
-| `M` | Toggle source + metadata lines in the transaction detail (Transactions tab, Todo → Uncategorised) |
 | `Enter` | Confirm (AI review, transfer review), or open filter edit (Filters tab) |
 | `Esc` | Clear active search (fuzzy first, then DB) |
 | `?` | Show keybind popover |
