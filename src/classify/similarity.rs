@@ -1,4 +1,4 @@
-use super::tfidf::{SparseRow, Tfidf};
+use super::tfidf::{SparseRow, Tfidf, l2_normalise};
 
 /// Default cosine-similarity cutoff for "strong" description matches.
 /// Tunable; descriptions that are near-identical score ~0.8-1.0, while a shared
@@ -82,19 +82,6 @@ fn dot(a: &SparseRow, b: &SparseRow) -> f32 {
     total
 }
 
-fn l2_normalise(row: &mut SparseRow) {
-    let norm = row
-        .iter()
-        .map(|(_, value)| value * value)
-        .sum::<f32>()
-        .sqrt();
-    if norm > 0.0 {
-        for (_, value) in row {
-            *value /= norm;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +134,18 @@ mod tests {
             vec![2]
         );
         assert!(!matches.iter().any(|(id, _)| *id == 1));
+    }
+
+    #[test]
+    fn l2_normalise_normalises_known_sparse_row() {
+        let mut row = vec![(3, 3.0), (7, 4.0)];
+
+        l2_normalise(&mut row);
+
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0].0, 3);
+        assert_eq!(row[1].0, 7);
+        assert!((row[0].1 - 0.6).abs() < 1e-6);
+        assert!((row[1].1 - 0.8).abs() < 1e-6);
     }
 }

@@ -33,6 +33,21 @@ fn normalise_removes_reference_noise_and_preserves_descriptive_words() {
 }
 
 #[test]
+fn normalise_pipeline_stages_are_characterised() {
+    for (input, expected) in [
+        ("Coffee SHOP", "coffee shop"),
+        ("Metro card ending in 1234", "metro"),
+        ("Metro txn no AB12CD", "metro"),
+        ("visa purchase metro eftpos", "metro"),
+        ("metro 123 george", "metro george"),
+        ("metro-cafe!", "metro cafe"),
+        ("  metro   cafe  ", "metro cafe"),
+    ] {
+        assert_eq!(normalise(input), expected, "input: {input:?}");
+    }
+}
+
+#[test]
 fn temporal_cascade_is_strict_and_preserves_most_recent_label() {
     let classifier = train(&[
         example("utility", 1000, "2025-01-01", 1),

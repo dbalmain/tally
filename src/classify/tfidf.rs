@@ -4,6 +4,19 @@ const MIN_DF: usize = 2;
 
 pub(super) type SparseRow = Vec<(usize, f32)>;
 
+pub(super) fn l2_normalise(row: &mut SparseRow) {
+    let norm = row
+        .iter()
+        .map(|(_, value)| value * value)
+        .sum::<f32>()
+        .sqrt();
+    if norm > 0.0 {
+        for (_, value) in row {
+            *value /= norm;
+        }
+    }
+}
+
 pub(super) struct Tfidf {
     word: Vocabulary,
     chars: Vocabulary,
@@ -99,16 +112,7 @@ impl Vocabulary {
                 (index, tf * self.idf[index - self.offset])
             })
             .collect();
-        let norm = row
-            .iter()
-            .map(|(_, value)| value * value)
-            .sum::<f32>()
-            .sqrt();
-        if norm > 0.0 {
-            for (_, value) in &mut row {
-                *value /= norm;
-            }
-        }
+        l2_normalise(&mut row);
         row
     }
 }
@@ -175,5 +179,24 @@ mod tests {
 
         assert!((word_norm - 1.0).abs() < 1e-5);
         assert!((char_norm - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vocabulary_transform_l2_normalises_known_sparse_row() {
+        let vocabulary = Vocabulary {
+            analyzer: Analyzer::Word,
+            offset: 0,
+            indices: HashMap::from([("alpha".to_string(), 0), ("beta".to_string(), 1)]),
+            idf: vec![3.0, 4.0],
+        };
+
+        let mut row = vocabulary.transform("alpha beta");
+        row.sort_unstable_by_key(|(index, _)| *index);
+
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0].0, 0);
+        assert_eq!(row[1].0, 1);
+        assert!((row[0].1 - 0.6).abs() < 1e-6);
+        assert!((row[1].1 - 0.8).abs() < 1e-6);
     }
 }

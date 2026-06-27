@@ -88,53 +88,42 @@ pub struct Classifier {
 
 /// Normalize a bank description into a merchant-like matching key.
 pub fn normalise(description: &str) -> String {
-    static CARD_DETAILS: OnceLock<Regex> = OnceLock::new();
-    static REFERENCE: OnceLock<Regex> = OnceLock::new();
-    static NOISE: OnceLock<Regex> = OnceLock::new();
-    static DIGITS: OnceLock<Regex> = OnceLock::new();
-    static PUNCTUATION: OnceLock<Regex> = OnceLock::new();
-    static WHITESPACE: OnceLock<Regex> = OnceLock::new();
+    static PIPELINE: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
 
-    let mut text = description.to_lowercase();
-    text = CARD_DETAILS
-        .get_or_init(|| {
-            Regex::new(
+    let pipeline = PIPELINE.get_or_init(|| {
+        [
+            (
                 r"\b(?:(?:visa|mastercard|debit|credit)\s+)?card\s*(?:ending\s+(?:in\s+)?)?(?:x+|\*+)?\s*\d{2,}\b",
-            )
-            .unwrap()
-        })
-        .replace_all(&text, " ")
-        .into_owned();
-    text = REFERENCE
-        .get_or_init(|| {
-            Regex::new(
+                " ",
+            ),
+            (
                 r"\b(?:ref(?:erence)?|txn|transaction)\s*(?:no|number)?\s*[:#-]?\s*[a-z0-9*-]*\d[a-z0-9*-]*\b",
-            )
-            .unwrap()
-        })
-        .replace_all(&text, " ")
-        .into_owned();
-    text = NOISE
-        .get_or_init(|| {
-            Regex::new(
+                " ",
+            ),
+            (
                 r"\b(?:visa|mastercard|debit|credit|card|eftpos|pos|purchase|ref|reference|txn|transaction)\b",
-            )
-            .unwrap()
-        })
-        .replace_all(&text, " ")
-        .into_owned();
-    text = DIGITS
-        .get_or_init(|| Regex::new(r"\d+").unwrap())
-        .replace_all(&text, " ")
-        .into_owned();
-    text = PUNCTUATION
-        .get_or_init(|| Regex::new(r"[^a-z\s]+").unwrap())
-        .replace_all(&text, " ")
-        .into_owned();
-    WHITESPACE
-        .get_or_init(|| Regex::new(r"\s+").unwrap())
-        .replace_all(text.trim(), " ")
-        .into_owned()
+                " ",
+            ),
+            (r"\d+", " "),
+            (r"[^a-z\s]+", " "),
+            (r"\s+", " "),
+        ]
+        .into_iter()
+        .map(|(pattern, replacement)| (Regex::new(pattern).unwrap(), replacement))
+        .collect()
+    });
+
+    pipeline.iter().enumerate().fold(
+        description.to_lowercase(),
+        |text, (index, (regex, replacement))| {
+            let input = if index + 1 == pipeline.len() {
+                text.trim()
+            } else {
+                text.as_str()
+            };
+            regex.replace_all(input, *replacement).into_owned()
+        },
+    )
 }
 
 /// Train the pure temporal and description model pipeline.
