@@ -273,6 +273,22 @@ fn draw_filter_edit_heading(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Yellow),
         ));
     }
+    if let Some(label) = app.filter_edit_override_label() {
+        spans.push(Span::styled(
+            "  override ",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(label, Style::default().fg(Color::Cyan)));
+    }
+    if let Some(review_required) = app.filter_edit_review_required() {
+        spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
+        let (text, color) = if review_required {
+            ("review", Color::Yellow)
+        } else {
+            ("auto", Color::DarkGray)
+        };
+        spans.push(Span::styled(text, Style::default().fg(color)));
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

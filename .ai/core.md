@@ -343,9 +343,10 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `/` | Start DB search |
 | `~` | Start fuzzy search |
 | `Ctrl-S` | Save current Transactions DB search as a filter |
-| `n` | Create filter (Filters tab) |
+| `Ctrl-N` | Create filter (Filters tab) |
+| `Ctrl-A` | Apply filter categories — reapply the saved filter set to transactions (Filters tab and Filter Edit) |
 | `c` | Set category on transaction (including Todo → AI Review), or set/clear filter category (Filters tab); categorising a transfer prompts to unlink it first |
-| `e` | Rename category (Categories tab), or rename filter (Filters tab) |
+| `e` / `r` | Rename category (`e`, Categories tab), or rename filter (`r`, Filters tab) |
 | `o` | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`) |
 | `v` | Toggle filter review requirement (Filters tab) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
@@ -370,15 +371,20 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 
 ### Filter Edit
 Opened with `Enter` on a Filters-tab row. Full-screen DB-query editor with a
-live read-only transaction preview.
+live read-only transaction preview. The heading shows the filter's category,
+override mode, and review state so the `Ctrl-O` / `Ctrl-V` toggles give
+feedback.
 
 | Key | Action |
 |-----|--------|
-| `Ctrl-S` | Save query and reapply filters |
+| `Enter` | When the autocomplete popup is open, accept the suggestion (like `Tab`); otherwise save the query, reapply filters, and return to the Filters table |
 | `Ctrl-E` | Rename filter |
 | `Ctrl-C` | Set or clear filter category |
-| `↑` / `↓` | Scroll preview; search cursor stays in the bar |
-| `Tab` / `Enter` | Accept autocomplete suggestion when the popup is open |
+| `Ctrl-O` | Cycle filter override mode (only when a category is set) |
+| `Ctrl-V` | Toggle filter review requirement (only when a category is set) |
+| `Ctrl-A` | Apply filter categories — reapply the saved filter set to transactions |
+| `Tab` | Accept autocomplete suggestion when the popup is open |
+| `↑` / `↓` | Scroll preview; search cursor stays in the bar (no hint shown) |
 | `Esc` | Discard unsaved query edits and return to the Filters table |
 
 ### Category Popup

@@ -217,16 +217,24 @@ fn run_app(
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     if ctrl {
                         match key.code {
-                            KeyCode::Char('s') | KeyCode::Char('S') => {
-                                app.save_filter_edit();
-                                continue;
-                            }
                             KeyCode::Char('e') | KeyCode::Char('E') => {
                                 app.start_filter_rename();
                                 continue;
                             }
                             KeyCode::Char('c') | KeyCode::Char('C') => {
                                 app.start_category_edit();
+                                continue;
+                            }
+                            KeyCode::Char('o') | KeyCode::Char('O') => {
+                                app.cycle_filter_override();
+                                continue;
+                            }
+                            KeyCode::Char('v') | KeyCode::Char('V') => {
+                                app.toggle_filter_review();
+                                continue;
+                            }
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                app.apply_filter_categories();
                                 continue;
                             }
                             _ => {}
@@ -260,7 +268,7 @@ fn run_app(
                         KeyCode::Esc => app.exit_filter_edit(),
                         KeyCode::Down => app.filter_edit_preview_next(),
                         KeyCode::Up => app.filter_edit_preview_prev(),
-                        KeyCode::Enter => {}
+                        KeyCode::Enter => app.save_filter_edit(),
                         _ => {
                             if let Some(req) = text_edit_request(&key) {
                                 app.filter_edit_input(req);

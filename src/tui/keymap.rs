@@ -48,6 +48,7 @@ pub enum Act {
     Categorise,
     RenameCategory,
     CreateFilter,
+    ApplyFilters,
     SaveSearchAsFilter,
     RenameFilter,
     EditFilter,
@@ -132,7 +133,8 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     }
 
     if app.current_tab == Tab::Filters {
-        out.push(b(&[Char('n')], "n", "new", true, true, CreateFilter));
+        out.push(b(&[Ctrl('n')], "Ctrl-N", "new", true, true, CreateFilter));
+        out.push(b(&[Ctrl('a')], "Ctrl-A", "apply", true, true, ApplyFilters));
         if app.selected_filter().is_some() {
             out.push(b(
                 &[Code(KeyCode::Enter)],
@@ -142,7 +144,7 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
                 true,
                 EditFilter,
             ));
-            out.push(b(&[Char('e')], "e", "rename", true, true, RenameFilter));
+            out.push(b(&[Char('r')], "r", "rename", true, true, RenameFilter));
             out.push(b(&[Char('c')], "c", "category", true, true, Categorise));
             out.push(b(
                 &[Char('o')],
@@ -366,6 +368,7 @@ fn run_normal(app: &mut App, act: Act) {
         Act::Categorise => app.start_category_edit(),
         Act::RenameCategory => app.start_category_rename(),
         Act::CreateFilter => app.start_filter_create(),
+        Act::ApplyFilters => app.apply_filter_categories(),
         Act::SaveSearchAsFilter => app.start_filter_from_search(),
         Act::RenameFilter => app.start_filter_rename(),
         Act::EditFilter => app.open_filter_edit(),
@@ -412,10 +415,12 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         InputMode::FuzzySearch => vec![("Enter", "keep filter"), ("Esc", "clear & exit")],
         InputMode::FilterEdit => vec![
-            ("Ctrl-S", "save"),
+            ("Enter", "save"),
             ("Ctrl-E", "rename"),
             ("Ctrl-C", "category"),
-            ("↑/↓", "preview"),
+            ("Ctrl-O", "override"),
+            ("Ctrl-V", "review"),
+            ("Ctrl-A", "apply"),
             ("Esc", "back"),
         ],
         InputMode::Category => vec![("↑/↓", "select"), ("Enter", "assign"), ("Esc", "cancel")],
@@ -504,10 +509,12 @@ fn fuzzy_search_lines(lines: &mut Vec<HelpLine>) {
 fn filter_edit_lines(lines: &mut Vec<HelpLine>) {
     group(lines, "Filter Edit");
     bind_line(lines, "Type", "edit DB query");
-    bind_line(lines, "Ctrl-S", "save query");
+    bind_line(lines, "Enter", "save query & return");
     bind_line(lines, "Ctrl-E", "rename filter");
     bind_line(lines, "Ctrl-C", "set category");
-    bind_line(lines, "↑/↓", "scroll preview");
+    bind_line(lines, "Ctrl-O", "cycle override");
+    bind_line(lines, "Ctrl-V", "toggle review");
+    bind_line(lines, "Ctrl-A", "apply filters");
     bind_line(lines, "Tab/Enter", "accept autocomplete");
     bind_line(lines, "Esc", "back");
 }
@@ -671,12 +678,17 @@ mod tests {
         assert!(has_act_trigger(
             &binds,
             Act::CreateFilter,
-            Trigger::Char('n')
+            Trigger::Ctrl('n')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::ApplyFilters,
+            Trigger::Ctrl('a')
         ));
         assert!(has_act_trigger(
             &binds,
             Act::RenameFilter,
-            Trigger::Char('e')
+            Trigger::Char('r')
         ));
         assert!(has_act_trigger(
             &binds,
@@ -741,10 +753,12 @@ mod tests {
         assert_eq!(
             footer_hints(&app),
             vec![
-                ("Ctrl-S", "save"),
+                ("Enter", "save"),
                 ("Ctrl-E", "rename"),
                 ("Ctrl-C", "category"),
-                ("↑/↓", "preview"),
+                ("Ctrl-O", "override"),
+                ("Ctrl-V", "review"),
+                ("Ctrl-A", "apply"),
                 ("Esc", "back"),
             ]
         );

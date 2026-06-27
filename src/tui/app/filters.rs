@@ -100,6 +100,7 @@ impl App {
         }
     }
 
+    /// Save the in-edit query, reapply filters, and return to the Filters list.
     pub fn save_filter_edit(&mut self) {
         let Some((filter_id, query)) = self
             .filter_edit
@@ -113,9 +114,14 @@ impl App {
             s.set_filter_query(filter_id, &query)
         }) {
             self.reapply_filters();
-            self.refresh_filter_edit();
-            self.recompute_filter_preview();
-            self.input_mode = InputMode::FilterEdit;
+            self.exit_filter_edit();
+        }
+    }
+
+    /// Re-derive rule categories from the saved filter set (Ctrl-A).
+    pub fn apply_filter_categories(&mut self) {
+        if self.current_tab == Tab::Filters || self.filter_edit.is_some() {
+            self.reapply_filters();
         }
     }
 
@@ -155,6 +161,24 @@ impl App {
     pub fn filter_edit_category_path(&self) -> Option<&str> {
         let filter = self.filter_edit_filter()?;
         self.category_path(filter.category_id?)
+    }
+
+    /// Override label for the in-edit filter, only when a category is set.
+    pub fn filter_edit_override_label(&self) -> Option<&'static str> {
+        let filter = self.filter_edit_filter()?;
+        filter.category_id?;
+        Some(match filter.override_mode {
+            FilterOverride::Uncategorised => "new",
+            FilterOverride::Ai => "+ai",
+            FilterOverride::All => "all",
+        })
+    }
+
+    /// Review-required flag for the in-edit filter, only when a category is set.
+    pub fn filter_edit_review_required(&self) -> Option<bool> {
+        let filter = self.filter_edit_filter()?;
+        filter.category_id?;
+        Some(filter.review_required)
     }
 
     pub fn filter_edit_search_bar(&self) -> Option<&SearchBar> {
@@ -450,7 +474,30 @@ mod tests {
 
         let filters = app.store.list_filters().unwrap();
         assert_eq!(filters[0].query, "NoMatch");
-        assert_eq!(app.input_mode, InputMode::FilterEdit);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.filter_edit.is_none());
+    }
+
+    #[test]
+    fn save_filter_edit_returns_to_filters_list() {
+        let (_temp, mut store) = store_with_imported_transaction();
+        store.create_filter("Test filter", "Test").unwrap();
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Filters;
+        app.open_filter_edit();
+
+        app.filter_edit
+            .as_mut()
+            .unwrap()
+            .search_bar
+            .set_value("NoMatch");
+        // Enter with no autocomplete open saves and exits to the Filters list.
+        app.save_filter_edit();
+
+        assert_eq!(app.store.list_filters().unwrap()[0].query, "NoMatch");
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.current_tab, Tab::Filters);
+        assert!(app.filter_edit.is_none());
     }
 
     #[test]
