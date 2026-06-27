@@ -391,7 +391,7 @@ feedback.
 | Key | Action |
 |-----|--------|
 | `Enter` | When the autocomplete popup is open, accept the suggestion (like `Tab`); otherwise save the query, reapply filters, and return to the Filters table |
-| `Ctrl-E` | Rename filter |
+| `Ctrl-R` | Rename filter |
 | `Ctrl-C` | Set or clear filter category |
 | `Ctrl-O` | Cycle filter override mode (only when a category is set) |
 | `Ctrl-V` | Toggle filter review requirement (only when a category is set) |

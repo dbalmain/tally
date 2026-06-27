@@ -218,7 +218,7 @@ fn run_app(
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     if ctrl {
                         match key.code {
-                            KeyCode::Char('e') | KeyCode::Char('E') => {
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
                                 app.start_filter_rename();
                                 continue;
                             }

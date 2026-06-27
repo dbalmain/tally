@@ -974,6 +974,13 @@ impl TransactionStore {
     /// Shared body of [`apply_filters`] / [`preview_filters`]: re-derive rule
     /// categories and return the affected transactions in apply order.
     fn apply_filters_inner(&mut self) -> Result<Vec<Transaction>> {
+        // Snapshot the existing rule categories before clearing the unconfirmed
+        // ones, so re-running a review-required filter that lands the same
+        // category on the same transaction is reported as a no-op rather than a
+        // fresh change. Without this, the delete-then-reinsert below would make
+        // every re-apply re-report rows it had already categorised.
+        let prior_rule = self.rule_categories()?;
+
         self.conn.execute(
             "DELETE FROM transaction_enrichments
              WHERE category_source = 'rule' AND category_confirmed = 0",
@@ -1004,11 +1011,29 @@ impl TransactionStore {
                         !filter.review_required,
                         None,
                     )?;
-                    applied.push(tx);
+                    // Only a genuine change counts as "applied": skip rows that
+                    // already carried this exact rule category.
+                    if prior_rule.get(&tx.id) != Some(&category_id) {
+                        applied.push(tx);
+                    }
                 }
             }
         }
         Ok(applied)
+    }
+
+    /// Map of transaction id → category id for every rule-sourced enrichment,
+    /// used to tell genuine (re)categorisations apart from no-op re-applies.
+    fn rule_categories(&self) -> Result<HashMap<i64, i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT transaction_id, category_id
+             FROM transaction_enrichments
+             WHERE category_source = 'rule' AND category_id IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+        Ok(rows)
     }
 
     /// Decide whether a filter may categorise `tx_id` given its override mode
@@ -2915,6 +2940,35 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn review_required_filter_reapply_reports_no_change() {
+        let (_t, mut store) = setup_rich_fixture();
+        add_filter(
+            &mut store,
+            "interest",
+            "Interest",
+            "Income/Interest",
+            FilterOverride::Uncategorised,
+            true,
+        );
+
+        // First apply categorises the row (unconfirmed, pending review).
+        assert_eq!(store.apply_filters().unwrap(), 1);
+        assert_eq!(
+            enrichment(&store, "Interest"),
+            Some((CategorySource::Rule, false, "Income/Interest".into()))
+        );
+
+        // Re-applying must not re-report the already-categorised row, even
+        // though its rule enrichment stays unconfirmed.
+        assert!(store.preview_filters().unwrap().is_empty());
+        assert_eq!(store.apply_filters().unwrap(), 0);
+        assert_eq!(
+            enrichment(&store, "Interest"),
+            Some((CategorySource::Rule, false, "Income/Interest".into()))
+        );
     }
 
     #[test]

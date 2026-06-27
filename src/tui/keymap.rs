@@ -149,7 +149,7 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
             out.push(b(
                 &[Char('o')],
                 "o",
-                "override",
+                "override?",
                 true,
                 true,
                 CycleFilterOverride,
@@ -157,7 +157,7 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
             out.push(b(
                 &[Char('v')],
                 "v",
-                "review",
+                "review?",
                 true,
                 true,
                 ToggleFilterReview,
@@ -191,8 +191,18 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     {
         if app.get_cached_transfer(tx.id).is_some() {
             out.push(b(&[Char('u')], "u", "unlink", true, true, DeleteTxLink));
-        } else if app.get_cached_category(tx.id).is_some_and(|c| !c.is_empty()) {
-            out.push(b(&[Char('u')], "u", "uncategorise", true, true, DeleteTxLink));
+        } else if app
+            .get_cached_category(tx.id)
+            .is_some_and(|c| !c.is_empty())
+        {
+            out.push(b(
+                &[Char('u')],
+                "u",
+                "uncategorise",
+                true,
+                true,
+                DeleteTxLink,
+            ));
         }
     }
 
@@ -424,7 +434,7 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
         InputMode::FuzzySearch => vec![("Enter", "keep filter"), ("Esc", "clear & exit")],
         InputMode::FilterEdit => vec![
             ("Enter", "save"),
-            ("Ctrl-E", "rename"),
+            ("Ctrl-R", "rename"),
             ("Ctrl-C", "category"),
             ("Ctrl-O", "override?"),
             ("Ctrl-V", "review?"),
@@ -522,7 +532,7 @@ fn filter_edit_lines(lines: &mut Vec<HelpLine>) {
     group(lines, "Filter Edit");
     bind_line(lines, "Type", "edit DB query");
     bind_line(lines, "Enter", "save query & return");
-    bind_line(lines, "Ctrl-E", "rename filter");
+    bind_line(lines, "Ctrl-R", "rename filter");
     bind_line(lines, "Ctrl-C", "set category");
     bind_line(lines, "Ctrl-O", "cycle override");
     bind_line(lines, "Ctrl-V", "toggle review");
@@ -773,7 +783,7 @@ mod tests {
             footer_hints(&app),
             vec![
                 ("Enter", "save"),
-                ("Ctrl-E", "rename"),
+                ("Ctrl-R", "rename"),
                 ("Ctrl-C", "category"),
                 ("Ctrl-O", "override?"),
                 ("Ctrl-V", "review?"),
