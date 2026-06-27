@@ -69,10 +69,81 @@ fn text_edit_request(key: &KeyEvent) -> Option<InputRequest> {
     }
 }
 
-fn ctrl_char(key: &KeyEvent, expected: char) -> bool {
-    matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT)
+fn handle_tab_switch(app: &mut App, key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Tab => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.previous_tab();
+            } else {
+                app.next_tab();
+            }
+            true
+        }
+        KeyCode::BackTab => {
+            app.previous_tab();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_autocomplete_nav(
+    app: &mut App,
+    key: &KeyEvent,
+    next: fn(&mut App),
+    prev: fn(&mut App),
+    select: fn(&mut App) -> bool,
+    close: fn(&mut App),
+) -> bool {
+    match key.code {
+        KeyCode::Down => {
+            next(app);
+            true
+        }
+        KeyCode::Up => {
+            prev(app);
+            true
+        }
+        KeyCode::Tab | KeyCode::Enter if select(app) => true,
+        KeyCode::Esc => {
+            close(app);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_filter_edit_ctrl(app: &mut App, key: &KeyEvent) -> bool {
+    let Some(action) = keymap::filter_edit_ctrl_action(key) else {
+        return false;
+    };
+
+    match action {
+        keymap::FilterEditCtrlAction::Rename => app.start_filter_rename(),
+        keymap::FilterEditCtrlAction::Category => app.start_category_edit(),
+        keymap::FilterEditCtrlAction::CycleOverride => app.cycle_filter_override(),
+        keymap::FilterEditCtrlAction::ToggleReview => app.toggle_filter_review(),
+        keymap::FilterEditCtrlAction::Apply => app.apply_filter_categories(),
+    }
+    true
+}
+
+fn handle_yes_no(app: &mut App, key: &KeyEvent, on_yes: fn(&mut App), on_no: fn(&mut App)) -> bool {
+    let yes = matches!(key.code, KeyCode::Enter)
+        || matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y'));
+    if yes {
+        on_yes(app);
+        return true;
+    }
+
+    let no = matches!(key.code, KeyCode::Esc)
+        || matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'n'));
+    if no {
+        on_no(app);
+        return true;
+    }
+
+    false
 }
 
 fn run_app(
@@ -125,16 +196,7 @@ fn run_app(
                 && !key
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                && matches!(
-                    app.input_mode,
-                    InputMode::Normal
-                        | InputMode::FilterEdit
-                        | InputMode::Confirm
-                        | InputMode::ConfirmApplyFilters
-                        | InputMode::BulkApply
-                        | InputMode::TransferPending
-                        | InputMode::TransferNoMatch
-                )
+                && keymap::help_available(app.input_mode)
             {
                 app.keybind_help_open = true;
                 continue;
@@ -143,48 +205,31 @@ fn run_app(
             match app.input_mode {
                 InputMode::Normal => keymap::dispatch_normal(app, key),
                 InputMode::DbSearch => {
-                    if ctrl_char(&key, 's') {
+                    if keymap::is_ctrl(&key, 's') {
                         app.start_filter_from_search();
                         continue;
                     }
 
-                    // Handle autocomplete popup navigation when active
-                    if app.filter_autocomplete_active() {
-                        match key.code {
-                            KeyCode::Down => {
-                                app.filter_autocomplete_next();
-                                continue;
-                            }
-                            KeyCode::Up => {
-                                app.filter_autocomplete_prev();
-                                continue;
-                            }
-                            KeyCode::Tab | KeyCode::Enter if app.filter_autocomplete_select() => {
-                                continue;
-                                // If no selection made, fall through to normal behavior
-                            }
-                            KeyCode::Esc => {
-                                app.filter_autocomplete_close();
-                                continue;
-                            }
-                            _ => {
-                                // Other keys close popup and proceed normally
-                                // (the popup will re-open if still in a filter value)
-                            }
-                        }
+                    if app.filter_autocomplete_active()
+                        && handle_autocomplete_nav(
+                            app,
+                            &key,
+                            App::filter_autocomplete_next,
+                            App::filter_autocomplete_prev,
+                            App::filter_autocomplete_select,
+                            App::filter_autocomplete_close,
+                        )
+                    {
+                        continue;
+                    }
+
+                    if handle_tab_switch(app, &key) {
+                        continue;
                     }
 
                     match key.code {
                         KeyCode::Esc => app.clear_db_search(),
                         KeyCode::Enter => app.confirm_db_search(),
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                app.previous_tab();
-                            } else {
-                                app.next_tab();
-                            }
-                        }
-                        KeyCode::BackTab => app.previous_tab(),
                         KeyCode::Down => app.next(),
                         KeyCode::Up => app.previous(),
                         _ => {
@@ -194,74 +239,39 @@ fn run_app(
                         }
                     }
                 }
-                InputMode::FuzzySearch => match key.code {
-                    KeyCode::Esc => app.clear_fuzzy_search(),
-                    KeyCode::Enter => app.confirm_fuzzy_search(),
-                    KeyCode::Tab => {
-                        if key.modifiers.contains(KeyModifiers::SHIFT) {
-                            app.previous_tab();
-                        } else {
-                            app.next_tab();
-                        }
-                    }
-                    KeyCode::BackTab => app.previous_tab(),
-                    KeyCode::Down => app.next(),
-                    KeyCode::Up => app.previous(),
-                    _ => {
-                        if let Some(req) = text_edit_request(&key) {
-                            app.handle_fuzzy_search_input(req);
-                        }
-                    }
-                },
-                InputMode::FilterEdit => {
-                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                    if ctrl {
-                        match key.code {
-                            KeyCode::Char('r') | KeyCode::Char('R') => {
-                                app.start_filter_rename();
-                                continue;
-                            }
-                            KeyCode::Char('c') | KeyCode::Char('C') => {
-                                app.start_category_edit();
-                                continue;
-                            }
-                            KeyCode::Char('o') | KeyCode::Char('O') => {
-                                app.cycle_filter_override();
-                                continue;
-                            }
-                            KeyCode::Char('v') | KeyCode::Char('V') => {
-                                app.toggle_filter_review();
-                                continue;
-                            }
-                            KeyCode::Char('a') | KeyCode::Char('A') => {
-                                app.apply_filter_categories();
-                                continue;
-                            }
-                            _ => {}
-                        }
+                InputMode::FuzzySearch => {
+                    if handle_tab_switch(app, &key) {
+                        continue;
                     }
 
-                    if app.filter_edit_autocomplete_active() {
-                        match key.code {
-                            KeyCode::Down => {
-                                app.filter_edit_autocomplete_next();
-                                continue;
+                    match key.code {
+                        KeyCode::Esc => app.clear_fuzzy_search(),
+                        KeyCode::Enter => app.confirm_fuzzy_search(),
+                        KeyCode::Down => app.next(),
+                        KeyCode::Up => app.previous(),
+                        _ => {
+                            if let Some(req) = text_edit_request(&key) {
+                                app.handle_fuzzy_search_input(req);
                             }
-                            KeyCode::Up => {
-                                app.filter_edit_autocomplete_prev();
-                                continue;
-                            }
-                            KeyCode::Tab | KeyCode::Enter
-                                if app.filter_edit_autocomplete_select() =>
-                            {
-                                continue;
-                            }
-                            KeyCode::Esc => {
-                                app.filter_edit_autocomplete_close();
-                                continue;
-                            }
-                            _ => {}
                         }
+                    }
+                }
+                InputMode::FilterEdit => {
+                    if handle_filter_edit_ctrl(app, &key) {
+                        continue;
+                    }
+
+                    if app.filter_edit_autocomplete_active()
+                        && handle_autocomplete_nav(
+                            app,
+                            &key,
+                            App::filter_edit_autocomplete_next,
+                            App::filter_edit_autocomplete_prev,
+                            App::filter_edit_autocomplete_select,
+                            App::filter_edit_autocomplete_close,
+                        )
+                    {
+                        continue;
                     }
 
                     match key.code {
@@ -303,26 +313,20 @@ fn run_app(
                         }
                     }
                 },
-                InputMode::Confirm => match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                        app.confirm_proceed();
+                InputMode::Confirm => {
+                    handle_yes_no(app, &key, App::confirm_proceed, App::cancel_input);
+                }
+                InputMode::ConfirmApplyFilters => {
+                    if handle_yes_no(app, &key, App::apply_filters_confirm, App::cancel_input) {
+                        continue;
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        app.cancel_input();
+
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => app.apply_filters_preview_next(),
+                        KeyCode::Char('k') | KeyCode::Up => app.apply_filters_preview_prev(),
+                        _ => {}
                     }
-                    _ => {}
-                },
-                InputMode::ConfirmApplyFilters => match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                        app.apply_filters_confirm();
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        app.cancel_input();
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => app.apply_filters_preview_next(),
-                    KeyCode::Char('k') | KeyCode::Up => app.apply_filters_preview_prev(),
-                    _ => {}
-                },
+                }
                 InputMode::TransferPending => match key.code {
                     KeyCode::Esc => app.cancel_input(),
                     KeyCode::Char('t') => app.start_transfer_mark(),

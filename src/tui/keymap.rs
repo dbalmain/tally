@@ -24,14 +24,16 @@ impl Trigger {
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
             }
-            Trigger::Ctrl(c) => {
-                matches!(key.code, KeyCode::Char(k) if k.eq_ignore_ascii_case(&c))
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT)
-            }
+            Trigger::Ctrl(c) => is_ctrl(key, c),
             Trigger::Code(code) => key.code == code,
         }
     }
+}
+
+pub fn is_ctrl(key: &KeyEvent, expected: char) -> bool {
+    matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +82,86 @@ pub enum HelpLine {
     Group(&'static str),
     Bind(&'static str, &'static str),
     Blank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FilterEditCtrlAction {
+    Rename,
+    Category,
+    CycleOverride,
+    ToggleReview,
+    Apply,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FilterEditCtrlBind {
+    key: char,
+    label: &'static str,
+    footer_desc: &'static str,
+    help_desc: &'static str,
+    action: FilterEditCtrlAction,
+}
+
+const FILTER_EDIT_CTRL_BINDS: &[FilterEditCtrlBind] = &[
+    FilterEditCtrlBind {
+        key: 'r',
+        label: "Ctrl-R",
+        footer_desc: "rename",
+        help_desc: "rename filter",
+        action: FilterEditCtrlAction::Rename,
+    },
+    FilterEditCtrlBind {
+        key: 'c',
+        label: "Ctrl-C",
+        footer_desc: "category",
+        help_desc: "set category",
+        action: FilterEditCtrlAction::Category,
+    },
+    FilterEditCtrlBind {
+        key: 'o',
+        label: "Ctrl-O",
+        footer_desc: "override?",
+        help_desc: "cycle override",
+        action: FilterEditCtrlAction::CycleOverride,
+    },
+    FilterEditCtrlBind {
+        key: 'v',
+        label: "Ctrl-V",
+        footer_desc: "review?",
+        help_desc: "toggle review",
+        action: FilterEditCtrlAction::ToggleReview,
+    },
+    FilterEditCtrlBind {
+        key: 'a',
+        label: "Ctrl-A",
+        footer_desc: "apply",
+        help_desc: "apply filters",
+        action: FilterEditCtrlAction::Apply,
+    },
+];
+
+pub(super) fn filter_edit_ctrl_binds() -> &'static [FilterEditCtrlBind] {
+    FILTER_EDIT_CTRL_BINDS
+}
+
+pub(super) fn filter_edit_ctrl_action(key: &KeyEvent) -> Option<FilterEditCtrlAction> {
+    filter_edit_ctrl_binds()
+        .iter()
+        .find(|bind| is_ctrl(key, bind.key))
+        .map(|bind| bind.action)
+}
+
+pub fn help_available(mode: InputMode) -> bool {
+    matches!(
+        mode,
+        InputMode::Normal
+            | InputMode::FilterEdit
+            | InputMode::Confirm
+            | InputMode::ConfirmApplyFilters
+            | InputMode::BulkApply
+            | InputMode::TransferPending
+            | InputMode::TransferNoMatch
+    )
 }
 
 const fn b(
@@ -417,16 +499,12 @@ fn run_normal(app: &mut App, act: Act) {
 }
 
 pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
-    match app.input_mode {
-        InputMode::Normal => {
-            let mut out: Vec<_> = normal_binds(app)
-                .iter()
-                .filter(|bind| bind.footer)
-                .map(|bind| (bind.label, bind.desc))
-                .collect();
-            out.push(("?", "keys"));
-            out
-        }
+    let mut hints = match app.input_mode {
+        InputMode::Normal => normal_binds(app)
+            .iter()
+            .filter(|bind| bind.footer)
+            .map(|bind| (bind.label, bind.desc))
+            .collect(),
         InputMode::DbSearch if app.filter_autocomplete_active() => {
             let mut hints = vec![("↑/↓", "select"), ("Tab/Enter", "accept"), ("Esc", "close")];
             if can_save_search_as_filter(app) {
@@ -442,15 +520,7 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             hints
         }
         InputMode::FuzzySearch => vec![("Enter", "keep filter"), ("Esc", "clear & exit")],
-        InputMode::FilterEdit => vec![
-            ("Enter", "save"),
-            ("Ctrl-R", "rename"),
-            ("Ctrl-C", "category"),
-            ("Ctrl-O", "override?"),
-            ("Ctrl-V", "review?"),
-            ("Ctrl-A", "apply"),
-            ("Esc", "back"),
-        ],
+        InputMode::FilterEdit => filter_edit_footer_hints(),
         InputMode::Category => vec![("↑/↓", "select"), ("Enter", "assign"), ("Esc", "cancel")],
         InputMode::TextPrompt => vec![("Enter", "save"), ("Esc", "cancel")],
         InputMode::BulkApply => vec![
@@ -465,18 +535,30 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
         InputMode::ConfirmApplyFilters => {
             vec![("↑/↓", "scroll"), ("y/Enter", "apply"), ("Esc", "cancel")]
         }
-        InputMode::TransferPending => with_keys(vec![
+        InputMode::TransferPending => vec![
             ("↑/↓", "select"),
             ("T/Enter", "link"),
             ("t", "re-search"),
             ("Esc", "cancel"),
-        ]),
+        ],
         InputMode::TransferNoMatch => vec![("Esc", "dismiss")],
+    };
+
+    if help_available(app.input_mode) {
+        hints.push(("?", "keys"));
     }
+
+    hints
 }
 
-fn with_keys(mut hints: Vec<(&'static str, &'static str)>) -> Vec<(&'static str, &'static str)> {
-    hints.push(("?", "keys"));
+fn filter_edit_footer_hints() -> Vec<(&'static str, &'static str)> {
+    let mut hints = vec![("Enter", "save")];
+    hints.extend(
+        filter_edit_ctrl_binds()
+            .iter()
+            .map(|bind| (bind.label, bind.footer_desc)),
+    );
+    hints.push(("Esc", "back"));
     hints
 }
 
@@ -542,11 +624,9 @@ fn filter_edit_lines(lines: &mut Vec<HelpLine>) {
     group(lines, "Filter Edit");
     bind_line(lines, "Type", "edit DB query");
     bind_line(lines, "Enter", "save query & return");
-    bind_line(lines, "Ctrl-R", "rename filter");
-    bind_line(lines, "Ctrl-C", "set category");
-    bind_line(lines, "Ctrl-O", "cycle override");
-    bind_line(lines, "Ctrl-V", "toggle review");
-    bind_line(lines, "Ctrl-A", "apply filters");
+    for bind in filter_edit_ctrl_binds() {
+        bind_line(lines, bind.label, bind.help_desc);
+    }
     bind_line(lines, "Tab/Enter", "accept autocomplete");
     bind_line(lines, "Esc", "back");
 }
@@ -816,8 +896,85 @@ mod tests {
                 ("Ctrl-V", "review?"),
                 ("Ctrl-A", "apply"),
                 ("Esc", "back"),
+                ("?", "keys"),
             ]
         );
+    }
+
+    #[test]
+    fn filter_edit_ctrl_hints_match_handler_keys() {
+        let mut app = app_with_rows();
+        app.input_mode = InputMode::FilterEdit;
+
+        let expected: Vec<_> = filter_edit_ctrl_binds()
+            .iter()
+            .map(|bind| bind.key)
+            .collect();
+
+        assert_eq!(ctrl_keys_from_footer(&footer_hints(&app)), expected);
+        assert_eq!(ctrl_keys_from_help(&help_lines(&app)), expected);
+
+        for bind in filter_edit_ctrl_binds() {
+            let key = KeyEvent::new(
+                KeyCode::Char(bind.key.to_ascii_uppercase()),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            );
+            assert_eq!(filter_edit_ctrl_action(&key), Some(bind.action));
+        }
+
+        for key in 'a'..='z' {
+            let accepted =
+                filter_edit_ctrl_action(&KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL))
+                    .is_some();
+            assert_eq!(
+                accepted,
+                expected.contains(&key),
+                "unexpected FilterEdit Ctrl-{key} handling"
+            );
+        }
+    }
+
+    #[test]
+    fn keybind_popover_modes_are_pinned() {
+        let help_modes = [
+            InputMode::Normal,
+            InputMode::FilterEdit,
+            InputMode::Confirm,
+            InputMode::ConfirmApplyFilters,
+            InputMode::BulkApply,
+            InputMode::TransferPending,
+            InputMode::TransferNoMatch,
+        ];
+        let no_help_modes = [
+            InputMode::DbSearch,
+            InputMode::FuzzySearch,
+            InputMode::Category,
+            InputMode::TextPrompt,
+        ];
+
+        for mode in help_modes {
+            assert!(help_available(mode), "{mode:?} should open keybind help");
+        }
+        for mode in no_help_modes {
+            assert!(
+                !help_available(mode),
+                "{mode:?} should not open keybind help"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_key_hint_tracks_help_availability() {
+        let mut app = app_with_rows();
+
+        for mode in input_modes() {
+            app.input_mode = mode;
+            assert_eq!(
+                footer_hints(&app).contains(&("?", "keys")),
+                help_available(mode),
+                "{mode:?} footer should match help availability"
+            );
+        }
     }
 
     #[test]
@@ -854,6 +1011,22 @@ mod tests {
             (Tab::Todo, TodoSubTab::AiReview),
             (Tab::Todo, TodoSubTab::TransferReview),
             (Tab::Filters, TodoSubTab::Uncategorised),
+        ]
+    }
+
+    fn input_modes() -> [InputMode; 11] {
+        [
+            InputMode::Normal,
+            InputMode::DbSearch,
+            InputMode::FuzzySearch,
+            InputMode::FilterEdit,
+            InputMode::Category,
+            InputMode::TextPrompt,
+            InputMode::BulkApply,
+            InputMode::Confirm,
+            InputMode::ConfirmApplyFilters,
+            InputMode::TransferPending,
+            InputMode::TransferNoMatch,
         ]
     }
 
@@ -950,5 +1123,33 @@ mod tests {
 
     fn has_act_trigger(binds: &[Bind], act: Act, trigger: Trigger) -> bool {
         find_act(binds, act).is_some_and(|bind| bind.triggers.contains(&trigger))
+    }
+
+    fn ctrl_keys_from_footer(hints: &[(&'static str, &'static str)]) -> Vec<char> {
+        hints
+            .iter()
+            .filter_map(|(label, _)| ctrl_key_from_label(label))
+            .collect()
+    }
+
+    fn ctrl_keys_from_help(lines: &[HelpLine]) -> Vec<char> {
+        lines
+            .iter()
+            .filter_map(|line| match line {
+                HelpLine::Bind(label, _) => ctrl_key_from_label(label),
+                HelpLine::Group(_) | HelpLine::Blank => None,
+            })
+            .collect()
+    }
+
+    fn ctrl_key_from_label(label: &str) -> Option<char> {
+        let key = label.strip_prefix("Ctrl-")?;
+        let mut chars = key.chars();
+        let key = chars.next()?;
+        if chars.next().is_none() {
+            Some(key.to_ascii_lowercase())
+        } else {
+            None
+        }
     }
 }

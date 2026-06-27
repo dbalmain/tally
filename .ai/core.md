@@ -399,6 +399,7 @@ feedback.
 | `Tab` | Accept autocomplete suggestion when the popup is open |
 | `↑` / `↓` | Scroll preview; search cursor stays in the bar (no hint shown) |
 | `Esc` | Return to the Filters table; prompts to confirm if the query has unsaved edits |
+| `?` | Show keybind popover |
 
 ### Category Popup
 | Key | Action |
@@ -417,6 +418,7 @@ feedback.
 | `Enter` | Apply to selected rows |
 | `Esc` | Cancel |
 | `↑` / `↓` | Navigate rows |
+| `?` | Show keybind popover |
 | `Alt-?` | Toggle bottom key-hint bar |
 
 ### Confirmation Popups
