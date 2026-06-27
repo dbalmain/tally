@@ -1417,7 +1417,9 @@ fn centered_rect_size(width: u16, height: u16, r: Rect) -> Rect {
 /// Number of rows `text` occupies once wrapped to `width`, honouring embedded
 /// newlines. Used to size text modals so the shared spacing lands exactly.
 fn count_wrapped_lines(text: &str, width: usize) -> usize {
-    text.split('\n').map(|line| wrap_text(line, width).len()).sum()
+    text.split('\n')
+        .map(|line| wrap_text(line, width).len())
+        .sum()
 }
 
 /// Draw a short text modal sized to its (wrapped) message, following the shared

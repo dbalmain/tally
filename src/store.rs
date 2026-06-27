@@ -1,5 +1,5 @@
 use chrono::{NaiveDate, Utc};
-use rusqlite::{Connection, OptionalExtension, params, types::Value};
+use rusqlite::{Connection, OptionalExtension, Row, params, types::Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -18,44 +18,67 @@ use crate::{
 
 /// Column list for selecting a full `Transaction` from `transactions_view`
 /// under `alias`. Order must match `parse_transaction_at_offset`.
+const TX_COLS: [&str; 11] = [
+    "id",
+    "bank_id",
+    "account_id",
+    "date",
+    "description",
+    "amount_cents",
+    "balance_cents",
+    "hash",
+    "metadata",
+    "source_file",
+    "import_batch_id",
+];
+const TX_COL_COUNT: usize = TX_COLS.len();
+
 fn tx_cols(alias: &str) -> String {
-    [
-        "id",
-        "bank_id",
-        "account_id",
-        "date",
-        "description",
-        "amount_cents",
-        "balance_cents",
-        "hash",
-        "metadata",
-        "source_file",
-        "import_batch_id",
-    ]
-    .map(|c| format!("{alias}.{c}"))
-    .join(", ")
+    TX_COLS.map(|c| format!("{alias}.{c}")).join(", ")
 }
 
 /// Column list for selecting a full `TransactionEnrichment` under `alias`.
 /// Order must match `parse_enrichment_at_offset`.
+const ENRICHMENT_COLS: [&str; 8] = [
+    "id",
+    "transaction_id",
+    "category_id",
+    "category_source",
+    "category_confirmed",
+    "ai_confidence",
+    "created_at",
+    "updated_at",
+];
+const ENRICHMENT_COL_COUNT: usize = ENRICHMENT_COLS.len();
+
 fn enrichment_cols(alias: &str) -> String {
-    [
-        "id",
-        "transaction_id",
-        "category_id",
-        "category_source",
-        "category_confirmed",
-        "ai_confidence",
-        "created_at",
-        "updated_at",
-    ]
-    .map(|c| format!("{alias}.{c}"))
-    .join(", ")
+    ENRICHMENT_COLS.map(|c| format!("{alias}.{c}")).join(", ")
 }
 
-/// Column list for selecting a full `Transfer` from `transfers tr`.
+/// Column list for selecting a full `Category` under `alias`.
+/// Order must match `parse_category_at_offset`.
+const CATEGORY_COLS: [&str; 3] = ["id", "path", "created_at"];
+
+fn category_cols(alias: &str) -> String {
+    CATEGORY_COLS.map(|c| format!("{alias}.{c}")).join(", ")
+}
+
+/// Column list for selecting a full `Transfer` under `alias`.
 /// Order must match `parse_transfer`.
-const TRANSFER_COLS: &str = "tr.id, tr.from_transaction_id, tr.to_transaction_id, tr.source, tr.confirmed, tr.created_at, tr.ai_confidence";
+const TRANSFER_COLS: [&str; 7] = [
+    "id",
+    "from_transaction_id",
+    "to_transaction_id",
+    "source",
+    "confirmed",
+    "created_at",
+    "ai_confidence",
+];
+const TRANSFER_COL_COUNT: usize = TRANSFER_COLS.len();
+
+fn transfer_cols(alias: &str) -> String {
+    TRANSFER_COLS.map(|c| format!("{alias}.{c}")).join(", ")
+}
 
 const PULL_CONCURRENCY: usize = 6;
 
@@ -103,18 +126,36 @@ fn transfer_side_ctx(alias: &str) -> SqlContext {
         )
 }
 
+const TODO_TRANSACTION_JOINS: &str = " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
+             LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id";
+
+fn transaction_fts_join(parsed: &ParsedQuery) -> &'static str {
+    if parsed.fts_query().is_some() {
+        " JOIN transactions_fts fts ON t.id = fts.rowid"
+    } else {
+        ""
+    }
+}
+
+fn transaction_category_join(parsed: &ParsedQuery, enrichment_joined: bool) -> String {
+    if !parsed.uses_placeholder("category_path") {
+        return String::new();
+    }
+
+    if enrichment_joined {
+        " LEFT JOIN categories c ON e.category_id = c.id".to_string()
+    } else {
+        " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id\
+         \n LEFT JOIN categories c ON e.category_id = c.id"
+            .to_string()
+    }
+}
+
 /// Joins to splice into a transaction query based on what the parsed query needs.
 fn transaction_joins(parsed: &ParsedQuery) -> String {
     let mut joins = String::new();
-    if parsed.fts_query().is_some() {
-        joins.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
-    }
-    if parsed.uses_placeholder("category_path") {
-        joins.push_str(
-            " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id\
-             \n LEFT JOIN categories c ON e.category_id = c.id",
-        );
-    }
+    joins.push_str(transaction_fts_join(parsed));
+    joins.push_str(&transaction_category_join(parsed, false));
     joins
 }
 
@@ -311,9 +352,31 @@ impl TransactionStore {
         query: &ParsedQuery,
         limit: Option<usize>,
     ) -> Result<Vec<Transaction>> {
+        self.query_transactions_where(query, "", "", false, "query_transactions", limit)
+    }
+
+    fn query_transactions_where(
+        &self,
+        query: &ParsedQuery,
+        extra_joins: &str,
+        extra_where: &str,
+        extra_joins_include_enrichment: bool,
+        debug_label: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<Transaction>> {
         let mut sql = format!("SELECT {} FROM transactions_view t", tx_cols("t"));
-        sql.push_str(&transaction_joins(query));
+        if extra_joins.is_empty() {
+            sql.push_str(&transaction_joins(query));
+        } else {
+            sql.push_str(transaction_fts_join(query));
+            sql.push_str(extra_joins);
+            sql.push_str(&transaction_category_join(
+                query,
+                extra_joins_include_enrichment,
+            ));
+        }
         sql.push_str(" WHERE t.account_deleted_at IS NULL");
+        sql.push_str(extra_where);
 
         let rendered = query.render(&transaction_ctx());
         sql.push_str(&rendered.and_prefix());
@@ -322,7 +385,7 @@ impl TransactionStore {
         sql.push_str(" ORDER BY t.date DESC, t.id DESC");
         push_limit(&mut sql, &mut params, limit);
 
-        log::debug!("query_transactions SQL: {} params: {:?}", sql, params);
+        log::debug!("{debug_label} SQL: {} params: {:?}", sql, params);
 
         let mut stmt = self.conn.prepare(&sql)?;
         let transactions = stmt
@@ -687,13 +750,7 @@ impl TransactionStore {
             .conn
             .prepare("SELECT id, path, created_at FROM categories ORDER BY path")?;
         let categories = stmt
-            .query_map([], |row| {
-                Ok(Category {
-                    id: row.get(0)?,
-                    path: row.get(1)?,
-                    created_at: parse_datetime(&row.get::<_, String>(2)?)?,
-                })
-            })?
+            .query_map([], parse_category)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(categories)
     }
@@ -738,13 +795,7 @@ impl TransactionStore {
             .query_row(
                 "SELECT id, path, created_at FROM categories WHERE id = ?",
                 [id],
-                |row| {
-                    Ok(Category {
-                        id: row.get(0)?,
-                        path: row.get(1)?,
-                        created_at: parse_datetime(&row.get::<_, String>(2)?)?,
-                    })
-                },
+                parse_category,
             )
             .optional()
             .map_err(Into::into)
@@ -754,18 +805,15 @@ impl TransactionStore {
     pub fn get_transaction_category(&self, transaction_id: i64) -> Result<Option<Category>> {
         self.conn
             .query_row(
-                "SELECT c.id, c.path, c.created_at 
-                 FROM categories c
+                &format!(
+                    "SELECT {}
+                     FROM categories c
                  JOIN transaction_enrichments e ON c.id = e.category_id
-                 WHERE e.transaction_id = ?",
+                     WHERE e.transaction_id = ?",
+                    category_cols("c")
+                ),
                 [transaction_id],
-                |row| {
-                    Ok(Category {
-                        id: row.get(0)?,
-                        path: row.get(1)?,
-                        created_at: parse_datetime(&row.get::<_, String>(2)?)?,
-                    })
-                },
+                parse_category,
             )
             .optional()
             .map_err(Into::into)
@@ -1201,13 +1249,7 @@ impl TransactionStore {
             .query_row(
                 "SELECT id, path, created_at FROM categories WHERE path = ?",
                 [normalised],
-                |row| {
-                    Ok(Category {
-                        id: row.get(0)?,
-                        path: row.get(1)?,
-                        created_at: parse_datetime(&row.get::<_, String>(2)?)?,
-                    })
-                },
+                parse_category,
             )
             .optional()
             .map_err(Into::into)
@@ -1296,9 +1338,10 @@ impl TransactionStore {
     /// Get the transfer (if any) involving a transaction.
     pub fn get_transfer_for_transaction(&self, transaction_id: i64) -> Result<Option<Transfer>> {
         let sql = format!(
-            "SELECT {TRANSFER_COLS}
+            "SELECT {}
              FROM transfers tr
-             WHERE tr.from_transaction_id = ? OR tr.to_transaction_id = ?"
+             WHERE tr.from_transaction_id = ? OR tr.to_transaction_id = ?",
+            transfer_cols("tr")
         );
         self.conn
             .query_row(
@@ -1331,10 +1374,11 @@ impl TransactionStore {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT {TRANSFER_COLS}
+            "SELECT {}
              FROM transfers tr
              WHERE tr.from_transaction_id IN ({placeholders})
-                OR tr.to_transaction_id IN ({placeholders})"
+                OR tr.to_transaction_id IN ({placeholders})",
+            transfer_cols("tr")
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1418,46 +1462,15 @@ impl TransactionStore {
         query: &ParsedQuery,
         limit: Option<usize>,
     ) -> Result<Vec<Transaction>> {
-        let mut sql = format!("SELECT {} FROM transactions_view t", tx_cols("t"));
-        // FTS join (conditional on the parsed query)
-        if query.fts_query().is_some() {
-            sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
-        }
-        // Always join enrichments (we filter on missing category) and transfers
-        // (we exclude transactions involved in a transfer).
-        sql.push_str(
-            " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
-             LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id",
-        );
-        // Optional category join is a no-op here because `e` is already joined
-        // — if the user filters by category we just need `c` too.
-        if query.uses_placeholder("category_path") {
-            sql.push_str(" LEFT JOIN categories c ON e.category_id = c.id");
-        }
-        sql.push_str(
-            " WHERE t.account_deleted_at IS NULL
-               AND (e.category_id IS NULL OR e.id IS NULL)
+        self.query_transactions_where(
+            query,
+            TODO_TRANSACTION_JOINS,
+            " AND (e.category_id IS NULL OR e.id IS NULL)
                AND tr.id IS NULL",
-        );
-
-        let rendered = query.render(&transaction_ctx());
-        sql.push_str(&rendered.and_prefix());
-        let mut params = rendered.params;
-
-        sql.push_str(" ORDER BY t.date DESC, t.id DESC");
-        push_limit(&mut sql, &mut params, limit);
-
-        log::debug!(
-            "get_uncategorised_transactions SQL: {} params: {:?}",
-            sql,
-            params
-        );
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let transactions = stmt
-            .query_map(rusqlite::params_from_iter(params), parse_transaction)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(transactions)
+            true,
+            "get_uncategorised_transactions",
+            limit,
+        )
     }
 
     /// Transactions eligible for (re)categorisation: no enrichment, or an
@@ -1467,46 +1480,15 @@ impl TransactionStore {
         query: &ParsedQuery,
         limit: Option<usize>,
     ) -> Result<Vec<Transaction>> {
-        let mut sql = format!("SELECT {} FROM transactions_view t", tx_cols("t"));
-        // FTS join (conditional on the parsed query)
-        if query.fts_query().is_some() {
-            sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
-        }
-        // Always join enrichments (we filter on confirmation) and transfers
-        // (we exclude transactions involved in a transfer).
-        sql.push_str(
-            " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id
-             LEFT JOIN transfers tr ON t.id = tr.from_transaction_id OR t.id = tr.to_transaction_id",
-        );
-        // Optional category join is a no-op here because `e` is already joined
-        // — if the user filters by category we just need `c` too.
-        if query.uses_placeholder("category_path") {
-            sql.push_str(" LEFT JOIN categories c ON e.category_id = c.id");
-        }
-        sql.push_str(
-            " WHERE t.account_deleted_at IS NULL
-               AND (e.id IS NULL OR e.category_id IS NULL OR e.category_confirmed = 0)
+        self.query_transactions_where(
+            query,
+            TODO_TRANSACTION_JOINS,
+            " AND (e.id IS NULL OR e.category_id IS NULL OR e.category_confirmed = 0)
                AND tr.id IS NULL",
-        );
-
-        let rendered = query.render(&transaction_ctx());
-        sql.push_str(&rendered.and_prefix());
-        let mut params = rendered.params;
-
-        sql.push_str(" ORDER BY t.date DESC, t.id DESC");
-        push_limit(&mut sql, &mut params, limit);
-
-        log::debug!(
-            "get_unconfirmed_transactions SQL: {} params: {:?}",
-            sql,
-            params
-        );
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let transactions = stmt
-            .query_map(rusqlite::params_from_iter(params), parse_transaction)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(transactions)
+            true,
+            "get_unconfirmed_transactions",
+            limit,
+        )
     }
 
     /// Get transactions with AI-suggested categories pending review.
@@ -1516,13 +1498,12 @@ impl TransactionStore {
         limit: Option<usize>,
     ) -> Result<Vec<TransactionWithEnrichment>> {
         let mut sql = format!(
-            "SELECT {}, {}, c.id, c.path, c.created_at FROM transactions_view t",
+            "SELECT {}, {}, {} FROM transactions_view t",
             tx_cols("t"),
             enrichment_cols("e"),
+            category_cols("c"),
         );
-        if query.fts_query().is_some() {
-            sql.push_str(" JOIN transactions_fts fts ON t.id = fts.rowid");
-        }
+        sql.push_str(transaction_fts_join(query));
         // Enrichment is required (we filter on it) and category is needed for SELECT.
         sql.push_str(
             " JOIN transaction_enrichments e ON t.id = e.transaction_id
@@ -1547,13 +1528,10 @@ impl TransactionStore {
         let results = stmt
             .query_map(rusqlite::params_from_iter(params), |row| {
                 let transaction = parse_transaction(row)?;
-                let enrichment = Some(parse_enrichment_at_offset(row, 11)?);
-                let category = if row.get::<_, Option<i64>>(19)?.is_some() {
-                    Some(Category {
-                        id: row.get(19)?,
-                        path: row.get(20)?,
-                        created_at: parse_datetime(&row.get::<_, String>(21)?)?,
-                    })
+                let enrichment = Some(parse_enrichment_at_offset(row, TX_COL_COUNT)?);
+                let category_offset = TX_COL_COUNT + ENRICHMENT_COL_COUNT;
+                let category = if row.get::<_, Option<i64>>(category_offset)?.is_some() {
+                    Some(parse_category_at_offset(row, category_offset)?)
                 } else {
                     None
                 };
@@ -1575,10 +1553,11 @@ impl TransactionStore {
         limit: Option<usize>,
     ) -> Result<Vec<Transfer>> {
         let mut sql = format!(
-            "SELECT {TRANSFER_COLS}
+            "SELECT {}
              FROM transfers tr
              JOIN transactions_view ft ON ft.id = tr.from_transaction_id
              JOIN transactions_view tt ON tt.id = tr.to_transaction_id",
+            transfer_cols("tr")
         );
 
         sql.push_str(
@@ -1630,10 +1609,11 @@ impl TransactionStore {
         limit: Option<usize>,
     ) -> Result<Vec<TransferWithTransactions>> {
         let mut sql = format!(
-            "SELECT {TRANSFER_COLS}, {}, {}
+            "SELECT {}, {}, {}
              FROM transfers tr
              JOIN transactions_view ft ON ft.id = tr.from_transaction_id
              JOIN transactions_view tt ON tt.id = tr.to_transaction_id",
+            transfer_cols("tr"),
             tx_cols("ft"),
             tx_cols("tt"),
         );
@@ -1661,8 +1641,9 @@ impl TransactionStore {
         let result = stmt
             .query_map(rusqlite::params_from_iter(params), |row| {
                 let transfer = parse_transfer(row)?;
-                let from_transaction = parse_transaction_at_offset(row, 7)?;
-                let to_transaction = parse_transaction_at_offset(row, 18)?;
+                let from_transaction = parse_transaction_at_offset(row, TRANSFER_COL_COUNT)?;
+                let to_transaction =
+                    parse_transaction_at_offset(row, TRANSFER_COL_COUNT + TX_COL_COUNT)?;
                 Ok(TransferWithTransactions {
                     transfer,
                     from_transaction,
@@ -1683,14 +1664,23 @@ fn parse_datetime(s: &str) -> rusqlite::Result<chrono::DateTime<Utc>> {
         })
 }
 
-fn parse_transaction(row: &rusqlite::Row) -> rusqlite::Result<Transaction> {
+fn parse_category(row: &Row) -> rusqlite::Result<Category> {
+    parse_category_at_offset(row, 0)
+}
+
+fn parse_category_at_offset(row: &Row, offset: usize) -> rusqlite::Result<Category> {
+    Ok(Category {
+        id: row.get(offset)?,
+        path: row.get(offset + 1)?,
+        created_at: parse_datetime(&row.get::<_, String>(offset + 2)?)?,
+    })
+}
+
+fn parse_transaction(row: &Row) -> rusqlite::Result<Transaction> {
     parse_transaction_at_offset(row, 0)
 }
 
-fn parse_transaction_at_offset(
-    row: &rusqlite::Row,
-    offset: usize,
-) -> rusqlite::Result<Transaction> {
+fn parse_transaction_at_offset(row: &Row, offset: usize) -> rusqlite::Result<Transaction> {
     let metadata_str: String = row.get(offset + 8)?;
     let metadata: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(&metadata_str).unwrap_or_default();
@@ -1718,10 +1708,7 @@ fn parse_transaction_at_offset(
     })
 }
 
-fn parse_enrichment_at_offset(
-    row: &rusqlite::Row,
-    offset: usize,
-) -> rusqlite::Result<TransactionEnrichment> {
+fn parse_enrichment_at_offset(row: &Row, offset: usize) -> rusqlite::Result<TransactionEnrichment> {
     Ok(TransactionEnrichment {
         id: row.get(offset)?,
         transaction_id: row.get(offset + 1)?,
@@ -1815,6 +1802,192 @@ mod tests {
         // Pass cursor=0 so no implicit prefix is added.
         let (parsed, _) = parse(&search_config(), input, 0);
         parsed
+    }
+
+    fn annotate_transaction(
+        store: &TransactionStore,
+        description: &str,
+        metadata: &str,
+        source_file: &str,
+        hash: &str,
+    ) {
+        store
+            .conn
+            .execute(
+                "UPDATE transactions
+                 SET metadata = ?, source_file = ?, hash = ?
+                 WHERE description = ?",
+                params![metadata, source_file, hash, description],
+            )
+            .unwrap();
+    }
+
+    fn assert_transaction_matches_db(store: &TransactionStore, tx: &Transaction) {
+        let (
+            bank_id,
+            account_id,
+            date_str,
+            description,
+            amount_cents,
+            balance_cents,
+            hash,
+            metadata_json,
+            source_file,
+            import_batch_id,
+        ): (
+            i64,
+            i64,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            i64,
+        ) = store
+            .conn
+            .query_row(
+                "SELECT bank_id, account_id, date, description, amount_cents,
+                        balance_cents, hash, metadata, source_file, import_batch_id
+                 FROM transactions_view
+                 WHERE id = ?",
+                [tx.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        let metadata: HashMap<String, serde_json::Value> =
+            serde_json::from_str(&metadata_json).unwrap();
+
+        assert_eq!(tx.bank_id, bank_id);
+        assert_eq!(tx.account_id, account_id);
+        assert_eq!(
+            tx.date,
+            NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").unwrap()
+        );
+        assert_eq!(tx.description, description);
+        assert_eq!(tx.amount_cents, amount_cents);
+        assert_eq!(tx.balance_cents, balance_cents);
+        assert_eq!(tx.hash, hash);
+        assert_eq!(tx.metadata, metadata);
+        assert_eq!(tx.source_file, source_file);
+        assert_eq!(tx.import_batch_id, import_batch_id);
+    }
+
+    fn assert_enrichment_matches_db(store: &TransactionStore, enrichment: &TransactionEnrichment) {
+        let (
+            transaction_id,
+            category_id,
+            category_source,
+            category_confirmed,
+            ai_confidence,
+            created_at,
+            updated_at,
+        ): (
+            i64,
+            Option<i64>,
+            Option<String>,
+            i32,
+            Option<f64>,
+            String,
+            String,
+        ) = store
+            .conn
+            .query_row(
+                "SELECT transaction_id, category_id, category_source,
+                        category_confirmed, ai_confidence, created_at, updated_at
+                 FROM transaction_enrichments
+                 WHERE id = ?",
+                [enrichment.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(enrichment.transaction_id, transaction_id);
+        assert_eq!(enrichment.category_id, category_id);
+        assert_eq!(
+            enrichment.category_source,
+            category_source.and_then(|source| source.parse().ok())
+        );
+        assert_eq!(enrichment.category_confirmed, category_confirmed != 0);
+        assert_eq!(enrichment.ai_confidence, ai_confidence);
+        assert_eq!(enrichment.created_at, parse_datetime(&created_at).unwrap());
+        assert_eq!(enrichment.updated_at, parse_datetime(&updated_at).unwrap());
+    }
+
+    fn assert_category_matches_db(store: &TransactionStore, category: &Category) {
+        let (path, created_at): (String, String) = store
+            .conn
+            .query_row(
+                "SELECT path, created_at FROM categories WHERE id = ?",
+                [category.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(category.path, path);
+        assert_eq!(category.created_at, parse_datetime(&created_at).unwrap());
+    }
+
+    fn assert_transfer_matches_db(store: &TransactionStore, transfer: &Transfer) {
+        let (
+            from_transaction_id,
+            to_transaction_id,
+            source,
+            confirmed,
+            ai_confidence,
+            created_at,
+        ): (i64, i64, String, i32, Option<f64>, String) = store
+            .conn
+            .query_row(
+                "SELECT from_transaction_id, to_transaction_id, source, confirmed,
+                        ai_confidence, created_at
+                 FROM transfers
+                 WHERE id = ?",
+                [transfer.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(transfer.from_transaction_id, from_transaction_id);
+        assert_eq!(transfer.to_transaction_id, to_transaction_id);
+        assert_eq!(transfer.source, source.parse().unwrap());
+        assert_eq!(transfer.confirmed, confirmed != 0);
+        assert_eq!(transfer.ai_confidence, ai_confidence);
+        assert_eq!(transfer.created_at, parse_datetime(&created_at).unwrap());
     }
 
     fn setup_test_exports() -> TempDir {
@@ -2299,6 +2472,58 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
         assert_eq!(txs[0].description, "Grocery Store");
     }
 
+    #[test]
+    fn transaction_query_methods_parse_full_transaction_payloads() {
+        let (_t, store) = setup_rich_fixture();
+        annotate_transaction(
+            &store,
+            "Interest",
+            r#"{"note":"savings","tags":["fy24","interest"],"cleared":true}"#,
+            "fixtures/interest.json",
+            "interest-fixture-hash",
+        );
+        annotate_transaction(
+            &store,
+            "Coffee Bean",
+            r#"{"merchant":{"name":"Coffee Bean"},"score":0.85}"#,
+            "fixtures/coffee-bean.json",
+            "coffee-bean-fixture-hash",
+        );
+
+        let all = store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        let interest = all
+            .iter()
+            .find(|tx| tx.description == "Interest")
+            .expect("fixture has Interest");
+        assert_transaction_matches_db(&store, interest);
+        assert_eq!(
+            interest.metadata.get("note"),
+            Some(&serde_json::json!("savings"))
+        );
+
+        let uncategorised = store
+            .get_uncategorised_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        assert_eq!(uncategorised.len(), 1);
+        assert_transaction_matches_db(&store, &uncategorised[0]);
+        assert_eq!(uncategorised[0].description, "Interest");
+
+        let unconfirmed = store
+            .get_unconfirmed_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        let coffee_bean = unconfirmed
+            .iter()
+            .find(|tx| tx.description == "Coffee Bean")
+            .expect("fixture has Coffee Bean");
+        assert_transaction_matches_db(&store, coffee_bean);
+        assert_eq!(
+            coffee_bean.metadata.get("merchant"),
+            Some(&serde_json::json!({"name": "Coffee Bean"}))
+        );
+    }
+
     // ----- get_uncategorised_transactions -----
 
     #[test]
@@ -2389,6 +2614,41 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
         assert!(pending.is_empty());
     }
 
+    #[test]
+    fn pending_ai_reviews_parse_transaction_enrichment_and_category() {
+        let (_t, store) = setup_rich_fixture();
+        annotate_transaction(
+            &store,
+            "Coffee Bean",
+            r#"{"merchant":{"name":"Coffee Bean"},"review":true}"#,
+            "fixtures/ai-review.json",
+            "ai-review-fixture-hash",
+        );
+
+        let pending = store
+            .get_pending_ai_reviews(&ParsedQuery::empty(), None)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let row = &pending[0];
+        assert_transaction_matches_db(&store, &row.transaction);
+
+        let enrichment = row
+            .enrichment
+            .as_ref()
+            .expect("pending review has enrichment");
+        assert_enrichment_matches_db(&store, enrichment);
+        assert_eq!(enrichment.transaction_id, row.transaction.id);
+        assert_eq!(enrichment.category_source, Some(CategorySource::Ai));
+        assert!(!enrichment.category_confirmed);
+        assert_eq!(enrichment.ai_confidence, Some(0.85));
+
+        let category = row.category.as_ref().expect("pending review has category");
+        assert_category_matches_db(&store, category);
+        assert_eq!(enrichment.category_id, Some(category.id));
+        assert_eq!(category.path, "Food/Coffee");
+    }
+
     // ----- transfer queries -----
 
     #[test]
@@ -2449,6 +2709,50 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
             .unwrap();
         assert_eq!(xfers.len(), 1);
         assert_eq!(xfers[0].to_transaction.description, "Transfer In");
+    }
+
+    #[test]
+    fn transfers_with_transactions_parse_transfer_and_endpoint_payloads() {
+        let (_t, store) = setup_rich_fixture();
+        annotate_transaction(
+            &store,
+            "Transfer Out",
+            r#"{"side":"from","reference":"xfer-001"}"#,
+            "fixtures/transfer-out.json",
+            "transfer-out-fixture-hash",
+        );
+        annotate_transaction(
+            &store,
+            "Transfer In",
+            r#"{"side":"to","reference":"xfer-001"}"#,
+            "fixtures/transfer-in.json",
+            "transfer-in-fixture-hash",
+        );
+
+        let xfers = store
+            .list_transfers_with_transactions(true, &ParsedQuery::empty(), None)
+            .unwrap();
+        assert_eq!(xfers.len(), 1);
+
+        let transfer = &xfers[0].transfer;
+        assert_transfer_matches_db(&store, transfer);
+        assert_eq!(transfer.source, TransferSource::Manual);
+        assert!(transfer.confirmed);
+        assert_eq!(transfer.ai_confidence, None);
+
+        let from = &xfers[0].from_transaction;
+        assert_transaction_matches_db(&store, from);
+        assert_eq!(from.id, transfer.from_transaction_id);
+        assert_eq!(from.description, "Transfer Out");
+        assert_eq!(from.amount_cents, -10000);
+        assert_eq!(from.metadata.get("side"), Some(&serde_json::json!("from")));
+
+        let to = &xfers[0].to_transaction;
+        assert_transaction_matches_db(&store, to);
+        assert_eq!(to.id, transfer.to_transaction_id);
+        assert_eq!(to.description, "Transfer In");
+        assert_eq!(to.amount_cents, 10000);
+        assert_eq!(to.metadata.get("side"), Some(&serde_json::json!("to")));
     }
 
     #[test]

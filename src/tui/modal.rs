@@ -68,6 +68,20 @@ impl Modal<'_> {
 /// shared spacing to land exactly.
 pub const MODAL_CHROME_HEIGHT: u16 = 6;
 
+pub fn hint_line(hints: &[(&str, &str)]) -> Line<'static> {
+    let spans = hints
+        .iter()
+        .flat_map(|(key, desc)| {
+            [
+                Span::raw("  "),
+                Span::styled((*key).to_string(), Style::default().fg(Color::Cyan)),
+                Span::styled(format!(" {desc}"), Style::default().fg(Color::DarkGray)),
+            ]
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,18 +136,4 @@ mod tests {
         assert!(rows[5].contains("confirm") && rows[5].contains("cancel"));
         assert!(rows[6].contains('└'));
     }
-}
-
-pub fn hint_line(hints: &[(&str, &str)]) -> Line<'static> {
-    let spans = hints
-        .iter()
-        .flat_map(|(key, desc)| {
-            [
-                Span::raw("  "),
-                Span::styled((*key).to_string(), Style::default().fg(Color::Cyan)),
-                Span::styled(format!(" {desc}"), Style::default().fg(Color::DarkGray)),
-            ]
-        })
-        .collect::<Vec<_>>();
-    Line::from(spans)
 }
