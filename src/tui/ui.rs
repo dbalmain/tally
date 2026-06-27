@@ -6,13 +6,15 @@ use ratatui::{
     widgets::{Block, Cell, Clear, Paragraph, Row, Tabs},
 };
 
-use crate::{FilterOverride, Transaction, TransactionWithEnrichment, TransferWithTransactions};
+use crate::{
+    FilterOverride, Transaction, TransactionWithEnrichment, Transfer, TransferWithTransactions,
+};
 
 use super::app::{App, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
 use super::modal::{MODAL_CHROME_HEIGHT, Modal, hint_line};
 use super::search_bar::SearchBar;
-use super::table::{ScrollTable, aligned_table, calculate_scroll_offset};
+use super::table::{COLUMN_SPACING, ScrollTable, aligned_table, calculate_scroll_offset};
 
 const DETAILS_HEIGHT: u16 = 8;
 
@@ -64,6 +66,53 @@ const APPLY_FILTERS_COLS: [Constraint; 4] = [
     Constraint::Min(18),
     Constraint::Length(12),
 ];
+
+fn amount_color(cents: i64) -> Color {
+    if cents < 0 { Color::Red } else { Color::Green }
+}
+
+fn row_bg(selected: bool) -> Color {
+    if selected {
+        Color::DarkGray
+    } else {
+        Color::Reset
+    }
+}
+
+fn bank_account(app: &App, bank_id: i64, account_id: i64, separator: &str) -> String {
+    format!(
+        "{}{}{}",
+        app.bank_name(bank_id),
+        separator,
+        app.account_name(account_id)
+    )
+}
+
+fn account_label(app: &App, tx: &Transaction) -> String {
+    bank_account(app, tx.bank_id, tx.account_id, " / ")
+}
+
+fn compact_account_label(app: &App, tx: &Transaction) -> String {
+    bank_account(app, tx.bank_id, tx.account_id, "/")
+}
+
+fn transfer_counterpart_id(transfer: &Transfer, tx_id: i64) -> (&'static str, i64) {
+    if transfer.from_transaction_id == tx_id {
+        ("to", transfer.to_transaction_id)
+    } else {
+        ("from", transfer.from_transaction_id)
+    }
+}
+
+fn transfer_counterpart(app: &App, tx: &Transaction) -> Option<(&'static str, String)> {
+    let transfer = app.get_cached_transfer(tx.id)?;
+    let (label, other_id) = transfer_counterpart_id(transfer, tx.id);
+    let account = app
+        .get_cached_transaction(other_id)
+        .map(|other| compact_account_label(app, other))
+        .unwrap_or_default();
+    Some((label, account))
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     if app.filter_edit_visible() {
@@ -314,28 +363,15 @@ fn draw_filter_edit_preview(f: &mut Frame, app: &App, area: Rect) {
 
     let selected = app.filter_edit_preview_scroll();
     ScrollTable::new(preview, selected, &FILTER_EDIT_PREVIEW_COLS).render(f, area, |i, tx| {
-        let bg = if i == selected {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
-        let amount_color = if tx.amount_cents < 0 {
-            Color::Red
-        } else {
-            Color::Green
-        };
-        let account = format!(
-            "{} / {}",
-            app.bank_name(tx.bank_id),
-            app.account_name(tx.account_id)
-        );
+        let bg = row_bg(i == selected);
+        let account = account_label(app, tx);
 
         Row::new(vec![
             Cell::from(tx.date.to_string()),
             Cell::from(tx.description.as_str()),
             Cell::from(account).style(Style::default().fg(Color::DarkGray)),
             Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(amount_color)),
+                .style(Style::default().fg(amount_color(tx.amount_cents))),
             Cell::from(Line::from(format_cents(tx.balance_cents)).alignment(Alignment::Right)),
         ])
         .style(Style::default().bg(bg))
@@ -399,11 +435,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
         })
         .render(f, area, |i, twt| {
             let is_selected = i == app.selected_index;
-            let bg = if is_selected {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
+            let bg = row_bg(is_selected);
 
             let from = &twt.from_transaction;
             let to = &twt.to_transaction;
@@ -546,8 +578,6 @@ fn plan_transaction_columns(width: u16) -> Vec<(TxColumn, u16)> {
         .collect()
 }
 
-const COLUMN_SPACING: u16 = 1;
-
 fn draw_transaction_table(
     f: &mut Frame,
     app: &App,
@@ -589,10 +619,8 @@ fn draw_transaction_table(
             Color::Blue
         } else if is_selected && app.input_mode == InputMode::TransferPending {
             Color::Green
-        } else if is_selected {
-            Color::DarkGray
         } else {
-            Color::Reset
+            row_bg(is_selected)
         };
 
         let fg = if is_disabled {
@@ -601,12 +629,10 @@ fn draw_transaction_table(
             Color::Reset
         };
 
-        let amount_color = if is_disabled {
+        let amount_fg = if is_disabled {
             Color::DarkGray
-        } else if tx.amount_cents < 0 {
-            Color::Red
         } else {
-            Color::Green
+            amount_color(tx.amount_cents)
         };
 
         let cells = cols
@@ -621,11 +647,7 @@ fn draw_transaction_table(
                         Cell::from(tx.description.clone()).style(Style::default().fg(fg))
                     }
                     TxColumn::Account => {
-                        let account = format!(
-                            "{}/{}",
-                            app.bank_name(tx.bank_id),
-                            app.account_name(tx.account_id)
-                        );
+                        let account = compact_account_label(app, tx);
                         // The account is contextual, so dim it whether or not
                         // the row is disabled.
                         Cell::from(fit_path(&account, w))
@@ -641,7 +663,7 @@ fn draw_transaction_table(
                     TxColumn::Amount => Cell::from(
                         Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right),
                     )
-                    .style(Style::default().fg(amount_color)),
+                    .style(Style::default().fg(amount_fg)),
                     TxColumn::Balance => Cell::from(
                         Line::from(format_cents(tx.balance_cents)).alignment(Alignment::Right),
                     )
@@ -660,22 +682,7 @@ fn draw_transaction_table(
 /// to `width` via [`fit_path`]; for transfers the `to:`/`from:` label is kept
 /// intact and only the account portion is abbreviated.
 fn category_cell_text(app: &App, tx: &Transaction, width: usize) -> Option<(String, Color)> {
-    if let Some(transfer) = app.get_cached_transfer(tx.id) {
-        let (label, other_id) = if transfer.from_transaction_id == tx.id {
-            ("to", transfer.to_transaction_id)
-        } else {
-            ("from", transfer.from_transaction_id)
-        };
-        let account = app
-            .get_cached_transaction(other_id)
-            .map(|other| {
-                format!(
-                    "{}/{}",
-                    app.bank_name(other.bank_id),
-                    app.account_name(other.account_id)
-                )
-            })
-            .unwrap_or_default();
+    if let Some((label, account)) = transfer_counterpart(app, tx) {
         let prefix = label.len() + 1; // "to:" / "from:"
         let account = fit_path(&account, width.saturating_sub(prefix));
         Some((format!("{label}:{account}"), Color::Cyan))
@@ -737,35 +744,16 @@ fn transaction_detail_pairs(app: &App, tx: &Transaction) -> Vec<(String, String)
     let mut pairs = vec![
         ("ID".to_string(), tx.id.to_string()),
         ("Date".to_string(), tx.date.to_string()),
-        (
-            "Account".to_string(),
-            format!(
-                "{}/{}",
-                app.bank_name(tx.bank_id),
-                app.account_name(tx.account_id)
-            ),
-        ),
+        ("Account".to_string(), compact_account_label(app, tx)),
         ("Description".to_string(), tx.description.clone()),
         ("Amount".to_string(), format_cents(tx.amount_cents)),
         ("Balance".to_string(), format_cents(tx.balance_cents)),
     ];
 
     // The transaction is either part of a transfer or categorised, never both.
-    if let Some(transfer) = app.get_cached_transfer(tx.id) {
-        let (label, other_id) = if transfer.from_transaction_id == tx.id {
-            ("to", transfer.to_transaction_id)
-        } else {
-            ("from", transfer.from_transaction_id)
-        };
-        if let Some(other) = app.get_cached_transaction(other_id) {
-            pairs.push((
-                "Transfer".to_string(),
-                format!(
-                    "{label} {}/{}",
-                    app.bank_name(other.bank_id),
-                    app.account_name(other.account_id)
-                ),
-            ));
+    if let Some((label, account)) = transfer_counterpart(app, tx) {
+        if !account.is_empty() {
+            pairs.push(("Transfer".to_string(), format!("{label} {account}")));
         }
     } else if let Some(category) = app.get_cached_category(tx.id).filter(|c| !c.is_empty()) {
         pairs.push(("Category".to_string(), category.to_string()));
@@ -884,11 +872,7 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
     })
     .render(f, area, |i, review| {
         let is_selected = i == app.selected_index;
-        let bg = if is_selected {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
+        let bg = row_bg(is_selected);
 
         let tx = &review.transaction;
         let category_path = review
@@ -903,17 +887,11 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
             .map(format_confidence_percent)
             .unwrap_or_default();
 
-        let amount_color = if tx.amount_cents < 0 {
-            Color::Red
-        } else {
-            Color::Green
-        };
-
         Row::new(vec![
             Cell::from(tx.date.to_string()),
             Cell::from(tx.description.as_str()),
             Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(amount_color)),
+                .style(Style::default().fg(amount_color(tx.amount_cents))),
             Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
             Cell::from(confidence).style(Style::default().fg(Color::Cyan)),
         ])
@@ -934,12 +912,7 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
             draw_pending_transfer_details(f, app, transfer, area);
         })
         .render(f, area, |i, transfer| {
-            let is_selected = i == app.selected_index;
-            let bg = if is_selected {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
+            let bg = row_bg(i == app.selected_index);
 
             let from = app.get_cached_transaction(transfer.from_transaction_id);
             let to = app.get_cached_transaction(transfer.to_transaction_id);
@@ -988,10 +961,11 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
     )
     .render(f, area, |i, cat| {
         let is_selected = i == app.selected_index;
-        let (bg, count_fg) = if is_selected {
-            (Color::DarkGray, Color::Gray)
+        let bg = row_bg(is_selected);
+        let count_fg = if is_selected {
+            Color::Gray
         } else {
-            (Color::Reset, Color::DarkGray)
+            Color::DarkGray
         };
 
         let tx_count = app.category_transaction_count(cat.id);
@@ -1014,11 +988,7 @@ fn draw_filters(f: &mut Frame, app: &App, area: Rect) {
     }
 
     ScrollTable::new(&filters, app.selected_index, &FILTER_COLS).render(f, area, |i, filter| {
-        let bg = if i == app.selected_index {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
+        let bg = row_bg(i == app.selected_index);
 
         let category = filter
             .category_id
@@ -1070,7 +1040,7 @@ fn draw_keybind_popup(f: &mut Frame, app: &App) {
         .saturating_add(MODAL_CHROME_HEIGHT)
         .max(8);
     let height = desired_height.min(screen.height.saturating_sub(2).max(1));
-    let area = centered_rect_size(width, height, screen);
+    let area = center(width, height, screen);
     let hints = [("Esc/Enter", "close"), ("Alt-?", "toggle bar")];
     let body = Modal {
         title: "Keybinds",
@@ -1112,7 +1082,8 @@ fn help_line(line: HelpLine) -> Line<'static> {
 
 fn draw_text_prompt_popup(f: &mut Frame, app: &App) {
     // One input line plus the shared modal chrome.
-    let area = centered_rect_fixed_height(50, MODAL_CHROME_HEIGHT + 1, f.area());
+    let screen = f.area();
+    let area = center(screen.width * 50 / 100, MODAL_CHROME_HEIGHT + 1, screen);
     let hints = keymap::footer_hints(app);
     let body = Modal {
         title: app.text_prompt_title(),
@@ -1148,7 +1119,8 @@ fn draw_confirm_popup(f: &mut Frame, app: &App) {
 }
 
 fn draw_category_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect(50, 60, f.area());
+    let screen = f.area();
+    let area = center(screen.width * 50 / 100, screen.height * 60 / 100, screen);
     let hints = keymap::footer_hints(app);
     let body = Modal {
         title: "Category",
@@ -1170,11 +1142,7 @@ fn draw_category_popup(f: &mut Frame, app: &App) {
         .take(chunks[1].height as usize)
         .map(|(i, cat)| {
             let selected = i == app.category_selected;
-            let bg = if selected {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
+            let bg = row_bg(selected);
             if cat.id == 0 {
                 // The synthetic "what you typed" entry: a new category.
                 Line::from(vec![
@@ -1197,7 +1165,8 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
         return;
     };
 
-    let area = centered_rect(60, 70, f.area());
+    let screen = f.area();
+    let area = center(screen.width * 60 / 100, screen.height * 70 / 100, screen);
 
     let selected = state.rows.iter().filter(|row| row.selected).count();
     let title = format!(
@@ -1225,16 +1194,7 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
         ],
     )
     .render(f, body, |i, row| {
-        let bg = if i == state.cursor {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
-        let amount_color = if row.tx.amount_cents < 0 {
-            Color::Red
-        } else {
-            Color::Green
-        };
+        let bg = row_bg(i == state.cursor);
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
         let checkbox_color = if row.selected {
             Color::Green
@@ -1247,7 +1207,7 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
             Cell::from(row.tx.date.to_string()),
             Cell::from(row.tx.description.as_str()),
             Cell::from(Line::from(format_cents(row.tx.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(amount_color)),
+                .style(Style::default().fg(amount_color(row.tx.amount_cents))),
             Cell::from(format_confidence_percent(f64::from(row.score)))
                 .style(Style::default().fg(Color::Cyan)),
         ])
@@ -1256,7 +1216,8 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
 }
 
 fn draw_apply_filters_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 70, f.area());
+    let screen = f.area();
+    let area = center(screen.width * 60 / 100, screen.height * 70 / 100, screen);
     let rows = app.apply_filters_preview_rows();
     let title = format!("Apply filters ({} to update)", rows.len());
     let hints = keymap::footer_hints(app);
@@ -1274,28 +1235,15 @@ fn draw_apply_filters_popup(f: &mut Frame, app: &App) {
 
     let selected = app.apply_filters_preview_scroll();
     ScrollTable::new(rows, selected, &APPLY_FILTERS_COLS).render(f, body, |i, tx| {
-        let bg = if i == selected {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
-        let amount_color = if tx.amount_cents < 0 {
-            Color::Red
-        } else {
-            Color::Green
-        };
-        let account = format!(
-            "{} / {}",
-            app.bank_name(tx.bank_id),
-            app.account_name(tx.account_id)
-        );
+        let bg = row_bg(i == selected);
+        let account = account_label(app, tx);
 
         Row::new(vec![
             Cell::from(tx.date.to_string()),
             Cell::from(tx.description.as_str()),
             Cell::from(account).style(Style::default().fg(Color::DarkGray)),
             Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(amount_color)),
+                .style(Style::default().fg(amount_color(tx.amount_cents))),
         ])
         .style(Style::default().bg(bg))
     });
@@ -1389,23 +1337,7 @@ fn draw_error_popup(f: &mut Frame, msg: &str) {
     f.render_widget(paragraph, body);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_width = r.width * percent_x / 100;
-    let popup_height = r.height * percent_y / 100;
-    let x = (r.width - popup_width) / 2;
-    let y = (r.height - popup_height) / 2;
-    Rect::new(r.x + x, r.y + y, popup_width, popup_height)
-}
-
-fn centered_rect_fixed_height(percent_x: u16, height: u16, r: Rect) -> Rect {
-    let popup_width = r.width * percent_x / 100;
-    let popup_height = height.min(r.height);
-    let x = (r.width - popup_width) / 2;
-    let y = (r.height - popup_height) / 2;
-    Rect::new(r.x + x, r.y + y, popup_width, popup_height)
-}
-
-fn centered_rect_size(width: u16, height: u16, r: Rect) -> Rect {
+fn center(width: u16, height: u16, r: Rect) -> Rect {
     let popup_width = width.min(r.width);
     let popup_height = height.min(r.height);
     let x = (r.width - popup_width) / 2;
@@ -1437,7 +1369,7 @@ fn message_modal(
     let body_width = width.saturating_sub(4).max(1) as usize;
     let lines = count_wrapped_lines(message, body_width) as u16;
     let height = lines.saturating_add(MODAL_CHROME_HEIGHT).min(screen.height);
-    let area = centered_rect_size(width, height, screen);
+    let area = center(width, height, screen);
     Modal {
         title,
         hints,
@@ -1493,16 +1425,8 @@ fn draw_transfer_pair(
     widths: &[Constraint],
     area: Rect,
 ) {
-    let from_account = format!(
-        "{} / {}",
-        app.bank_name(from.bank_id),
-        app.account_name(from.account_id)
-    );
-    let to_account = format!(
-        "{} / {}",
-        app.bank_name(to.bank_id),
-        app.account_name(to.account_id)
-    );
+    let from_account = account_label(app, from);
+    let to_account = account_label(app, to);
 
     // Empty cells in the date/amount columns push each account under its
     // description column (indices 1 and 4) and the source glyph under the
@@ -1527,14 +1451,7 @@ fn draw_ai_review_details(
     area: Rect,
 ) {
     let tx = &review.transaction;
-    let bank_name = app.bank_name(tx.bank_id);
-    let account_name = app.account_name(tx.account_id);
-
-    let amount_style = if tx.amount_cents < 0 {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default().fg(Color::Green)
-    };
+    let amount_style = Style::default().fg(amount_color(tx.amount_cents));
 
     let category_path = review
         .category
@@ -1563,7 +1480,7 @@ fn draw_ai_review_details(
         ]),
         Line::from(vec![
             Span::styled("Account: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(format!("{} / {}", bank_name, account_name)),
+            Span::raw(account_label(app, tx)),
         ]),
         Line::from(vec![
             Span::styled("Description: ", Style::default().fg(Color::DarkGray)),
@@ -1615,7 +1532,51 @@ fn draw_pending_transfer_details(f: &mut Frame, app: &App, transfer: &crate::Tra
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use tempfile::TempDir;
+
+    use crate::search::ParsedQuery;
+    use crate::{TransactionStore, TransferSource};
+
     use super::*;
+
+    #[test]
+    fn amount_color_uses_current_signed_threshold() {
+        assert_eq!(amount_color(-1), Color::Red);
+        assert_eq!(amount_color(0), Color::Green);
+        assert_eq!(amount_color(1), Color::Green);
+    }
+
+    #[test]
+    fn row_bg_matches_selected_row_colors() {
+        assert_eq!(row_bg(true), Color::DarkGray);
+        assert_eq!(row_bg(false), Color::Reset);
+    }
+
+    #[test]
+    fn center_clamps_to_screen_and_centers() {
+        let screen = Rect::new(10, 20, 100, 40);
+        assert_eq!(center(50, 10, screen), Rect::new(35, 35, 50, 10));
+
+        let small = Rect::new(5, 7, 30, 10);
+        assert_eq!(center(80, 20, small), Rect::new(5, 7, 30, 10));
+    }
+
+    #[test]
+    fn transfer_counterpart_uses_cached_counterpart_account() {
+        let (_temp, app, from, to) = app_with_transfer();
+
+        assert_eq!(
+            transfer_counterpart(&app, &from),
+            Some(("to", "TestBank/Savings".to_string()))
+        );
+        assert_eq!(
+            transfer_counterpart(&app, &to),
+            Some(("from", "TestBank/Checking".to_string()))
+        );
+    }
 
     #[test]
     fn abbreviate_path_shortens_long_segments_only() {
@@ -1703,5 +1664,71 @@ mod tests {
                 "columns total {total} exceed width {width}: {cols:?}"
             );
         }
+    }
+
+    fn app_with_transfer() -> (TempDir, App, Transaction, Transaction) {
+        let temp = TempDir::new().unwrap();
+        write_import_account(
+            temp.path(),
+            "Checking",
+            "Transfer out",
+            -10000,
+            "fixture-from",
+        );
+        write_import_account(temp.path(), "Savings", "Transfer in", 10000, "fixture-to");
+
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+        let from = tx_by_description(&store, "Transfer out");
+        let to = tx_by_description(&store, "Transfer in");
+        store
+            .create_transfer(from.id, to.id, TransferSource::Manual, true, None)
+            .unwrap();
+
+        let app = App::new(store).unwrap();
+        (temp, app, from, to)
+    }
+
+    fn write_import_account(
+        root: &Path,
+        account: &str,
+        description: &str,
+        amount_cents: i64,
+        hash: &str,
+    ) {
+        let account_dir = root.join("TestBank").join(account);
+        fs::create_dir_all(&account_dir).unwrap();
+        fs::write(account_dir.join("transactions.csv"), "fixture\n").unwrap();
+
+        let payload = format!(
+            r#"[{{"date":"2025-01-01","description":"{description}","amount_cents":{amount_cents},"balance_cents":50000,"hash":"{hash}"}}]"#
+        );
+        let import_script = account_dir.join("import");
+        fs::write(
+            &import_script,
+            format!("#!/usr/bin/env bash\ncat <<'JSON'\n{payload}\nJSON\n"),
+        )
+        .unwrap();
+        make_executable(&import_script);
+    }
+
+    fn tx_by_description(store: &TransactionStore, description: &str) -> Transaction {
+        store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap()
+            .into_iter()
+            .find(|tx| tx.description == description)
+            .unwrap_or_else(|| panic!("missing transaction {description:?}"))
+    }
+
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        #[cfg(not(unix))]
+        let _ = path;
     }
 }

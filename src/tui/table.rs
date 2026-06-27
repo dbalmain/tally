@@ -14,7 +14,7 @@ use ratatui::{
     widgets::{Row, Table},
 };
 
-const COLUMN_SPACING: u16 = 1;
+pub(crate) const COLUMN_SPACING: u16 = 1;
 const TABLE_FLEX: Flex = Flex::Start;
 
 type DetailRenderer<'a, T> = Box<dyn FnMut(&mut Frame, &T, Rect) + 'a>;
