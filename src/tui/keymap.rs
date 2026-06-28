@@ -49,6 +49,8 @@ pub enum Act {
     FuzzySearch,
     Categorise,
     RenameCategory,
+    ViewCategoryTransactions,
+    ManageCategoryTransactions,
     DeleteCategory,
     CreateFilter,
     ApplyFilters,
@@ -65,6 +67,7 @@ pub enum Act {
     Confirm,
     ClearSearch,
     ToggleDetails,
+    Classify,
 }
 
 #[derive(Debug)]
@@ -239,7 +242,24 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     }
 
     if app.selected_category().is_some() {
-        out.push(b(&[Char('e')], "e", "rename", true, true, RenameCategory));
+        out.push(b(&[Char('r')], "r", "rename", true, true, RenameCategory));
+        out.push(bh(
+            &[Char('v')],
+            "v",
+            "view txns?",
+            "view transactions?",
+            true,
+            true,
+            ViewCategoryTransactions,
+        ));
+        out.push(b(
+            &[Char('m')],
+            "m",
+            "manage",
+            true,
+            true,
+            ManageCategoryTransactions,
+        ));
         out.push(b(
             &[Char('d'), Code(KeyCode::Delete)],
             "d",
@@ -336,6 +356,10 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
             true,
             ToggleDetails,
         ));
+    }
+
+    if app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::Uncategorised {
+        out.push(b(&[Char('C')], "C", "classify", true, true, Classify));
     }
 
     if app.current_tab == Tab::Transfers
@@ -506,6 +530,8 @@ fn run_normal(app: &mut App, act: Act) {
         Act::FuzzySearch => app.start_fuzzy_search(),
         Act::Categorise => app.start_category_edit(),
         Act::RenameCategory => app.start_category_rename(),
+        Act::ViewCategoryTransactions => app.toggle_category_transactions(),
+        Act::ManageCategoryTransactions => app.manage_category_transactions(),
         Act::DeleteCategory => app.start_category_delete(),
         Act::CreateFilter => app.start_filter_create(),
         Act::ApplyFilters => app.apply_filter_categories(),
@@ -525,6 +551,7 @@ fn run_normal(app: &mut App, act: Act) {
         }
         Act::ClearSearch => app.clear_search(),
         Act::ToggleDetails => app.toggle_view_details(),
+        Act::Classify => app.request_classify(),
     }
 }
 
@@ -780,7 +807,17 @@ mod tests {
         assert!(has_act_trigger(
             &binds,
             Act::RenameCategory,
-            Trigger::Char('e')
+            Trigger::Char('r')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::ViewCategoryTransactions,
+            Trigger::Char('v')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::ManageCategoryTransactions,
+            Trigger::Char('m')
         ));
         assert!(has_act_trigger(
             &binds,
@@ -833,6 +870,24 @@ mod tests {
 
         app.lists.transfer_reviews = FilteredList::default();
         assert!(!has_act(&normal_binds(&app), Act::Confirm));
+    }
+
+    #[test]
+    fn classify_bind_is_scoped_to_uncategorised_subtab() {
+        let mut app = app_with_rows();
+        app.current_tab = Tab::Todo;
+        app.todo_subtab = TodoSubTab::Uncategorised;
+        assert!(has_act_trigger(
+            &normal_binds(&app),
+            Act::Classify,
+            Trigger::Char('C')
+        ));
+
+        app.todo_subtab = TodoSubTab::AiReview;
+        assert!(!has_act(&normal_binds(&app), Act::Classify));
+
+        app.current_tab = Tab::Transactions;
+        assert!(!has_act(&normal_binds(&app), Act::Classify));
     }
 
     #[test]

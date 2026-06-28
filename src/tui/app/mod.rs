@@ -146,6 +146,11 @@ pub struct App {
     /// Whether the transaction view shows the inline detail panel (full
     /// description, source file, and metadata) for the selected row.
     pub view_details: bool,
+    /// Whether the Categories tab shows the side panel listing the selected
+    /// category's transactions.
+    pub show_category_transactions: bool,
+    /// Transactions backing that side panel (the selected category's rows).
+    pub category_transactions: Vec<Transaction>,
     // Category popup state
     pub category_input: String,
     pub category_suggestions: Vec<Category>,
@@ -171,6 +176,12 @@ pub struct App {
     // Confirmation popup state
     pub confirm_message: Option<String>,
     pub confirm_action: Option<ConfirmAction>,
+    // Local classification run: `classify_requested` is set on keypress so the
+    // event loop can draw the `classifying` loading modal before the blocking
+    // run; `classify_report` holds the summary modal shown when it finishes.
+    pub classifying: bool,
+    pub classify_requested: bool,
+    pub classify_report: Option<crate::classify::ClassifyReport>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
 }
@@ -234,6 +245,8 @@ impl App {
             keybind_help_open: false,
             hints_visible: true,
             view_details: false,
+            show_category_transactions: false,
+            category_transactions: Vec::new(),
             category_input: String::new(),
             category_suggestions: Vec::new(),
             category_selected: 0,
@@ -253,6 +266,9 @@ impl App {
             filter_edit: None,
             confirm_message: None,
             confirm_action: None,
+            classifying: false,
+            classify_requested: false,
+            classify_report: None,
             tab_search_state: HashMap::new(),
         };
         app.rebuild_tx_caches();
@@ -539,6 +555,7 @@ impl App {
                 self.selected_index = next_wrapping(self.selected_index, len);
             }
         }
+        self.reload_category_transactions();
     }
 
     pub fn previous(&mut self) {
@@ -564,6 +581,7 @@ impl App {
                 self.selected_index = prev_wrapping(self.selected_index, len);
             }
         }
+        self.reload_category_transactions();
     }
 
     fn list_len(&self) -> usize {
@@ -623,6 +641,7 @@ impl App {
         self.rebuild_tx_caches();
         self.apply_fuzzy_filter();
         self.clamp_selection();
+        self.reload_category_transactions();
     }
 
     /// Apply fuzzy filter on top of loaded data for current tab only
@@ -1203,6 +1222,56 @@ mod tests {
 
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.store.list_filters().unwrap().is_empty());
+    }
+
+    #[test]
+    fn toggle_category_transactions_loads_and_clears() {
+        let (_temp, mut store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let tx = tx_by_description(&store, "Coffee");
+        let category_id = store.get_or_create_category("Food").unwrap();
+        store
+            .set_category(tx.id, category_id, CategorySource::Manual, true, None)
+            .unwrap();
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Categories;
+        app.refresh_data();
+        app.move_cursor_to_category("Food");
+
+        app.toggle_category_transactions();
+        assert!(app.show_category_transactions);
+        assert_eq!(app.category_transactions.len(), 1);
+        assert_eq!(app.category_transactions[0].id, tx.id);
+
+        app.toggle_category_transactions();
+        assert!(!app.show_category_transactions);
+        assert!(app.category_transactions.is_empty());
+    }
+
+    #[test]
+    fn manage_category_transactions_switches_to_filtered_transactions() {
+        let (_temp, mut store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let tx = tx_by_description(&store, "Coffee");
+        let category_id = store.get_or_create_category("Food").unwrap();
+        store
+            .set_category(tx.id, category_id, CategorySource::Manual, true, None)
+            .unwrap();
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Categories;
+        app.refresh_data();
+        app.move_cursor_to_category("Food");
+
+        app.manage_category_transactions();
+
+        assert_eq!(app.current_tab, Tab::Transactions);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.db_search_active());
+        assert_eq!(app.db_search_value(), "category:Food");
     }
 
     fn cancel_current_confirmation(app: &mut App) {

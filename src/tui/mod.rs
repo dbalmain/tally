@@ -173,10 +173,25 @@ fn run_app(
 
         terminal.draw(|f| ui::draw(f, app))?;
 
+        // The draw above shows the loading modal (`classifying` is set); run the
+        // blocking pipeline now, then loop to draw the result modal.
+        if app.classify_requested {
+            app.classify_requested = false;
+            app.run_classification();
+            continue;
+        }
+
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
         {
             if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            if app.classify_report.is_some() {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                    app.dismiss_classify_report();
+                }
                 continue;
             }
 

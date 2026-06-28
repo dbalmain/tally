@@ -12,6 +12,34 @@ use super::{
 const BULK_APPLY_MATCH_LIMIT: usize = 200;
 
 impl App {
+    // ==================== Auto Classification ====================
+
+    /// Flag a classification run. The blocking work happens in the event loop
+    /// (`run_classification`) once the loading modal has been drawn, so the
+    /// user sees feedback before the UI freezes for the run's duration.
+    pub fn request_classify(&mut self) {
+        self.classifying = true;
+        self.classify_requested = true;
+    }
+
+    /// Run the local classification pipeline, refresh the lists, then surface a
+    /// summary modal (or an error popup on failure). `refresh_data` runs before
+    /// the report is stored because a successful tab reload clears
+    /// `error_message`.
+    pub fn run_classification(&mut self) {
+        let result = crate::classify::classify(&mut self.store);
+        self.classifying = false;
+        self.refresh_data();
+        match result {
+            Ok(report) => self.classify_report = Some(report),
+            Err(e) => self.error_message = Some(format!("Failed to classify: {e}")),
+        }
+    }
+
+    pub fn dismiss_classify_report(&mut self) {
+        self.classify_report = None;
+    }
+
     // ==================== Category Popup ====================
 
     pub fn start_category_edit(&mut self) {
@@ -472,6 +500,7 @@ impl App {
         self.rebuild_category_counts();
         self.apply_fuzzy_filter();
         self.clamp_selection();
+        self.reload_category_transactions();
     }
 
     /// Rebuild the per-category transaction count cache in one bulk query.
@@ -493,6 +522,56 @@ impl App {
         if let Some(pos) = self.lists.categories.iter().position(|c| c.path == path) {
             self.selected_index = pos;
         }
+        self.reload_category_transactions();
+    }
+
+    // ==================== Category Transactions Side Panel ====================
+
+    pub fn toggle_category_transactions(&mut self) {
+        self.show_category_transactions = !self.show_category_transactions;
+        self.reload_category_transactions();
+    }
+
+    /// Reload the side-panel transactions for the selected category, or clear
+    /// them when the panel is closed / not on the Categories tab / no category
+    /// selected.
+    pub(super) fn reload_category_transactions(&mut self) {
+        if self.current_tab == Tab::Categories
+            && self.show_category_transactions
+            && let Some(cat_id) = self.selected_category().map(|c| c.id)
+        {
+            self.category_transactions = self.load_or_show("load category transactions", |s| {
+                s.query_transactions_in_category(cat_id, Some(super::LIST_LIMIT))
+            });
+            return;
+        }
+        self.category_transactions.clear();
+    }
+
+    /// Jump to the Transactions tab with its DB search set to this category, so
+    /// the user can act on its transactions. Focus lands on the first
+    /// transaction.
+    pub fn manage_category_transactions(&mut self) {
+        let Some(path) = self.selected_category().map(|c| c.path.clone()) else {
+            return;
+        };
+        self.save_tab_state();
+        self.show_category_transactions = false;
+        self.category_transactions.clear();
+        self.current_tab = Tab::Transactions;
+
+        let query = format!("category:{path}");
+        let state = self.current_search_state_mut();
+        state.search_bar.set_value(&query);
+        state.db_search_active = true;
+        state.editing_db_search = false;
+        state.fuzzy_search_active = false;
+        state.editing_fuzzy_search = false;
+        state.selected_index = 0;
+
+        self.input_mode = InputMode::Normal;
+        self.selected_index = 0;
+        self.reload_current_tab();
     }
 
     fn filter_edit_filter_for_category(&self) -> Option<&crate::Filter> {

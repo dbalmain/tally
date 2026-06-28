@@ -365,10 +365,12 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `n` | Create filter (Filters tab) |
 | `a` | Apply filter categories (Filters tab) — opens a scrollable confirmation modal listing the affected transactions (date/description/amount) before applying. On the Filter Edit screen this is `Ctrl-A` |
 | `c` | Set category on transaction (including Todo → AI Review), or set/clear filter category (Filters tab); categorising a transfer prompts to unlink it first |
-| `e` / `r` | Rename category (`e`, Categories tab), or rename filter (`r`, Filters tab) |
+| `r` | Rename category (Categories tab), or rename filter (Filters tab) |
 | `o` | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`) |
-| `v` | Toggle filter review requirement (Filters tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised) |
+| `v` | Toggle filter review requirement (Filters tab); toggle "view transactions?" — a side panel listing the selected category's transactions (Transactions-view format, no category column) to the right of the category list (Categories tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
+| `m` | Manage transactions: jump to the Transactions tab with its DB search set to `category:<path>` and focus on the first transaction (Categories tab) |
+| `C` | Run local auto-classification (Todo → Uncategorised) — shows a loading modal while it runs, then a summary modal (filter/transfer/suggestion counts) |
 | `d` / `Delete` | Delete transfer (Transfers tab), delete filter (Filters tab; prompts to confirm), or delete category (Categories tab; prompts to confirm, noting how many transactions will be left uncategorised) |
 | `u` | Transactions tab: unlink the selected transfer, else uncategorise the transaction (prompts to confirm). The hint reads "unlink" on a linked transfer and "uncategorise" otherwise, and is hidden when the row has neither |
 | `Delete` | AI Review: remove category. Transfer Review: unlink transfer |

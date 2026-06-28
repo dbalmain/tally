@@ -214,6 +214,8 @@ fn overlay_open(app: &App) -> bool {
             | InputMode::TransferNoMatch
     ) || app.error_message.is_some()
         || app.keybind_help_open
+        || app.classifying
+        || app.classify_report.is_some()
 }
 
 fn draw_overlays(
@@ -268,6 +270,14 @@ fn draw_overlays(
 
     if app.keybind_help_open {
         draw_keybind_popup(f, app);
+    }
+
+    if app.classifying {
+        draw_classifying_popup(f);
+    }
+
+    if let Some(report) = &app.classify_report {
+        draw_classify_report_popup(f, report);
     }
 }
 
@@ -418,7 +428,7 @@ fn draw_key_hints(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_transactions(f: &mut Frame, app: &App, area: Rect) {
     let transactions: Vec<_> = app.lists.transactions.iter().collect();
-    draw_transaction_table(f, app, &transactions, app.selected_index, area);
+    draw_transaction_table(f, app, &transactions, app.selected_index, area, true, true);
 }
 
 fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
@@ -458,7 +468,7 @@ fn draw_todo(f: &mut Frame, app: &App, area: Rect) {
     match app.todo_subtab {
         TodoSubTab::Uncategorised => {
             let uncategorised: Vec<_> = app.lists.uncategorised.iter().collect();
-            draw_transaction_table(f, app, &uncategorised, app.selected_index, area);
+            draw_transaction_table(f, app, &uncategorised, app.selected_index, area, true, true);
         }
         TodoSubTab::AiReview => {
             draw_ai_review_table(f, app, area);
@@ -527,19 +537,24 @@ enum TxColumn {
 /// Category, Account, Balance), each at a minimum width; the first that does
 /// not fit hides itself and every lower-priority column. Leftover width then
 /// grows Category and Account up to a comfortable cap, and Description takes
-/// whatever remains. The result is returned in display order.
-fn plan_transaction_columns(width: u16) -> Vec<(TxColumn, u16)> {
+/// whatever remains. The result is returned in display order. When
+/// `include_category` is false the Category column is dropped entirely (the
+/// side panel on the Categories tab already knows the category).
+fn plan_transaction_columns(width: u16, include_category: bool) -> Vec<(TxColumn, u16)> {
     use TxColumn::*;
 
     // (column, minimum width) in priority order, highest priority first.
-    let priority = [
+    let priority: Vec<(TxColumn, u16)> = [
         (Date, 10u16),
         (Description, 20),
         (Amount, 12),
         (Category, 10),
         (Account, 10),
         (Balance, 12),
-    ];
+    ]
+    .into_iter()
+    .filter(|(col, _)| include_category || *col != Category)
+    .collect();
 
     let mut included: Vec<(TxColumn, u16)> = Vec::new();
     let mut used = 0u16;
@@ -584,14 +599,17 @@ fn draw_transaction_table(
     transactions: &[&Transaction],
     selected: usize,
     area: Rect,
+    focused: bool,
+    include_category: bool,
 ) {
-    let cols = plan_transaction_columns(area.width);
+    let cols = plan_transaction_columns(area.width, include_category);
     let constraints: Vec<Constraint> = cols.iter().map(|&(_, w)| Constraint::Length(w)).collect();
 
     // When "view details" (`v`) is on, prebuild the wrapped two-column detail
     // for the selected row. Building it here (where the width is known) lets us
-    // reserve exactly as many rows as it occupies, since we wrap by hand.
-    let detail_lines = if app.view_details {
+    // reserve exactly as many rows as it occupies, since we wrap by hand. The
+    // detail panel only applies to the focused table.
+    let detail_lines = if focused && app.view_details {
         transactions
             .get(selected)
             .copied()
@@ -609,7 +627,7 @@ fn draw_transaction_table(
     }
 
     table.render(f, area, |i, tx| {
-        let is_selected = i == selected;
+        let is_selected = focused && i == selected;
         let is_pending = app.is_pending_transfer_tx(tx.id);
         let is_candidate = app.is_transfer_candidate(tx.id);
         let is_disabled =
@@ -693,22 +711,16 @@ fn category_cell_text(app: &App, tx: &Transaction, width: usize) -> Option<(Stri
     }
 }
 
-/// Abbreviate each `/`-separated segment longer than four characters to its
-/// first three characters plus an ellipsis (e.g. `Personal-Rentals` → `Per…`),
+/// Abbreviate a single path segment longer than four characters to its first
+/// three characters plus an ellipsis (e.g. `Personal-Rentals` → `Per…`),
 /// leaving shorter segments untouched.
-fn abbreviate_path(value: &str) -> String {
-    value
-        .split('/')
-        .map(|seg| {
-            if seg.chars().count() > 4 {
-                let head: String = seg.chars().take(3).collect();
-                format!("{head}…")
-            } else {
-                seg.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+fn abbreviate_segment(seg: &str) -> String {
+    if seg.chars().count() > 4 {
+        let head: String = seg.chars().take(3).collect();
+        format!("{head}…")
+    } else {
+        seg.to_string()
+    }
 }
 
 /// Hard-truncate `value` to `width` columns, adding a trailing ellipsis when
@@ -727,14 +739,51 @@ fn truncate_width(value: &str, width: usize) -> String {
     }
 }
 
-/// Fit a `/`-separated value (category path or `bank/account`) into `width`:
-/// first try it as-is, then per-segment abbreviation, then a hard ellipsis
-/// truncation.
+/// Fit a `/`-separated value (category path or `bank/account`) into `width`,
+/// trimming as little as possible and protecting the last (most specific)
+/// segment:
+///
+/// 1. If it already fits, return it unchanged.
+/// 2. Abbreviate leading segments front-to-back (each to three chars + `…`),
+///    stopping as soon as the whole value fits.
+/// 3. If still too long, truncate only the last segment with a trailing
+///    ellipsis to fill the remaining width.
+/// 4. If even the abbreviated leading segments overflow, hard-truncate the
+///    whole string.
+///
+/// So `Bankwest/Smart Saver` becomes `Ban…/Smart Saver` at width 16 and
+/// `Ban…/Smart Sa…` at width 14.
 fn fit_path(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
     }
-    truncate_width(&abbreviate_path(value), width)
+
+    let mut segments: Vec<String> = value.split('/').map(str::to_string).collect();
+    let joined_len = |segs: &[String]| segs.join("/").chars().count();
+    let last = segments.len().saturating_sub(1);
+
+    // Abbreviate leading segments (all but the last) until the value fits.
+    for i in 0..last {
+        if joined_len(&segments) <= width {
+            break;
+        }
+        segments[i] = abbreviate_segment(&segments[i]);
+    }
+    if joined_len(&segments) <= width {
+        return segments.join("/");
+    }
+
+    // Still too long: truncate only the last segment to the remaining width.
+    let lead = segments[..last].join("/");
+    let lead_width = lead.chars().count() + usize::from(last > 0);
+    segments[last] = truncate_width(&segments[last], width.saturating_sub(lead_width));
+    let joined = segments.join("/");
+    if joined.chars().count() <= width {
+        return joined;
+    }
+
+    // Even the abbreviated leading segments overflow: hard-truncate everything.
+    truncate_width(&joined, width)
 }
 
 /// Every detail (name, value) pair for a transaction, in display order: the
@@ -946,7 +995,58 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
         });
 }
 
+/// Gap between the categories list and the transactions side panel.
+const CATEGORY_PANEL_GAP: u16 = 2;
+
 fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
+    if app.show_category_transactions {
+        // It's still the category view, so don't truncate paths: size the list
+        // to the longest one and give the rest to the transactions panel.
+        let longest = app
+            .lists
+            .categories
+            .iter()
+            .map(|c| c.path.chars().count() as u16)
+            .max()
+            .unwrap_or(0);
+        let left = categories_pane_width(longest, area.width);
+        let chunks = Layout::horizontal([
+            Constraint::Length(left),
+            Constraint::Length(CATEGORY_PANEL_GAP),
+            Constraint::Min(0),
+        ])
+        .split(area);
+        draw_categories_list(f, app, chunks[0]);
+        draw_category_transactions(f, app, chunks[2]);
+    } else {
+        draw_categories_list(f, app, area);
+    }
+}
+
+/// Width for the categories list when its side panel is open: wide enough to
+/// show the longest category path untruncated (count column + spacing + path),
+/// but never so wide it leaves the transactions panel below a usable minimum.
+fn categories_pane_width(longest_path: u16, total: u16) -> u16 {
+    const COUNT_COL: u16 = 4;
+    const MIN_PANEL: u16 = 30;
+    let desired = COUNT_COL + COLUMN_SPACING + longest_path;
+    let max_left = total.saturating_sub(CATEGORY_PANEL_GAP + MIN_PANEL);
+    desired.min(max_left).max(COUNT_COL + COLUMN_SPACING)
+}
+
+/// Side panel listing every transaction in the selected category, in the
+/// Transactions table format minus the Category column. Read-only: no row is
+/// highlighted because focus stays on the categories list.
+fn draw_category_transactions(f: &mut Frame, app: &App, area: Rect) {
+    let transactions: Vec<_> = app.category_transactions.iter().collect();
+    if transactions.is_empty() {
+        draw_empty_message(f, "No transactions in this category.", area);
+        return;
+    }
+    draw_transaction_table(f, app, &transactions, 0, area, false, false);
+}
+
+fn draw_categories_list(f: &mut Frame, app: &App, area: Rect) {
     let categories: Vec<_> = app.lists.categories.iter().collect();
 
     if categories.is_empty() {
@@ -1337,6 +1437,44 @@ fn draw_error_popup(f: &mut Frame, msg: &str) {
     f.render_widget(paragraph, body);
 }
 
+/// Blocking-run loading modal shown while `classify` is in progress. It carries
+/// no hints because the run holds the UI thread until it finishes.
+fn draw_classifying_popup(f: &mut Frame) {
+    let msg = "Classifying transactions…";
+    let body = message_modal(f, "Classifying", Color::Cyan, msg, &[], 40);
+
+    let paragraph = Paragraph::new(msg)
+        .style(Style::default().fg(Color::White))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(paragraph, body);
+}
+
+/// Summary modal shown when a classification run finishes, mirroring the CLI's
+/// `classify` report.
+fn draw_classify_report_popup(f: &mut Frame, report: &crate::classify::ClassifyReport) {
+    let msg = format!(
+        "Filter auto-categorised: {}\n\
+         Transfers detected: {}\n\
+         Exact-amount suggestions: {}\n\
+         Recurring-biller suggestions: {}\n\
+         Model suggestions: {}\n\
+         Unclassified: {}",
+        report.filtered,
+        report.transfers,
+        report.exact,
+        report.recurring,
+        report.model,
+        report.unclassified,
+    );
+    let hints = [("Esc/Enter", "close")];
+    let body = message_modal(f, "Classification complete", Color::Green, &msg, &hints, 50);
+
+    let paragraph = Paragraph::new(msg)
+        .style(Style::default().fg(Color::White))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(paragraph, body);
+}
+
 fn center(width: u16, height: u16, r: Rect) -> Rect {
     let popup_width = width.min(r.width);
     let popup_height = height.min(r.height);
@@ -1579,22 +1717,26 @@ mod tests {
     }
 
     #[test]
-    fn abbreviate_path_shortens_long_segments_only() {
+    fn abbreviate_segment_shortens_long_segments_only() {
         // Segments longer than four chars collapse to three chars + ellipsis;
         // "Bond" (exactly four) is left alone.
-        assert_eq!(
-            abbreviate_path("AllTax/Personal-Rentals/Campbell-Unit/Campbell/Bond"),
-            "All…/Per…/Cam…/Cam…/Bond"
-        );
+        assert_eq!(abbreviate_segment("Personal-Rentals"), "Per…");
+        assert_eq!(abbreviate_segment("Bond"), "Bond");
     }
 
     #[test]
-    fn fit_path_tries_full_then_abbreviated_then_hard_truncates() {
+    fn fit_path_protects_last_segment_and_trims_minimally() {
         // Fits as-is.
-        assert_eq!(fit_path("Food/Groceries", 20), "Food/Groceries");
-        // Needs abbreviation to fit.
-        assert_eq!(fit_path("Food/Groceries", 10), "Food/Gro…");
-        // Abbreviation still too long, so hard-truncate with an ellipsis.
+        assert_eq!(fit_path("Bankwest/Smart Saver", 20), "Bankwest/Smart Saver");
+        // Abbreviating the leading segment alone is enough; last segment intact.
+        assert_eq!(fit_path("Bankwest/Smart Saver", 16), "Ban…/Smart Saver");
+        // Leading segment abbreviated, then the last segment trimmed just enough.
+        assert_eq!(fit_path("Bankwest/Smart Saver", 14), "Ban…/Smart Sa…");
+        // Single segment with no separators: a plain hard truncation.
+        assert_eq!(fit_path("Groceries", 5), "Groc…");
+        // Last segment uses all remaining width before truncating.
+        assert_eq!(fit_path("Food/Groceries", 10), "Food/Groc…");
+        // Even the abbreviated leading segments overflow, so hard-truncate.
         assert_eq!(
             fit_path("AllTax/Personal-Rentals/Campbell-Unit/Campbell/Bond", 8),
             "All…/Pe…"
@@ -1617,7 +1759,7 @@ mod tests {
     #[test]
     fn plan_columns_hides_lowest_priority_first() {
         // Wide enough for everything: all six, in display order.
-        let cols: Vec<_> = plan_transaction_columns(120)
+        let cols: Vec<_> = plan_transaction_columns(120, true)
             .into_iter()
             .map(|(c, _)| c)
             .collect();
@@ -1634,7 +1776,7 @@ mod tests {
         );
 
         // Balance is the lowest priority, so it is the first to be dropped.
-        let cols: Vec<_> = plan_transaction_columns(70)
+        let cols: Vec<_> = plan_transaction_columns(70, true)
             .into_iter()
             .map(|(c, _)| c)
             .collect();
@@ -1643,7 +1785,7 @@ mod tests {
 
         // Very narrow: only Date and Description survive (Description is second
         // priority), and Amount/Category/Account/Balance are all gone.
-        let cols: Vec<_> = plan_transaction_columns(31)
+        let cols: Vec<_> = plan_transaction_columns(31, true)
             .into_iter()
             .map(|(c, _)| c)
             .collect();
@@ -1651,9 +1793,29 @@ mod tests {
     }
 
     #[test]
+    fn plan_columns_excludes_category_when_requested() {
+        // With the Category column suppressed it never appears, but the rest of
+        // the layout is unaffected (Account still shows at a wide width).
+        let cols: Vec<_> = plan_transaction_columns(120, false)
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert!(!cols.contains(&TxColumn::Category));
+        assert!(cols.contains(&TxColumn::Account));
+    }
+
+    #[test]
+    fn categories_pane_width_fits_longest_without_starving_panel() {
+        // Wide terminal: the list is exactly count + spacing + longest path.
+        assert_eq!(categories_pane_width(20, 120), 4 + COLUMN_SPACING + 20);
+        // Narrow terminal: clamped so the transactions panel keeps its minimum.
+        assert_eq!(categories_pane_width(60, 80), 80 - CATEGORY_PANEL_GAP - 30);
+    }
+
+    #[test]
     fn plan_columns_widths_fit_within_area() {
         for width in [10u16, 31, 44, 55, 66, 79, 100, 200] {
-            let cols = plan_transaction_columns(width);
+            let cols = plan_transaction_columns(width, true);
             if cols.is_empty() {
                 continue;
             }

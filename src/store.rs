@@ -1270,6 +1270,29 @@ impl TransactionStore {
         Ok(count as usize)
     }
 
+    /// Transactions whose enrichment assigns them exactly `category_id`, newest
+    /// first. Backs the Categories tab "view transactions" side panel.
+    pub fn query_transactions_in_category(
+        &self,
+        category_id: i64,
+        limit: Option<usize>,
+    ) -> Result<Vec<Transaction>> {
+        let mut sql = format!(
+            "SELECT {} FROM transactions_view t \
+             JOIN transaction_enrichments e ON e.transaction_id = t.id \
+             WHERE t.account_deleted_at IS NULL AND e.category_id = ? \
+             ORDER BY t.date DESC, t.id DESC",
+            tx_cols("t")
+        );
+        let mut params: Vec<Value> = vec![Value::Integer(category_id)];
+        push_limit(&mut sql, &mut params, limit);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let transactions = stmt
+            .query_map(rusqlite::params_from_iter(params), parse_transaction)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(transactions)
+    }
+
     /// Get transaction counts for every category that has at least one
     /// enrichment, in a single query. Categories with zero transactions
     /// are absent from the returned map.
@@ -2890,6 +2913,39 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
             .unwrap();
 
         assert_eq!(store.count_transactions_in_category(cat_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn query_transactions_in_category_returns_assigned_only() {
+        let temp = setup_test_exports();
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store.refresh().unwrap();
+
+        let cat_id = store.get_or_create_category("TestCategory").unwrap();
+        let unused_id = store.get_or_create_category("Unused").unwrap();
+        assert!(
+            store
+                .query_transactions_in_category(cat_id, None)
+                .unwrap()
+                .is_empty()
+        );
+
+        let txs = store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        store
+            .set_category(txs[0].id, cat_id, CategorySource::Manual, true, None)
+            .unwrap();
+
+        let assigned = store.query_transactions_in_category(cat_id, None).unwrap();
+        assert_eq!(assigned.len(), 1);
+        assert_eq!(assigned[0].id, txs[0].id);
+        assert!(
+            store
+                .query_transactions_in_category(unused_id, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
