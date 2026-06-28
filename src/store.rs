@@ -1605,6 +1605,40 @@ impl TransactionStore {
             .map_err(Into::into)
     }
 
+    /// Fetch transactions for a set of ids in one query, keyed by id. Mirrors
+    /// [`Self::get_categories_for_transactions`] so per-transaction caches can
+    /// be filled without a query per row. Ids with no matching (live)
+    /// transaction are simply absent from the map.
+    pub fn get_transactions_by_ids(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Transaction>> {
+        use std::collections::HashMap;
+
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT {} FROM transactions_view t WHERE t.id IN ({})",
+            tx_cols("t"),
+            placeholders
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), parse_transaction)?;
+
+        let mut result = HashMap::new();
+        for row in rows {
+            let tx = row?;
+            result.insert(tx.id, tx);
+        }
+        Ok(result)
+    }
+
     /// List transfers with all transaction data resolved.
     /// Filters match if EITHER the from or to transaction matches.
     pub fn list_transfers_with_transactions(
@@ -3068,6 +3102,26 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn get_transactions_by_ids_returns_requested_rows() {
+        let (_tmp, store, a1, a2) = store_with_two_accounts();
+        let t1 = insert_tx(&store, a1, "2024-03-10", -5000);
+        let t2 = insert_tx(&store, a2, "2024-03-11", 5000);
+
+        // Empty input → empty map, no query.
+        assert!(store.get_transactions_by_ids(&[]).unwrap().is_empty());
+
+        // Known ids → the matching transactions; an unknown id is simply absent.
+        let unknown = t2 + 1000;
+        let map = store.get_transactions_by_ids(&[t1, t2, unknown]).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&t1].id, t1);
+        assert_eq!(map[&t1].amount_cents, -5000);
+        assert_eq!(map[&t2].id, t2);
+        assert_eq!(map[&t2].amount_cents, 5000);
+        assert!(!map.contains_key(&unknown));
     }
 
     // ----- Filter tests -----

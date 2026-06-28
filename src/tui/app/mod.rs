@@ -309,10 +309,10 @@ impl App {
     }
 
     /// Rebuild the per-transaction caches (`tx_by_id`, `category_by_tx_id`,
-    /// `transfer_by_tx_id`) from currently-loaded list contents. Cheap: no
-    /// per-row DB queries — two bulk lookups (categories and transfers for the
-    /// loaded transactions) plus a few singletons for transfer-review sides that
-    /// aren't already in the loaded data.
+    /// `transfer_by_tx_id`) from currently-loaded list contents. Cheap: three
+    /// bulk lookups — the transactions backing transfer-review sides that aren't
+    /// already loaded, plus categories and transfers for the loaded
+    /// transactions.
     fn rebuild_tx_caches(&mut self) {
         self.tx_by_id.clear();
         for tx in self.lists.transactions.items() {
@@ -334,17 +334,22 @@ impl App {
                 .entry(twt.to_transaction.id)
                 .or_insert_with(|| twt.to_transaction.clone());
         }
-        // Load transactions for pending transfer reviews (they only have IDs)
+        // Pending transfer reviews carry only transaction IDs; load the ones
+        // not already cached in a single bulk query.
+        let mut missing_ids: Vec<i64> = Vec::new();
         for tr in self.lists.transfer_reviews.items() {
-            if !self.tx_by_id.contains_key(&tr.from_transaction_id)
-                && let Ok(Some(tx)) = self.store.get_transaction_by_id(tr.from_transaction_id)
-            {
-                self.tx_by_id.insert(tr.from_transaction_id, tx);
+            for id in [tr.from_transaction_id, tr.to_transaction_id] {
+                if !self.tx_by_id.contains_key(&id) && !missing_ids.contains(&id) {
+                    missing_ids.push(id);
+                }
             }
-            if !self.tx_by_id.contains_key(&tr.to_transaction_id)
-                && let Ok(Some(tx)) = self.store.get_transaction_by_id(tr.to_transaction_id)
-            {
-                self.tx_by_id.insert(tr.to_transaction_id, tx);
+        }
+        if !missing_ids.is_empty() {
+            let loaded = self.load_or_show("load transfer-review transactions", |s| {
+                s.get_transactions_by_ids(&missing_ids)
+            });
+            for (id, tx) in loaded {
+                self.tx_by_id.insert(id, tx);
             }
         }
 

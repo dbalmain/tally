@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::search::ParsedQuery;
 use crate::{CategorySource, Result, TransactionStore, TransferSource};
 
@@ -9,7 +7,7 @@ use super::{
 };
 
 /// Classify all currently uncategorized, non-transfer transactions in a collection.
-pub fn classify(store: &mut TransactionStore, _collection_root: &Path) -> Result<ClassifyReport> {
+pub fn classify(store: &mut TransactionStore) -> Result<ClassifyReport> {
     let mut report = ClassifyReport {
         filtered: store.apply_filters()?,
         ..Default::default()

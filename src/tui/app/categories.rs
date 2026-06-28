@@ -390,10 +390,9 @@ impl App {
         let Some(cat) = self.selected_category().cloned() else {
             return;
         };
-        let count = self
-            .store
-            .count_transactions_in_category(cat.id)
-            .unwrap_or(0);
+        let count = self.load_or_show("count transactions in category", |s| {
+            s.count_transactions_in_category(cat.id)
+        });
         self.confirm(
             format!(
                 "Delete category \"{}\"? {} transaction{} will be left without a category.",
@@ -425,10 +424,9 @@ impl App {
             }
             Err(crate::Error::CategoryExists(existing_path)) => {
                 if let Ok(Some(target)) = self.store.get_category_by_path(&existing_path) {
-                    let source_count = self
-                        .store
-                        .count_transactions_in_category(cat.id)
-                        .unwrap_or(0);
+                    let source_count = self.load_or_show("count transactions in category", |s| {
+                        s.count_transactions_in_category(cat.id)
+                    });
                     let source_id = cat.id;
                     self.restore_text_prompt(
                         "Rename category",

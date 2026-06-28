@@ -38,17 +38,10 @@ impl Log for TallyLogger {
         }
     }
 
-    fn flush(&self) {}
-}
-
-fn parse_level(level_str: &str) -> LevelFilter {
-    match level_str.to_lowercase().as_str() {
-        "error" => LevelFilter::Error,
-        "warn" => LevelFilter::Warn,
-        "info" => LevelFilter::Info,
-        "debug" => LevelFilter::Debug,
-        "trace" => LevelFilter::Trace,
-        _ => LevelFilter::Info,
+    fn flush(&self) {
+        if let Ok(mut writer) = self.file_writer.lock() {
+            let _ = writer.flush();
+        }
     }
 }
 
@@ -72,8 +65,8 @@ pub fn init() -> Result<PathBuf> {
     let data_dir = get_data_dir()?;
     fs::create_dir_all(&data_dir)?;
 
-    let level_str = std::env::var("TALLY_LOG").unwrap_or_else(|_| "info".to_string());
-    let level = parse_level(&level_str);
+    let level_str = env::var("TALLY_LOG").unwrap_or_else(|_| "info".to_string());
+    let level = level_str.parse().unwrap_or(LevelFilter::Info);
 
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)

@@ -51,7 +51,7 @@ fn main() {
     match action {
         Action::Tui => run_tui(&db_path, &exports_dir),
         Action::Refresh => run_refresh(&db_path, &exports_dir),
-        Action::Classify => run_classify(&vault_root, &db_path, &exports_dir),
+        Action::Classify => run_classify(&db_path, &exports_dir),
         Action::Help { .. } => unreachable!("help action returned before vault validation"),
     }
 }
@@ -63,7 +63,11 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> CliArgs {
 
     while let Some(arg) = args.next() {
         if arg == "--vault" {
-            vault = Some(PathBuf::from(args.next().expect("--vault requires a path")));
+            let Some(path) = args.next() else {
+                eprintln!("--vault requires a path");
+                std::process::exit(1);
+            };
+            vault = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--vault=") {
             vault = Some(PathBuf::from(path));
         } else if command.is_none() {
@@ -158,10 +162,10 @@ fn run_tui(db_path: &Path, exports_dir: &Path) {
     }
 }
 
-fn run_classify(vault_root: &Path, db_path: &Path, exports_dir: &Path) {
+fn run_classify(db_path: &Path, exports_dir: &Path) {
     let mut store =
         TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
-    let report = tally::classify::classify(&mut store, vault_root).expect("Failed to classify");
+    let report = tally::classify::classify(&mut store).expect("Failed to classify");
 
     println!("Classification complete:");
     println!("  Filter auto-categorised: {}", report.filtered);
