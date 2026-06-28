@@ -17,30 +17,30 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
-    Transactions,
-    Transfers,
-    Categories,
     Todo,
+    Transactions,
+    Categories,
+    Transfers,
     Filters,
 }
 
 impl Tab {
     pub fn all() -> &'static [Tab] {
         &[
-            Tab::Transactions,
-            Tab::Transfers,
-            Tab::Categories,
             Tab::Todo,
+            Tab::Transactions,
+            Tab::Categories,
+            Tab::Transfers,
             Tab::Filters,
         ]
     }
 
     pub fn title(&self) -> &'static str {
         match self {
-            Tab::Transactions => "Transactions",
-            Tab::Transfers => "Transfers",
-            Tab::Categories => "Categories",
             Tab::Todo => "Todo",
+            Tab::Transactions => "Transactions",
+            Tab::Categories => "Categories",
+            Tab::Transfers => "Transfers",
             Tab::Filters => "Filters",
         }
     }
