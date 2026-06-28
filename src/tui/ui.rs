@@ -1041,7 +1041,7 @@ fn draw_keybind_popup(f: &mut Frame, app: &App) {
         .max(8);
     let height = desired_height.min(screen.height.saturating_sub(2).max(1));
     let area = center(width, height, screen);
-    let hints = [("Esc/Enter", "close"), ("Alt-?", "toggle bar")];
+    let hints = [("Esc/Enter", "close"), ("Alt-?", "toggle hints?")];
     let body = Modal {
         title: "Keybinds",
         hints: &hints,

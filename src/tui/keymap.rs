@@ -71,7 +71,11 @@ pub enum Act {
 pub struct Bind {
     pub triggers: &'static [Trigger],
     pub label: &'static str,
+    /// Short hint shown in the bottom footer bar (tight on space).
     pub desc: &'static str,
+    /// Hint shown in the `?` keybind overlay, which has room for the fuller
+    /// "cycle …"/"toggle …" phrasing. Defaults to `desc`.
+    pub help_desc: &'static str,
     pub footer: bool,
     pub help: bool,
     pub act: Act,
@@ -121,14 +125,14 @@ const FILTER_EDIT_CTRL_BINDS: &[FilterEditCtrlBind] = &[
         key: 'o',
         label: "Ctrl-O",
         footer_desc: "override?",
-        help_desc: "cycle override",
+        help_desc: "cycle override?",
         action: FilterEditCtrlAction::CycleOverride,
     },
     FilterEditCtrlBind {
         key: 'v',
         label: "Ctrl-V",
         footer_desc: "review?",
-        help_desc: "toggle review",
+        help_desc: "toggle review?",
         action: FilterEditCtrlAction::ToggleReview,
     },
     FilterEditCtrlBind {
@@ -176,6 +180,29 @@ const fn b(
         triggers,
         label,
         desc,
+        help_desc: desc,
+        footer,
+        help,
+        act,
+    }
+}
+
+/// Like [`b`], but with a distinct overlay hint (`help_desc`) for toggles and
+/// cycles whose footer label is abbreviated for space.
+const fn bh(
+    triggers: &'static [Trigger],
+    label: &'static str,
+    desc: &'static str,
+    help_desc: &'static str,
+    footer: bool,
+    help: bool,
+    act: Act,
+) -> Bind {
+    Bind {
+        triggers,
+        label,
+        desc,
+        help_desc,
         footer,
         help,
         act,
@@ -237,18 +264,20 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
             ));
             out.push(b(&[Char('r')], "r", "rename", true, true, RenameFilter));
             out.push(b(&[Char('c')], "c", "category", true, true, Categorise));
-            out.push(b(
+            out.push(bh(
                 &[Char('o')],
                 "o",
                 "override?",
+                "cycle override?",
                 true,
                 true,
                 CycleFilterOverride,
             ));
-            out.push(b(
+            out.push(bh(
                 &[Char('v')],
                 "v",
                 "review?",
+                "toggle review?",
                 true,
                 true,
                 ToggleFilterReview,
@@ -298,10 +327,11 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     }
 
     if is_transaction_view(app) && app.selected_transaction().is_some() {
-        out.push(b(
+        out.push(bh(
             &[Char('v')],
             "v",
             "view details?",
+            "toggle details?",
             true,
             true,
             ToggleDetails,
@@ -585,7 +615,7 @@ fn normal_lines(app: &App, lines: &mut Vec<HelpLine>) {
     group(lines, "Keys");
     for bind in normal_binds(app) {
         if bind.help {
-            bind_line(lines, bind.label, bind.desc);
+            bind_line(lines, bind.label, bind.help_desc);
         }
     }
 }
