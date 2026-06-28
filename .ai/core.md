@@ -288,17 +288,23 @@ background connection writes; WAL sidecar files (`-wal`/`-shm`) are expected.
 
 1. Implement `Filter` in a new file under `src/search/filters/`. `parse(value)`
    returns SQL with placeholders like `{date}`, `{bank_name}`, `{category_path}`
-   — never bare column references.
-2. Declare placeholder dependencies in `requires()` so the renderer knows which
-   contexts can apply the filter.
+   — never bare column references. Placeholder names are the consts in
+   `src/search/placeholders.rs`; build references with `ph::reference(ph::NAME)`
+   so a typo is a compile error rather than a silently dropped clause.
+2. There is no `requires()` declaration. A filter applies in whatever context
+   supplies its placeholders: `render_template` substitutes each `{name}` from
+   the active `SqlContext`, and drops the whole clause if any referenced
+   placeholder is missing — so a filter is automatically inert in contexts
+   that don't provide its columns.
 3. Register in `src/search/filters/mod.rs` and in `SearchConfig::standard`
    (`src/search/parse.rs`) — the single registration point; every search bar
    picks it up from there.
 4. If the filter needs a column not yet in the standard contexts, add it to
-   `transactions_view` in `src/db.rs` and to `transaction_ctx()` /
-   `transfer_side_ctx()` in `src/store.rs`. If the placeholder requires a
+   `transactions_view` in `src/db.rs` and to the `SEARCHABLE_TRANSACTION_COLUMNS`
+   table (or the `transaction_ctx()` / `transfer_side_ctx()` extras for
+   non-per-side placeholders) in `src/store.rs`. If the placeholder requires a
    JOIN, extend `transaction_joins()` to splice it in when
-   `parsed.uses_placeholder("your_placeholder")`.
+   `parsed.uses_placeholder(ph::YOUR_PLACEHOLDER)`.
 5. Document the syntax in the `src/search/mod.rs` doc comment.
 
 Store query methods don't change; the search bar UI is filter-agnostic.
