@@ -1227,6 +1227,13 @@ impl TransactionStore {
             params![target_id, now, source_id],
         )?;
 
+        // Repoint filters that auto-applied the source so they now apply the
+        // target, before the source category row disappears.
+        self.conn.execute(
+            "UPDATE filters SET category_id = ? WHERE category_id = ?",
+            params![target_id, source_id],
+        )?;
+
         // Delete the source category
         self.conn
             .execute("DELETE FROM categories WHERE id = ?", [source_id])?;
@@ -1240,6 +1247,12 @@ impl TransactionStore {
     pub fn delete_category(&mut self, category_id: i64) -> Result<usize> {
         let affected = self.conn.execute(
             "DELETE FROM transaction_enrichments WHERE category_id = ?",
+            [category_id],
+        )?;
+        // Clear filters that auto-applied this category so none is left pointing
+        // at a row that no longer exists; such a filter simply stops applying.
+        self.conn.execute(
+            "UPDATE filters SET category_id = NULL WHERE category_id = ?",
             [category_id],
         )?;
         self.conn
@@ -3478,5 +3491,68 @@ echo '[{{"date":"2025-01-01","description":"{description}","amount_cents":-10000
         assert_eq!(store.apply_filters().unwrap(), 0);
         assert!(enrichment(&store, "Transfer Out").is_none());
         assert!(enrichment(&store, "Transfer In").is_none());
+    }
+
+    #[test]
+    fn rename_category_keeps_filter_reference() {
+        let (_t, mut store) = setup_rich_fixture();
+        let cat = store.get_or_create_category("Income/Interest").unwrap();
+        let filter_id = store.create_filter("interest", "Interest").unwrap();
+        store.set_filter_category(filter_id, Some(cat)).unwrap();
+
+        store.rename_category(cat, "Income/Earnings").unwrap();
+
+        let filter = store
+            .list_filters()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == filter_id)
+            .unwrap();
+        // Same category row id; only its path changed.
+        assert_eq!(filter.category_id, Some(cat));
+        assert_eq!(
+            store.get_category(cat).unwrap().map(|c| c.path),
+            Some("Income/Earnings".into())
+        );
+    }
+
+    #[test]
+    fn merge_category_repoints_filter() {
+        let (_t, mut store) = setup_rich_fixture();
+        let source = store.get_or_create_category("Income/Interest").unwrap();
+        let target = store.get_or_create_category("Income/Earnings").unwrap();
+        let filter_id = store.create_filter("interest", "Interest").unwrap();
+        store.set_filter_category(filter_id, Some(source)).unwrap();
+
+        store.merge_categories(source, target).unwrap();
+
+        let filter = store
+            .list_filters()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == filter_id)
+            .unwrap();
+        assert_eq!(filter.category_id, Some(target));
+    }
+
+    #[test]
+    fn delete_category_clears_filter_reference() {
+        let (_t, mut store) = setup_rich_fixture();
+        let cat = store.get_or_create_category("Income/Interest").unwrap();
+        let filter_id = store.create_filter("interest", "Interest").unwrap();
+        store.set_filter_category(filter_id, Some(cat)).unwrap();
+        store.apply_filters().unwrap();
+        assert!(enrichment(&store, "Interest").is_some());
+
+        store.delete_category(cat).unwrap();
+
+        let filter = store
+            .list_filters()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == filter_id)
+            .unwrap();
+        assert_eq!(filter.category_id, None);
+        assert!(enrichment(&store, "Interest").is_none());
     }
 }

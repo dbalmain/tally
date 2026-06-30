@@ -37,6 +37,7 @@ pub enum Command {
     CategoryDelete {
         path: String,
         json: bool,
+        force: bool,
     },
     TransactionsList {
         query: String,
@@ -183,18 +184,32 @@ fn parse_categories(args: &[String]) -> Result<Command, String> {
                 json: flags.json,
             })
         }
-        "delete" => {
-            let flags = collect_flags(rest, false, false)?;
-            let [path] = take_one(&flags.positional, "categories delete <path>")?;
-            Ok(Command::CategoryDelete {
-                path,
-                json: flags.json,
-            })
-        }
+        "delete" => parse_categories_delete(rest),
         other => Err(format!(
             "Unknown categories subcommand: {other} (expected list|rename|merge|delete)"
         )),
     }
+}
+
+fn parse_categories_delete(args: &[String]) -> Result<Command, String> {
+    // `delete` carries a `--force` flag alongside its positional, so it can't
+    // use the shared flag collector (which rejects unknown `--` flags).
+    let mut json = false;
+    let mut force = false;
+    let mut positional = Vec::new();
+
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--force" => force = true,
+            "--csv" => return Err("--csv is only valid on `list` commands".to_string()),
+            other if other.starts_with("--") => return Err(format!("Unknown flag: {other}")),
+            other => positional.push(other.to_string()),
+        }
+    }
+
+    let [path] = take_one(&positional, "categories delete <path>")?;
+    Ok(Command::CategoryDelete { path, json, force })
 }
 
 fn parse_transactions(args: &[String]) -> Result<Command, String> {
@@ -285,7 +300,7 @@ pub fn run(command: Command, store: &mut TransactionStore) -> Result<(), String>
             target,
             json,
         } => category_merge(store, &source, &target, json),
-        Command::CategoryDelete { path, json } => category_delete(store, &path, json),
+        Command::CategoryDelete { path, json, force } => category_delete(store, &path, json, force),
         Command::TransactionsList {
             query,
             limit,
@@ -380,9 +395,18 @@ fn category_merge(
 ) -> Result<(), String> {
     let source_id = resolve_category(store, source)?;
     let target_id = resolve_category(store, target)?;
+    if source_id == target_id {
+        return Err("source and target are the same category".to_string());
+    }
     let moved = store
         .count_transactions_in_category(source_id)
         .map_err(stringify)?;
+    let repointed = store
+        .list_filters()
+        .map_err(stringify)?
+        .into_iter()
+        .filter(|f| f.category_id == Some(source_id))
+        .count();
     store
         .merge_categories(source_id, target_id)
         .map_err(stringify)?;
@@ -393,15 +417,46 @@ fn category_merge(
             "source": source,
             "target": target,
             "moved": moved,
+            "filters_repointed": repointed,
         }));
     } else {
-        println!("Merged \"{source}\" into \"{target}\" ({moved} transactions moved)");
+        let mut message =
+            format!("Merged \"{source}\" into \"{target}\" ({moved} transactions moved)");
+        if repointed > 0 {
+            message.push_str(&format!(", {repointed} filters repointed"));
+        }
+        println!("{message}");
     }
     Ok(())
 }
 
-fn category_delete(store: &mut TransactionStore, path: &str, json: bool) -> Result<(), String> {
+fn category_delete(
+    store: &mut TransactionStore,
+    path: &str,
+    json: bool,
+    force: bool,
+) -> Result<(), String> {
     let id = resolve_category(store, path)?;
+    let affected: Vec<tally::Filter> = store
+        .list_filters()
+        .map_err(stringify)?
+        .into_iter()
+        .filter(|f| f.category_id == Some(id))
+        .collect();
+
+    if !affected.is_empty() && !force {
+        let names = affected
+            .iter()
+            .map(|f| format!("\"{}\"", f.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "Category \"{path}\" is used by {} filter(s): {names}. Re-run with --force to delete it and clear those filters.",
+            affected.len()
+        ));
+    }
+
+    let filters_cleared = affected.len();
     let uncategorised = store.delete_category(id).map_err(stringify)?;
 
     if json {
@@ -409,9 +464,15 @@ fn category_delete(store: &mut TransactionStore, path: &str, json: bool) -> Resu
             "action": "delete",
             "path": path,
             "uncategorised": uncategorised,
+            "filters_cleared": filters_cleared,
         }));
     } else {
-        println!("Deleted \"{path}\" ({uncategorised} transactions uncategorised)");
+        let mut message =
+            format!("Deleted \"{path}\" ({uncategorised} transactions uncategorised)");
+        if filters_cleared > 0 {
+            message.push_str(&format!(", {filters_cleared} filters cleared"));
+        }
+        println!("{message}");
     }
     Ok(())
 }
@@ -678,8 +739,23 @@ mod tests {
             Command::CategoryDelete {
                 path: "Old".into(),
                 json: false,
+                force: false,
             }
         );
+        assert_eq!(
+            parse_command(&s(&["categories", "delete", "Old", "--force"])).unwrap(),
+            Command::CategoryDelete {
+                path: "Old".into(),
+                json: false,
+                force: true,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_csv_flag_errors_as_list_only() {
+        let err = parse_command(&s(&["categories", "delete", "Old", "--csv"])).unwrap_err();
+        assert!(err.contains("only valid on `list`"), "{err}");
     }
 
     #[test]
@@ -938,6 +1014,7 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
             Command::CategoryDelete {
                 path: "Food".into(),
                 json: false,
+                force: false,
             },
             &mut store,
         )
@@ -945,6 +1022,82 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
 
         assert!(category(&store, "Food").is_none());
         assert!(store.get_transaction_category(tx_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_blocked_when_filter_references_category() {
+        let (_temp, mut store) = fixture_store();
+        let cat_id = store.get_or_create_category("Food").unwrap();
+        let filter_id = store.create_filter("groceries", "Test").unwrap();
+        store.set_filter_category(filter_id, Some(cat_id)).unwrap();
+
+        let err = run(
+            Command::CategoryDelete {
+                path: "Food".into(),
+                json: false,
+                force: false,
+            },
+            &mut store,
+        )
+        .unwrap_err();
+        assert!(err.contains("groceries"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+        // The category still exists; nothing was deleted.
+        assert!(category(&store, "Food").is_some());
+    }
+
+    #[test]
+    fn delete_force_clears_referencing_filter() {
+        let (_temp, mut store) = fixture_store();
+        let cat_id = store.get_or_create_category("Food").unwrap();
+        let filter_id = store.create_filter("groceries", "Test").unwrap();
+        store.set_filter_category(filter_id, Some(cat_id)).unwrap();
+
+        run(
+            Command::CategoryDelete {
+                path: "Food".into(),
+                json: false,
+                force: true,
+            },
+            &mut store,
+        )
+        .unwrap();
+
+        assert!(category(&store, "Food").is_none());
+        let filter = store
+            .list_filters()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == filter_id)
+            .unwrap();
+        assert_eq!(filter.category_id, None);
+    }
+
+    #[test]
+    fn merge_executor_repoints_referencing_filter() {
+        let (_temp, mut store) = fixture_store();
+        let source = store.get_or_create_category("Food").unwrap();
+        let target = store.get_or_create_category("Groceries").unwrap();
+        let filter_id = store.create_filter("food", "Test").unwrap();
+        store.set_filter_category(filter_id, Some(source)).unwrap();
+
+        run(
+            Command::CategoryMerge {
+                source: "Food".into(),
+                target: "Groceries".into(),
+                json: false,
+            },
+            &mut store,
+        )
+        .unwrap();
+
+        let filter = store
+            .list_filters()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == filter_id)
+            .unwrap();
+        assert_eq!(filter.category_id, Some(target));
     }
 
     #[test]

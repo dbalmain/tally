@@ -26,7 +26,7 @@ cargo run -- --vault PATH  # Use PATH as the vault root (or set FM_VAULT)
 cargo run -- categories list [--json|--csv]
 cargo run -- categories rename <path> <new-path>   # single row; does not cascade to children
 cargo run -- categories merge <source-path> <target-path>
-cargo run -- categories delete <path>
+cargo run -- categories delete <path> [--force]   # blocked if a filter uses it; --force clears those filters
 cargo run -- transactions list [QUERY...] [--limit N] [--json|--csv]
 cargo run -- categorise <tx-id> <category-path>    # or: categorise <tx-id> --clear
 ```

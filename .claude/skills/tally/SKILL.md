@@ -70,13 +70,21 @@ merging.
   use `merge` for that.
 - **`categories merge <source-path> <target-path>`** — move every transaction
   from source to target, then delete source.
-- **`categories delete <path>`** — delete the category; its transactions become
-  uncategorised.
+- **`categories delete <path> [--force]`** — delete the category; its
+  transactions become uncategorised.
+
+**Saved filters stay consistent.** Rename and merge keep any filter that
+auto-applies the category pointing at the right one (rename preserves it; merge
+repoints it to the target). Delete is the exception: if one or more filters use
+the category, `delete` **refuses** and names them — re-run with `--force` to
+delete it anyway, which leaves those filters with no category (never a dangling
+reference).
 
 ```
 cargo run -q -- categories rename "Food/Groceries" "Food/Supermarket" --json
 cargo run -q -- categories merge "Misc" "Everyday" --json
-cargo run -q -- categories delete "Obsolete" --json
+cargo run -q -- categories delete "Obsolete" --json          # blocked if a filter uses it
+cargo run -q -- categories delete "Obsolete" --force --json  # delete + clear those filters
 ```
 
 ## (Re)assigning a transaction

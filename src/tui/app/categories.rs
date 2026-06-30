@@ -421,12 +421,27 @@ impl App {
         let count = self.load_or_show("count transactions in category", |s| {
             s.count_transactions_in_category(cat.id)
         });
+        let filter_count = self
+            .load_or_show("load filters", |s| s.list_filters())
+            .into_iter()
+            .filter(|f| f.category_id == Some(cat.id))
+            .count();
+        let suffix = if filter_count > 0 {
+            format!(
+                " and {} filter{} will lose their category.",
+                filter_count,
+                if filter_count == 1 { "" } else { "s" }
+            )
+        } else {
+            ".".to_string()
+        };
         self.confirm(
             format!(
-                "Delete category \"{}\"? {} transaction{} will be left without a category.",
+                "Delete category \"{}\"? {} transaction{} will be left without a category{}",
                 cat.path,
                 count,
-                if count == 1 { "" } else { "s" }
+                if count == 1 { "" } else { "s" },
+                suffix
             ),
             ConfirmAction::DeleteCategory(cat.id),
         );
