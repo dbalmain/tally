@@ -21,6 +21,14 @@ cargo run -- pull     # Refresh transactions from exports/
 cargo run -- tui      # Launch terminal UI (--tui also accepted)
 cargo run -- classify # Suggest categories locally (temporal history + TF-IDF/SVM)
 cargo run -- --vault PATH  # Use PATH as the vault root (or set FM_VAULT)
+
+# Agent-facing category/transaction CLI (text by default; --json, and --csv on list)
+cargo run -- categories list [--json|--csv]
+cargo run -- categories rename <path> <new-path>   # single row; does not cascade to children
+cargo run -- categories merge <source-path> <target-path>
+cargo run -- categories delete <path>
+cargo run -- transactions list [QUERY...] [--limit N] [--json|--csv]
+cargo run -- categorise <tx-id> <category-path>    # or: categorise <tx-id> --clear
 ```
 
 ## Project Goals
@@ -546,8 +554,17 @@ no account data — safe to publish; needs `POCKETSMITH_KEY`):
 
 ## Planned Features
 
-### MCP Server
-Model Context Protocol server for AI agent integration:
+### Agent-facing CLI (implemented)
+Category/transaction management for AI agents is exposed as `tally` subcommands
+(`categories list|rename|merge|delete`, `transactions list`, `categorise`) with
+`--json`/`--csv` output — see Commands above. A vault-scoped skill at
+`.claude/skills/tally/SKILL.md` documents them for the agent on demand. This
+replaces an MCP server for local, single-agent use: the skill adds ~no standing
+context until invoked, and the binary is callable from any shell.
+
+### MCP Server (deferred)
+An MCP server is only worth building if the vault needs to be driven by
+non-Claude-Code MCP clients, or wants strongly-typed tool contracts:
 - Transaction categorization suggestions
 - Transfer detection
 - Rule creation assistance

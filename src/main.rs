@@ -1,9 +1,12 @@
+mod cli;
+
 use std::path::{Path, PathBuf};
 use tally::TransactionStore;
 
 struct CliArgs {
     vault: Option<PathBuf>,
-    command: Option<String>,
+    /// All non-`--vault` tokens, in order. The first is the command name.
+    rest: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,14 +31,22 @@ fn main() {
         .or_else(|| std::env::var_os("FM_VAULT").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let action = action_for_command(args.command.as_deref());
+    // New headless subcommands (categories/transactions/categorise) parse before
+    // the legacy action dispatch so they can carry their own args and flags.
+    let is_cli = args
+        .rest
+        .first()
+        .is_some_and(|first| cli::is_cli_command(first));
 
-    if let Action::Help { to_stderr } = action {
-        print_help(to_stderr);
-        if to_stderr {
-            std::process::exit(1);
+    if !is_cli {
+        let action = action_for_command(args.rest.first().map(String::as_str));
+        if let Action::Help { to_stderr } = action {
+            print_help(to_stderr);
+            if to_stderr {
+                std::process::exit(1);
+            }
+            return;
         }
-        return;
     }
 
     let exports_dir = vault_root.join("exports");
@@ -48,7 +59,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    match action {
+    if is_cli {
+        run_cli(&args.rest, &db_path, &exports_dir);
+        return;
+    }
+
+    match action_for_command(args.rest.first().map(String::as_str)) {
         Action::Tui => run_tui(&db_path, &exports_dir),
         Action::Refresh => run_refresh(&db_path, &exports_dir),
         Action::Classify => run_classify(&db_path, &exports_dir),
@@ -56,10 +72,28 @@ fn main() {
     }
 }
 
+fn run_cli(rest: &[String], db_path: &Path, exports_dir: &Path) {
+    let command = match cli::parse_command(rest) {
+        Ok(command) => command,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut store =
+        TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
+
+    if let Err(message) = cli::run(command, &mut store) {
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
+}
+
 fn parse_cli_args(args: impl IntoIterator<Item = String>) -> CliArgs {
     let mut args = args.into_iter();
     let mut vault = None;
-    let mut command = None;
+    let mut rest = Vec::new();
 
     while let Some(arg) = args.next() {
         if arg == "--vault" {
@@ -70,12 +104,12 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> CliArgs {
             vault = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--vault=") {
             vault = Some(PathBuf::from(path));
-        } else if command.is_none() {
-            command = Some(arg);
+        } else {
+            rest.push(arg);
         }
     }
 
-    CliArgs { vault, command }
+    CliArgs { vault, rest }
 }
 
 fn action_for_command(command: Option<&str>) -> Action {
@@ -97,6 +131,28 @@ Commands:
   pull       Refresh transactions from exports/ (run import/pull scripts)
   classify   Suggest categories and detect transfers locally
   tui        Launch the terminal UI
+
+  categories list [--json|--csv]
+             List categories with transaction counts
+  categories rename <path> <new-path> [--json]
+             Rename a single category (does not cascade to children)
+  categories merge <source-path> <target-path> [--json]
+             Move source's transactions to target, then delete source
+  categories delete <path> [--json]
+             Delete a category, leaving its transactions uncategorised
+
+  transactions list [QUERY...] [--limit N] [--json|--csv]
+             List transactions matching a search query (default limit 100)
+
+  categorise <tx-id> <category-path> [--json]
+             Assign a category to a transaction (created if new)
+  categorise <tx-id> --clear [--json]
+             Remove a transaction's category
+
+Output flags:
+  --json         Emit JSON instead of human-readable text
+  --csv          Emit CSV (only valid on the `list` commands)
+  --limit N      Cap `transactions list` results (default 100)
 
 Global flags:
   --vault PATH   Use PATH as the vault root (or set FM_VAULT)
@@ -185,7 +241,7 @@ mod tests {
         let args = parse_cli_args(["--vault", "/tmp/finances", "tui"].map(String::from));
 
         assert_eq!(args.vault, Some(PathBuf::from("/tmp/finances")));
-        assert_eq!(args.command.as_deref(), Some("tui"));
+        assert_eq!(args.rest, vec!["tui".to_string()]);
     }
 
     #[test]
@@ -193,7 +249,7 @@ mod tests {
         let args = parse_cli_args(["--tui", "--vault=finances"].map(String::from));
 
         assert_eq!(args.vault, Some(PathBuf::from("finances")));
-        assert_eq!(args.command.as_deref(), Some("--tui"));
+        assert_eq!(args.rest, vec!["--tui".to_string()]);
     }
 
     #[test]
@@ -201,7 +257,26 @@ mod tests {
         let args = parse_cli_args(["refresh", "--vault", "finances"].map(String::from));
 
         assert_eq!(args.vault, Some(PathBuf::from("finances")));
-        assert_eq!(args.command.as_deref(), Some("refresh"));
+        assert_eq!(args.rest, vec!["refresh".to_string()]);
+    }
+
+    #[test]
+    fn keeps_all_non_vault_tokens_in_order() {
+        let args = parse_cli_args(
+            ["categories", "rename", "--vault", "v", "A", "B", "--json"].map(String::from),
+        );
+
+        assert_eq!(args.vault, Some(PathBuf::from("v")));
+        assert_eq!(
+            args.rest,
+            vec![
+                "categories".to_string(),
+                "rename".to_string(),
+                "A".to_string(),
+                "B".to_string(),
+                "--json".to_string(),
+            ]
+        );
     }
 
     #[test]
