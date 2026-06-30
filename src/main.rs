@@ -31,15 +31,15 @@ fn main() {
         .or_else(|| std::env::var_os("FM_VAULT").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // New headless subcommands (categories/transactions/categorise) parse before
-    // the legacy action dispatch so they can carry their own args and flags.
-    let is_cli = args
-        .rest
-        .first()
-        .is_some_and(|first| cli::is_cli_command(first));
+    // New headless subcommands (categories/transactions/categorise) and `ai`
+    // setup commands parse before the legacy action dispatch so they can carry
+    // their own args and flags. `ai` acts on the vault directory, not the store.
+    let first = args.rest.first().map(String::as_str);
+    let is_cli = first.is_some_and(cli::is_cli_command);
+    let is_ai = first.is_some_and(cli::is_ai_command);
 
-    if !is_cli {
-        let action = action_for_command(args.rest.first().map(String::as_str));
+    if !is_cli && !is_ai {
+        let action = action_for_command(first);
         if let Action::Help { to_stderr } = action {
             print_help(to_stderr);
             if to_stderr {
@@ -59,12 +59,20 @@ fn main() {
         std::process::exit(1);
     }
 
+    if is_ai {
+        if let Err(message) = cli::run_ai(&args.rest, &vault_root) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if is_cli {
         run_cli(&args.rest, &db_path, &exports_dir);
         return;
     }
 
-    match action_for_command(args.rest.first().map(String::as_str)) {
+    match action_for_command(first) {
         Action::Tui => run_tui(&db_path, &exports_dir),
         Action::Refresh => run_refresh(&db_path, &exports_dir),
         Action::Classify => run_classify(&db_path, &exports_dir),
@@ -138,8 +146,8 @@ Commands:
              Rename a single category (does not cascade to children)
   categories merge <source-path> <target-path> [--json]
              Move source's transactions to target, then delete source
-  categories delete <path> [--json]
-             Delete a category, leaving its transactions uncategorised
+  categories delete <path> [--force] [--json]
+             Delete a category (blocked if a filter uses it; --force clears them)
 
   transactions list [QUERY...] [--limit N] [--json|--csv]
              List transactions matching a search query (default limit 100)
@@ -148,6 +156,9 @@ Commands:
              Assign a category to a transaction (created if new)
   categorise <tx-id> --clear [--json]
              Remove a transaction's category
+
+  ai install-claude-skill
+             Install the Claude Code skill into this vault's .claude/skills/
 
 Output flags:
   --json         Emit JSON instead of human-readable text

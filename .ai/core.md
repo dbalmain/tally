@@ -29,6 +29,9 @@ cargo run -- categories merge <source-path> <target-path>
 cargo run -- categories delete <path> [--force]   # blocked if a filter uses it; --force clears those filters
 cargo run -- transactions list [QUERY...] [--limit N] [--json|--csv]
 cargo run -- categorise <tx-id> <category-path>    # or: categorise <tx-id> --clear
+
+# Install the Claude Code skill into <vault>/.claude/skills/ (embedded in the binary)
+cargo run -- ai install-claude-skill
 ```
 
 ## Project Goals

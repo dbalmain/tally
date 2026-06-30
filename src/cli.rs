@@ -8,7 +8,16 @@
 //! `main.rs` strips `--vault`/`--vault=` before handing the remaining tokens to
 //! `parse_command`, so the slice here never contains a vault flag.
 
+use std::path::Path;
+
 use tally::{CategorySource, Error, TransactionStore};
+
+/// The canonical Claude Code skill, embedded at build time so an installed
+/// binary can write it into any vault via `tally ai install-claude-skill`.
+const CLAUDE_SKILL_MD: &str = include_str!("../.claude/skills/tally/SKILL.md");
+
+/// Where the skill lives inside a vault, relative to its root.
+const CLAUDE_SKILL_REL: &str = ".claude/skills/tally/SKILL.md";
 
 /// How a command's result should be rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +65,49 @@ pub enum Command {
 }
 
 const DEFAULT_LIMIT: usize = 100;
+
+/// True if `first` names an `ai …` setup command. These act on the vault
+/// directory rather than the store, so `main` routes them to [`run_ai`].
+pub fn is_ai_command(first: &str) -> bool {
+    first == "ai"
+}
+
+/// Run an `ai …` subcommand against the vault directory (no store needed).
+/// `args` is the full token slice, so `args[0]` is `"ai"`.
+pub fn run_ai(args: &[String], vault_root: &Path) -> Result<(), String> {
+    match args.get(1).map(String::as_str) {
+        Some("install-claude-skill") => {
+            if let Some(extra) = args.get(2) {
+                return Err(format!("Unexpected argument: {extra}"));
+            }
+            install_claude_skill(vault_root)
+        }
+        Some(other) => Err(format!(
+            "Unknown ai subcommand: {other} (expected install-claude-skill)"
+        )),
+        None => Err("ai requires a subcommand (install-claude-skill)".to_string()),
+    }
+}
+
+/// Write the embedded Claude skill into `<vault>/.claude/skills/tally/SKILL.md`,
+/// creating parent directories. Overwrites any existing copy so re-running picks
+/// up a newer binary's skill text.
+fn install_claude_skill(vault_root: &Path) -> Result<(), String> {
+    let path = vault_root.join(CLAUDE_SKILL_REL);
+    let dir = path
+        .parent()
+        .expect("CLAUDE_SKILL_REL has a parent directory");
+    std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+    let existed = path.exists();
+    std::fs::write(&path, CLAUDE_SKILL_MD)
+        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    println!(
+        "{} Claude skill at {}",
+        if existed { "Updated" } else { "Installed" },
+        path.display()
+    );
+    Ok(())
+}
 
 /// True if `first` names one of the CLI subcommands handled here.
 pub fn is_cli_command(first: &str) -> bool {
@@ -874,6 +926,29 @@ mod tests {
     #[test]
     fn csv_row_joins_and_terminates() {
         assert_eq!(csv_row(&["a", "b,c", "d\"e"]), "a,\"b,c\",\"d\"\"e\"\r\n");
+    }
+
+    // ---------- ai install tests ----------
+
+    #[test]
+    fn install_claude_skill_writes_embedded_skill() {
+        let vault = TempDir::new().unwrap();
+        run_ai(&s(&["ai", "install-claude-skill"]), vault.path()).unwrap();
+
+        let path = vault.path().join(CLAUDE_SKILL_REL);
+        assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_SKILL_MD);
+
+        // Re-running overwrites in place (idempotent).
+        run_ai(&s(&["ai", "install-claude-skill"]), vault.path()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_SKILL_MD);
+    }
+
+    #[test]
+    fn ai_unknown_or_missing_subcommand_errors() {
+        let vault = TempDir::new().unwrap();
+        assert!(run_ai(&s(&["ai"]), vault.path()).is_err());
+        assert!(run_ai(&s(&["ai", "bogus"]), vault.path()).is_err());
+        assert!(run_ai(&s(&["ai", "install-claude-skill", "extra"]), vault.path()).is_err());
     }
 
     // ---------- executor tests ----------
