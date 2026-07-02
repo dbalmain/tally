@@ -422,10 +422,8 @@ impl App {
             s.count_transactions_in_category(cat.id)
         });
         let filter_count = self
-            .load_or_show("load filters", |s| s.list_filters())
-            .into_iter()
-            .filter(|f| f.category_id == Some(cat.id))
-            .count();
+            .load_or_show("load filters", |s| s.filters_using_category(cat.id))
+            .len();
         let suffix = if filter_count > 0 {
             format!(
                 " and {} filter{} will lose their category.",

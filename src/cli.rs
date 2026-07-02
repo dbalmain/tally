@@ -454,11 +454,9 @@ fn category_merge(
         .count_transactions_in_category(source_id)
         .map_err(stringify)?;
     let repointed = store
-        .list_filters()
+        .filters_using_category(source_id)
         .map_err(stringify)?
-        .into_iter()
-        .filter(|f| f.category_id == Some(source_id))
-        .count();
+        .len();
     store
         .merge_categories(source_id, target_id)
         .map_err(stringify)?;
@@ -489,12 +487,7 @@ fn category_delete(
     force: bool,
 ) -> Result<(), String> {
     let id = resolve_category(store, path)?;
-    let affected: Vec<tally::Filter> = store
-        .list_filters()
-        .map_err(stringify)?
-        .into_iter()
-        .filter(|f| f.category_id == Some(id))
-        .collect();
+    let affected = store.filters_using_category(id).map_err(stringify)?;
 
     if !affected.is_empty() && !force {
         let names = affected

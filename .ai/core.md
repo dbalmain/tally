@@ -212,6 +212,20 @@ prompts to break the existing transfer(s). Both prompts run through the generic
 candidate search (`store.transfer_candidates`) therefore no longer hides
 already-linked transactions — it offers them and the caller confirms.
 
+### Integrity invariants
+
+SQLite foreign keys are **not** enforced — there is no `PRAGMA foreign_keys`,
+so the `REFERENCES` clauses in the schema are documentation only. Store methods
+are therefore the only safe mutation path: raw SQL bypasses every invariant
+silently, so agents must never mutate via ad-hoc SQL. The invariants the store
+maintains:
+
+- A transaction is either categorised or in a transfer, never both
+  (`create_transfer` clears enrichments; the TUI guards the inverse).
+- `filters.category_id` never dangles — rename preserves it, merge repoints
+  it, delete clears it to NULL (`apply_filters` skips NULL-category filters).
+- Deleting a category deletes its enrichments and reports the count.
+
 ### Saved filters
 
 Filters are saved searches. When a filter has a category, `store.apply_filters()`
