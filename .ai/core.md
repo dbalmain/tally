@@ -58,7 +58,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 | Filter actions (create, rename, categorise, override/review/delete) | `src/tui/app/filters.rs` |
 | Transfer actions (mark, confirm, delete) | `src/tui/app/transfers.rs` |
 | Search-bar widget (rendering, cursor-context keys, autocomplete) | `src/tui/search_bar.rs` |
-| SQL queries / store methods | `src/store.rs` |
+| SQL queries / store methods | `src/store/` (column consts + row parsers in `mod.rs`; methods per submodule) |
 | Schema, FTS index, `transactions_view` | `src/db.rs` |
 | Search syntax, parsing, SQL rendering | `src/search/` (syntax reference: `src/search/mod.rs` doc comment) |
 | A single filter's behaviour (date, amount, account, category) | `src/search/filters/<name>.rs` |
@@ -74,7 +74,15 @@ src/
 ├── classify/               # Pure temporal + TF-IDF/SVM classification, similarity index, adapter
 ├── types.rs                # Core data structures
 ├── db.rs                   # SQLite schema, transactions_view, FTS index
-├── store.rs                # TransactionStore: all database operations
+├── store/                  # TransactionStore: all database operations
+│   ├── mod.rs              # Store struct/open, column consts ↔ row parsers, shared SQL helpers
+│   ├── import.rs           # refresh(): pull/CSV import, bank/account sync, soft deletes
+│   ├── queries.rs          # General reads: query_transactions, Todo-tab queries, id lookups
+│   ├── categories.rs       # Category CRUD, rename/merge/delete, counts
+│   ├── enrichments.rs      # set/confirm/clear category, confirmed examples
+│   ├── transfers.rs        # Transfer lifecycle, candidates, transfer queries
+│   ├── filters.rs          # Filter CRUD, apply_filters/preview_filters
+│   └── test_support.rs     # Shared test fixtures (cfg(test))
 ├── import.rs               # Import script execution and file discovery
 ├── logging.rs              # File logger (TALLY_LOG=debug, ~/.local/share/tally/)
 ├── error.rs                # Error types
@@ -313,7 +321,7 @@ background connection writes; WAL sidecar files (`-wal`/`-shm`) are expected.
 4. If the filter needs a column not yet in the standard contexts, add it to
    `transactions_view` in `src/db.rs` and to the `SEARCHABLE_TRANSACTION_COLUMNS`
    table (or the `transaction_ctx()` / `transfer_side_ctx()` extras for
-   non-per-side placeholders) in `src/store.rs`. If the placeholder requires a
+   non-per-side placeholders) in `src/store/mod.rs`. If the placeholder requires a
    JOIN, extend `transaction_joins()` to splice it in when
    `parsed.uses_placeholder(ph::YOUR_PLACEHOLDER)`.
 5. Document the syntax in the `src/search/mod.rs` doc comment.
@@ -340,8 +348,9 @@ Store query methods don't change; the search bar UI is filter-agnostic.
    `transactions_view` (keep the view's leading columns in
    `parse_transaction_at_offset` order).
 2. `src/types.rs` — add the field to `Transaction`.
-3. `src/store.rs` — add the column name to `tx_cols()` and parse it in
-   `parse_transaction_at_offset` (order matters); extend `insert_transaction`.
+3. `src/store/mod.rs` — add the column name to `tx_cols()` and parse it in
+   `parse_transaction_at_offset` (order matters); extend `insert_transaction`
+   in `src/store/import.rs`.
 4. Delete `tally.db` and re-import (no migrations).
 
 ### Adding a Key Binding
@@ -509,7 +518,7 @@ store.get_transfer_for_transaction(tx_id) -> Option<Transfer>
 ## Import Sources
 
 An account folder under `exports/` is fed by either (or both) of two
-mechanisms, both discovered and run by `refresh()` in `src/store.rs`
+mechanisms, both discovered and run by `refresh()` in `src/store/import.rs`
 (`import_account_transactions`). Both emit the same JSON; dedup is by
 `(account_id, hash)`, so re-runs are idempotent.
 
