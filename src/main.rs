@@ -9,12 +9,22 @@ struct CliArgs {
     rest: Vec<String>,
 }
 
+/// Every way the binary can be invoked, classified once from the command name.
+///
+/// Adding a command family means one new variant here, one arm in
+/// [`invocation_for_command`], and one arm in `main`'s dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
+enum Invocation {
     Tui,
     Refresh,
     Classify,
-    Help { to_stderr: bool },
+    Help {
+        to_stderr: bool,
+    },
+    /// Headless store commands (`categories`/`transactions`/`categorise`).
+    Cli,
+    /// `ai …` setup commands: act on the vault directory, no store.
+    Ai,
 }
 
 fn main() {
@@ -31,22 +41,15 @@ fn main() {
         .or_else(|| std::env::var_os("FM_VAULT").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // New headless subcommands (categories/transactions/categorise) and `ai`
-    // setup commands parse before the legacy action dispatch so they can carry
-    // their own args and flags. `ai` acts on the vault directory, not the store.
-    let first = args.rest.first().map(String::as_str);
-    let is_cli = first.is_some_and(cli::is_cli_command);
-    let is_ai = first.is_some_and(cli::is_ai_command);
+    let invocation = invocation_for_command(args.rest.first().map(String::as_str));
 
-    if !is_cli && !is_ai {
-        let action = action_for_command(first);
-        if let Action::Help { to_stderr } = action {
-            print_help(to_stderr);
-            if to_stderr {
-                std::process::exit(1);
-            }
-            return;
+    // Help (asked-for or unknown-command) needs no vault at all.
+    if let Invocation::Help { to_stderr } = invocation {
+        print_help(to_stderr);
+        if to_stderr {
+            std::process::exit(1);
         }
+        return;
     }
 
     let exports_dir = vault_root.join("exports");
@@ -59,24 +62,18 @@ fn main() {
         std::process::exit(1);
     }
 
-    if is_ai {
-        if let Err(message) = cli::run_ai(&args.rest, &vault_root) {
-            eprintln!("{message}");
-            std::process::exit(1);
+    match invocation {
+        Invocation::Tui => run_tui(&db_path, &exports_dir),
+        Invocation::Refresh => run_refresh(&db_path, &exports_dir),
+        Invocation::Classify => run_classify(&db_path, &exports_dir),
+        Invocation::Cli => run_cli(&args.rest, &db_path, &exports_dir),
+        Invocation::Ai => {
+            if let Err(message) = cli::run_ai(&args.rest, &vault_root) {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
         }
-        return;
-    }
-
-    if is_cli {
-        run_cli(&args.rest, &db_path, &exports_dir);
-        return;
-    }
-
-    match action_for_command(first) {
-        Action::Tui => run_tui(&db_path, &exports_dir),
-        Action::Refresh => run_refresh(&db_path, &exports_dir),
-        Action::Classify => run_classify(&db_path, &exports_dir),
-        Action::Help { .. } => unreachable!("help action returned before vault validation"),
+        Invocation::Help { .. } => unreachable!("help returned before vault validation"),
     }
 }
 
@@ -120,13 +117,17 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> CliArgs {
     CliArgs { vault, rest }
 }
 
-fn action_for_command(command: Option<&str>) -> Action {
+/// The single command-name → family mapping. The `cli` module owns which
+/// names belong to its two families, so those arms delegate to its predicates.
+fn invocation_for_command(command: Option<&str>) -> Invocation {
     match command {
-        None | Some("tui") | Some("--tui") => Action::Tui,
-        Some("pull") => Action::Refresh,
-        Some("classify") => Action::Classify,
-        Some("--help") | Some("-h") => Action::Help { to_stderr: false },
-        Some(_) => Action::Help { to_stderr: true },
+        None | Some("tui") | Some("--tui") => Invocation::Tui,
+        Some("pull") => Invocation::Refresh,
+        Some("classify") => Invocation::Classify,
+        Some("--help") | Some("-h") => Invocation::Help { to_stderr: false },
+        Some(first) if cli::is_cli_command(first) => Invocation::Cli,
+        Some(first) if cli::is_ai_command(first) => Invocation::Ai,
+        Some(_) => Invocation::Help { to_stderr: true },
     }
 }
 
@@ -291,12 +292,37 @@ mod tests {
     }
 
     #[test]
-    fn resolves_command_actions() {
-        assert_eq!(action_for_command(None), Action::Tui);
-        assert_eq!(action_for_command(Some("pull")), Action::Refresh);
+    fn classifies_invocations() {
+        assert_eq!(invocation_for_command(None), Invocation::Tui);
+        assert_eq!(invocation_for_command(Some("tui")), Invocation::Tui);
+        assert_eq!(invocation_for_command(Some("--tui")), Invocation::Tui);
+        assert_eq!(invocation_for_command(Some("pull")), Invocation::Refresh);
         assert_eq!(
-            action_for_command(Some("refresh")),
-            Action::Help { to_stderr: true }
+            invocation_for_command(Some("classify")),
+            Invocation::Classify
         );
+        assert_eq!(
+            invocation_for_command(Some("--help")),
+            Invocation::Help { to_stderr: false }
+        );
+        assert_eq!(
+            invocation_for_command(Some("-h")),
+            Invocation::Help { to_stderr: false }
+        );
+        assert_eq!(
+            invocation_for_command(Some("refresh")),
+            Invocation::Help { to_stderr: true }
+        );
+    }
+
+    #[test]
+    fn classifies_cli_and_ai_families() {
+        assert_eq!(invocation_for_command(Some("categories")), Invocation::Cli);
+        assert_eq!(
+            invocation_for_command(Some("transactions")),
+            Invocation::Cli
+        );
+        assert_eq!(invocation_for_command(Some("categorise")), Invocation::Cli);
+        assert_eq!(invocation_for_command(Some("ai")), Invocation::Ai);
     }
 }
