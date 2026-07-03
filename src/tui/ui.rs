@@ -52,14 +52,6 @@ const FILTER_COLS: [Constraint; 5] = [
     Constraint::Length(6),
 ];
 
-const FILTER_EDIT_PREVIEW_COLS: [Constraint; 5] = [
-    Constraint::Length(12),
-    Constraint::Min(24),
-    Constraint::Min(18),
-    Constraint::Length(12),
-    Constraint::Length(12),
-];
-
 const APPLY_FILTERS_COLS: [Constraint; 4] = [
     Constraint::Length(12),
     Constraint::Min(24),
@@ -371,21 +363,12 @@ fn draw_filter_edit_preview(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Render the read-only preview through the shared transaction table so it
+    // matches the Transactions tab: category column (showing what the filter
+    // would override), `/`-joined account, and standard path truncation.
+    let rows: Vec<&Transaction> = preview.iter().collect();
     let selected = app.filter_edit_preview_scroll();
-    ScrollTable::new(preview, selected, &FILTER_EDIT_PREVIEW_COLS).render(f, area, |i, tx| {
-        let bg = row_bg(i == selected);
-        let account = account_label(app, tx);
-
-        Row::new(vec![
-            Cell::from(tx.date.to_string()),
-            Cell::from(tx.description.as_str()),
-            Cell::from(account).style(Style::default().fg(Color::DarkGray)),
-            Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(amount_color(tx.amount_cents))),
-            Cell::from(Line::from(format_cents(tx.balance_cents)).alignment(Alignment::Right)),
-        ])
-        .style(Style::default().bg(bg))
-    });
+    draw_transaction_table(f, app, &rows, selected, area, true, true);
 }
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
