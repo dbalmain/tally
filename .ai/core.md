@@ -243,6 +243,11 @@ On Transactions, `Ctrl-S` saves the active DB search as a new filter and opens
 the filter edit screen for it. Applying filter categories (`a` on the Filters
 tab, `Ctrl-A` on the Filter Edit screen) opens a scrollable confirmation modal
 listing the affected transactions (date/description/amount) before applying.
+Toggling a filter's override mode (`o`/`Ctrl-O`) or review requirement
+(`v`/`Ctrl-V`) persists the setting and refreshes the display but must NOT call
+`apply_filters`: a setting change is not an apply, and eager-applying it would
+bypass the confirmation summary and, for the `all` override, silently overwrite
+existing categories. Categories change only when the user applies explicitly.
 Deleting a filter (`d`/`Delete`) and
 leaving the edit screen with unsaved query edits (`Esc`) both prompt for
 confirmation first.

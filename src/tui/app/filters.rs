@@ -405,10 +405,14 @@ impl App {
             FilterOverride::All => FilterOverride::Uncategorised,
         };
 
+        // A setting change must not apply categories on its own — that would
+        // bypass the `a` / Ctrl-A confirmation summary (and, for `all`, silently
+        // overwrite existing categories). Just persist the mode and refresh the
+        // display; the user applies explicitly.
         if self.try_mutation("set filter override", |s| {
             s.set_filter_override(filter.id, mode)
         }) {
-            self.reapply_filters();
+            self.reload_filters();
         }
     }
 
@@ -420,10 +424,12 @@ impl App {
             return;
         }
 
+        // As with the override mode: persist the setting and refresh the
+        // display, but leave applying to the explicit `a` / Ctrl-A flow.
         if self.try_mutation("set filter review", |s| {
             s.set_filter_review(filter.id, !filter.review_required)
         }) {
-            self.reapply_filters();
+            self.reload_filters();
         }
     }
 
@@ -645,6 +651,55 @@ mod tests {
         app.confirm_proceed();
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.filter_edit.is_none());
+    }
+
+    #[test]
+    fn cycling_override_persists_setting_without_applying() {
+        let (_temp, mut store) = store_with_imported_transaction();
+        let tx = store
+            .query_transactions(&crate::search::ParsedQuery::empty(), None)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.description == "Test transaction")
+            .unwrap();
+        // A filter matches the transaction and carries a rule category.
+        let rule_cat = store.get_or_create_category("Rule/Cat").unwrap();
+        let filter_id = store.create_filter("f", "Test").unwrap();
+        store
+            .set_filter_category(filter_id, Some(rule_cat))
+            .unwrap();
+        // The transaction already has a confirmed manual category.
+        let manual_cat = store.get_or_create_category("Manual/Cat").unwrap();
+        store
+            .set_category(tx.id, manual_cat, crate::CategorySource::Manual, true, None)
+            .unwrap();
+
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Filters;
+        app.selected_index = 0;
+
+        // Cycle override uncategorised -> ai -> all.
+        app.cycle_filter_override();
+        app.cycle_filter_override();
+
+        // The setting persisted...
+        assert_eq!(
+            app.store.list_filters().unwrap()[0].override_mode,
+            FilterOverride::All
+        );
+        // ...but nothing was applied: the manual category is untouched, even
+        // though override=all would overwrite it on an explicit apply.
+        assert_eq!(
+            app.store
+                .get_transaction_category(tx.id)
+                .unwrap()
+                .unwrap()
+                .path,
+            "Manual/Cat"
+        );
+        // The pending change only shows up when the user applies (a / Ctrl-A).
+        let preview = app.store.preview_filters().unwrap();
+        assert!(preview.iter().any(|t| t.id == tx.id));
     }
 
     fn store_with_imported_transaction() -> (TempDir, TransactionStore) {
