@@ -11,7 +11,7 @@ mod filters;
 mod import;
 mod queries;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod transfers;
 
 use chrono::{NaiveDate, Utc};

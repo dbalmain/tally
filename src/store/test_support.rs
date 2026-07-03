@@ -481,6 +481,18 @@ pub(crate) fn store_with_two_accounts() -> (TempDir, TransactionStore, i64, i64)
 }
 
 pub(crate) fn insert_tx(store: &TransactionStore, account_id: i64, date: &str, amount: i64) -> i64 {
+    insert_tx_desc(store, account_id, date, "tx", amount)
+}
+
+/// Like [`insert_tx`] but with a caller-chosen description, indexed for FTS so
+/// full-text filter queries can match it.
+pub(crate) fn insert_tx_desc(
+    store: &TransactionStore,
+    account_id: i64,
+    date: &str,
+    description: &str,
+    amount: i64,
+) -> i64 {
     let batch_id: i64 = store
         .conn
         .query_row("SELECT id FROM import_batches LIMIT 1", [], |r| r.get(0))
@@ -491,17 +503,26 @@ pub(crate) fn insert_tx(store: &TransactionStore, account_id: i64, date: &str, a
             "INSERT INTO transactions
              (account_id, date, description, amount_cents, balance_cents,
               hash, metadata, source_file, import_batch_id)
-             VALUES (?, ?, 'tx', ?, 0, ?, '{}', '', ?)",
+             VALUES (?, ?, ?, ?, 0, ?, '{}', '', ?)",
             params![
                 account_id,
                 date,
+                description,
                 amount,
-                format!("{}-{}-{}", account_id, date, amount),
+                format!("{account_id}-{date}-{description}-{amount}"),
                 batch_id
             ],
         )
         .unwrap();
-    store.conn.last_insert_rowid()
+    let tx_id = store.conn.last_insert_rowid();
+    store
+        .conn
+        .execute(
+            "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
+            params![tx_id, description],
+        )
+        .unwrap();
+    tx_id
 }
 
 pub(crate) fn get_tx(store: &TransactionStore, id: i64) -> Transaction {

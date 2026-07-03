@@ -186,10 +186,13 @@ Transaction {
 
 ### AI Classification Pipeline
 
-`tally classify` first detects likely transfers among uncategorised,
-not-yet-transferred transactions: same-day opposite amounts in different
-accounts, paired greedily with history-aware confidence. Detected transfers use
-source `auto`, remain unconfirmed, and are excluded from category suggestions.
+`tally classify` first detects likely transfers among not-yet-transferred
+transactions without a user-confirmed category: same-day opposite amounts in
+different accounts, paired greedily with history-aware confidence. Detected
+transfers use source `auto`, remain unconfirmed, and are excluded from category
+suggestions. Saved filters apply only after detection, so a filter can never
+claim a transfer leg (the store additionally skips existing transfer legs
+during apply, regardless of override mode).
 It then trains only from confirmed category enrichments, first reusing the most
 recent prior same-biller category and preferring an exact amount; novel billers
 fall back to word/character TF-IDF plus a one-vs-rest linear SVM. The pure
