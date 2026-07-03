@@ -383,22 +383,17 @@ impl App {
 
         // Load transfer links straight from the DB for every loaded
         // transaction, so an unlink (which only touches the `transfers` table)
-        // is reflected even on tabs that don't reload `linked_transfers`.
+        // is reflected even on tabs that don't reload `linked_transfers`. This
+        // is the single source of truth: the DB query already covers every
+        // pending transfer-review pair (both endpoints were loaded into
+        // `tx_by_id` above), so we must NOT also seed the cache from the
+        // `transfer_reviews` list — that list isn't reloaded when another tab
+        // is active, and a stale entry would resurrect a transfer the user has
+        // just unlinked or recategorised.
         let all_tx_ids: Vec<i64> = self.tx_by_id.keys().copied().collect();
         self.transfer_by_tx_id = self.load_or_show("load transaction transfers", |s| {
             s.get_transfers_for_transactions(&all_tx_ids)
         });
-        // Pending transfer reviews carry their Transfer directly and may
-        // reference transactions outside the loaded lists; keep them as a
-        // fallback for any endpoint the bulk lookup didn't cover.
-        for tr in self.lists.transfer_reviews.items() {
-            self.transfer_by_tx_id
-                .entry(tr.from_transaction_id)
-                .or_insert_with(|| tr.clone());
-            self.transfer_by_tx_id
-                .entry(tr.to_transaction_id)
-                .or_insert_with(|| tr.clone());
-        }
     }
 
     pub fn get_cached_transaction(&self, id: i64) -> Option<&Transaction> {
@@ -1137,6 +1132,51 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn unlinking_transfer_clears_indicator_despite_stale_transfer_review_list() {
+        let (_temp, mut store) = store_with_transactions(&[
+            FixtureTx {
+                description: "Move out",
+                amount_cents: -10000,
+            },
+            FixtureTx {
+                description: "Move in",
+                amount_cents: 10000,
+            },
+        ]);
+        let from = tx_by_description(&store, "Move out");
+        let to = tx_by_description(&store, "Move in");
+        // An unconfirmed (auto) transfer surfaces on the Transfer Review subtab.
+        store
+            .create_transfer(from.id, to.id, TransferSource::Auto, false, Some(0.9))
+            .unwrap();
+
+        let mut app = App::new(store).unwrap();
+        // Visiting Transfer Review loads `transfer_reviews` into memory.
+        app.current_tab = Tab::Todo;
+        app.todo_subtab = TodoSubTab::TransferReview;
+        app.reload_current_tab();
+        assert_eq!(app.lists.transfer_reviews.len(), 1);
+
+        // Back on Transactions, the leg correctly reads as a transfer.
+        app.current_tab = Tab::Transactions;
+        app.reload_current_tab();
+        let transfer_id = app
+            .get_cached_transfer(from.id)
+            .expect("leg reads as a transfer")
+            .id;
+
+        // Unlink it. `transfer_reviews` is NOT reloaded while the Transactions
+        // tab is active, so it still holds the now-deleted transfer — the cache
+        // must reflect the DB, not the stale list.
+        app.input_mode = InputMode::Confirm;
+        app.confirm_action = Some(ConfirmAction::UnlinkTransfer { transfer_id });
+        app.confirm_proceed();
+
+        assert!(app.get_cached_transfer(from.id).is_none());
+        assert!(app.get_cached_transfer(to.id).is_none());
     }
 
     #[test]
