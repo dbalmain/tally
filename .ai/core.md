@@ -489,7 +489,10 @@ feedback.
 Full reference: the `src/search/mod.rs` doc comment (canonical).
 
 - **DB search (`/`)** pushes filters to SQL: `date:2024-01..2024-06`,
-  `amount:>100` (precision-aware for bare values), `account:ING/Orange`
+  `amount:>100` (precision-aware for bare values; matches either sign
+  unless a `+`/`-` sign or a zero range/comparison endpoint makes it
+  signed, e.g. `amount:0..` = credits, `amount:-100..-50` = debits),
+  `account:ING/Orange`
   (Bank/Account prefixes, `|` for OR), `category:Food|Transport`. Bare words
   are FTS5 full-text search (`coffee OR tea`, `"exact phrase"`, `coff*`);
   `/pattern/i` is regex. End with ` ~` to switch to fuzzy mode keeping the
