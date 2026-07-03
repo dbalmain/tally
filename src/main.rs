@@ -13,13 +13,17 @@ struct CliArgs {
 ///
 /// Adding a command family means one new variant here, one arm in
 /// [`invocation_for_command`], and one arm in `main`'s dispatch.
+///
+/// `Help` carries a [`cli::HelpTopic`] (the most-specific command the user asked
+/// about). `main` resolves help — printing it and exiting — *before* the vault
+/// check, so `--help` on any command works outside a vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Invocation {
     Tui,
     Refresh,
     Classify,
     Help {
-        to_stderr: bool,
+        topic: cli::HelpTopic,
     },
     /// Headless store commands (`categories`/`transactions`/`categorise`).
     Cli,
@@ -41,11 +45,13 @@ fn main() {
         .or_else(|| std::env::var_os("FM_VAULT").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let invocation = invocation_for_command(args.rest.first().map(String::as_str));
+    let invocation = invocation_for_command(&args.rest);
 
-    // Help (asked-for or unknown-command) needs no vault at all.
-    if let Invocation::Help { to_stderr } = invocation {
-        print_help(to_stderr);
+    // Help (asked-for or unknown-command) needs no vault at all: resolve it
+    // before the vault check so `--help`/`-h`/`-?`/`tally help …` work anywhere.
+    if let Invocation::Help { topic } = invocation {
+        let to_stderr = topic == cli::HelpTopic::Unknown;
+        cli::print_help(topic, to_stderr);
         if to_stderr {
             std::process::exit(1);
         }
@@ -119,61 +125,23 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> CliArgs {
 
 /// The single command-name → family mapping. The `cli` module owns which
 /// names belong to its two families, so those arms delegate to its predicates.
-fn invocation_for_command(command: Option<&str>) -> Invocation {
-    match command {
+///
+/// Help is detected *first* — anywhere among the tokens — so it wins over a
+/// would-be parse error (e.g. `tally categories rename --help` with missing
+/// args) and over the unknown-command arm.
+fn invocation_for_command(rest: &[String]) -> Invocation {
+    if let Some(topic) = cli::detect_help(rest) {
+        return Invocation::Help { topic };
+    }
+    match rest.first().map(String::as_str) {
         None | Some("tui") | Some("--tui") => Invocation::Tui,
         Some("pull") => Invocation::Refresh,
         Some("classify") => Invocation::Classify,
-        Some("--help") | Some("-h") => Invocation::Help { to_stderr: false },
         Some(first) if cli::is_cli_command(first) => Invocation::Cli,
         Some(first) if cli::is_ai_command(first) => Invocation::Ai,
-        Some(_) => Invocation::Help { to_stderr: true },
-    }
-}
-
-fn print_help(to_stderr: bool) {
-    let help = "\
-Usage: tally [--vault PATH] [COMMAND]
-
-Commands:
-  (none)     Launch the terminal UI (default)
-  pull       Refresh transactions from exports/ (run import/pull scripts)
-  classify   Suggest categories and detect transfers locally
-  tui        Launch the terminal UI
-
-  categories list [--json|--csv]
-             List categories with transaction counts
-  categories rename <path> <new-path> [--json]
-             Rename a single category (does not cascade to children)
-  categories merge <source-path> <target-path> [--json]
-             Move source's transactions to target, then delete source
-  categories delete <path> [--force] [--json]
-             Delete a category (blocked if a filter uses it; --force clears them)
-
-  transactions list [QUERY...] [--limit N] [--json|--csv]
-             List transactions matching a search query (default limit 100)
-
-  categorise <tx-id> <category-path> [--json]
-             Assign a category to a transaction (created if new)
-  categorise <tx-id> --clear [--json]
-             Remove a transaction's category
-
-  ai install-claude-skill
-             Install the Claude Code skill into this vault's .claude/skills/
-
-Output flags:
-  --json         Emit JSON instead of human-readable text
-  --csv          Emit CSV (only valid on the `list` commands)
-  --limit N      Cap `transactions list` results (default 100)
-
-Global flags:
-  --vault PATH   Use PATH as the vault root (or set FM_VAULT)
-";
-
-    if to_stderr {
-        eprint!("{help}");
-    } else {
-        print!("{help}");
+        Some(_) => Invocation::Help {
+            topic: cli::HelpTopic::Unknown,
+        },
     }
 }
 
@@ -293,36 +261,173 @@ mod tests {
 
     #[test]
     fn classifies_invocations() {
-        assert_eq!(invocation_for_command(None), Invocation::Tui);
-        assert_eq!(invocation_for_command(Some("tui")), Invocation::Tui);
-        assert_eq!(invocation_for_command(Some("--tui")), Invocation::Tui);
-        assert_eq!(invocation_for_command(Some("pull")), Invocation::Refresh);
+        assert_eq!(invocation_for_command(&[]), Invocation::Tui);
+        assert_eq!(invocation_for_command(&s(&["tui"])), Invocation::Tui);
+        assert_eq!(invocation_for_command(&s(&["--tui"])), Invocation::Tui);
+        assert_eq!(invocation_for_command(&s(&["pull"])), Invocation::Refresh);
         assert_eq!(
-            invocation_for_command(Some("classify")),
+            invocation_for_command(&s(&["classify"])),
             Invocation::Classify
         );
         assert_eq!(
-            invocation_for_command(Some("--help")),
-            Invocation::Help { to_stderr: false }
+            invocation_for_command(&s(&["--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Global
+            }
         );
         assert_eq!(
-            invocation_for_command(Some("-h")),
-            Invocation::Help { to_stderr: false }
+            invocation_for_command(&s(&["-h"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Global
+            }
         );
         assert_eq!(
-            invocation_for_command(Some("refresh")),
-            Invocation::Help { to_stderr: true }
+            invocation_for_command(&s(&["-?"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Global
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Global
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["refresh"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Unknown
+            }
         );
     }
 
     #[test]
     fn classifies_cli_and_ai_families() {
-        assert_eq!(invocation_for_command(Some("categories")), Invocation::Cli);
+        assert_eq!(invocation_for_command(&s(&["categories"])), Invocation::Cli);
         assert_eq!(
-            invocation_for_command(Some("transactions")),
+            invocation_for_command(&s(&["transactions"])),
             Invocation::Cli
         );
-        assert_eq!(invocation_for_command(Some("categorise")), Invocation::Cli);
-        assert_eq!(invocation_for_command(Some("ai")), Invocation::Ai);
+        assert_eq!(invocation_for_command(&s(&["categorise"])), Invocation::Cli);
+        assert_eq!(invocation_for_command(&s(&["ai"])), Invocation::Ai);
+    }
+
+    #[test]
+    fn help_on_any_command_resolves_to_topic() {
+        // Family-level help.
+        assert_eq!(
+            invocation_for_command(&s(&["categories", "--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Categories
+            }
+        );
+        // Subcommand-level help, mixed with other args.
+        assert_eq!(
+            invocation_for_command(&s(&["categories", "rename", "A", "B", "--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::CategoriesRename
+            }
+        );
+        // Help wins over a would-be parse error (missing args).
+        assert_eq!(
+            invocation_for_command(&s(&["categories", "rename", "--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::CategoriesRename
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["categories", "delete", "-?"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::CategoriesDelete
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["transactions", "list", "--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::TransactionsList
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["categorise", "-h"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Categorise
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["ai", "--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Ai
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["ai", "install-claude-skill", "--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::AiInstallClaudeSkill
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["tui", "--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Tui
+            }
+        );
+    }
+
+    #[test]
+    fn leading_help_form_resolves_topic() {
+        assert_eq!(
+            invocation_for_command(&s(&["help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Global
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["help", "categories"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Categories
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["help", "categories", "rename"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::CategoriesRename
+            }
+        );
+        assert_eq!(
+            invocation_for_command(&s(&["help", "transactions"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Transactions
+            }
+        );
+    }
+
+    #[test]
+    fn leading_help_unknown_is_unknown_topic() {
+        assert_eq!(
+            invocation_for_command(&s(&["help", "frobnicate"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Unknown
+            }
+        );
+        // A help flag on an unknown command falls back to global help.
+        assert_eq!(
+            invocation_for_command(&s(&["frobnicate", "--help"])),
+            Invocation::Help {
+                topic: cli::HelpTopic::Global
+            }
+        );
+    }
+
+    #[test]
+    fn help_word_after_command_is_not_help() {
+        // `help` must be the FIRST token to trigger help; later it's a query.
+        assert_eq!(
+            invocation_for_command(&s(&["transactions", "list", "help"])),
+            Invocation::Cli
+        );
+    }
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
     }
 }

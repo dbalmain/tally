@@ -32,6 +32,9 @@ cargo run -- categorise <tx-id> <category-path>    # or: categorise <tx-id> --cl
 
 # Install the Claude Code skill into <vault>/.claude/skills/ (embedded in the binary)
 cargo run -- ai install-claude-skill
+# Every command above accepts --help/-h/-? anywhere in its tokens (e.g.
+# `tally categories delete --help`, `tally help categories`); printed to
+# stdout, exit 0, and never needs a valid vault.
 ```
 
 ## Project Goals

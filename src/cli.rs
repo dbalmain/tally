@@ -66,6 +66,440 @@ pub enum Command {
 
 const DEFAULT_LIMIT: usize = 100;
 
+// ==================== Contextual help ====================
+//
+// Single source of truth for every command's usage line(s) and one-line
+// description. Global help, per-command help, and parse-error messages all
+// render from the `SPECS` table below so the three can never drift.
+
+/// A help topic: the most-specific command named by the user's tokens.
+///
+/// `Global` is the full top-level help; `Unknown` is the same text but printed
+/// to stderr with a non-zero exit (used for unknown commands and the
+/// `tally help <unknown>` form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpTopic {
+    Global,
+    Unknown,
+    Tui,
+    Pull,
+    Classify,
+    Categories,
+    CategoriesList,
+    CategoriesRename,
+    CategoriesMerge,
+    CategoriesDelete,
+    Transactions,
+    TransactionsList,
+    Categorise,
+    Ai,
+    AiInstallClaudeSkill,
+}
+
+/// One usage form of a command (most commands have exactly one; `categorise`
+/// has two — set and clear).
+#[derive(Clone, Copy)]
+struct Form {
+    usage: &'static str,
+    desc: &'static str,
+}
+
+/// A documented flag for a command.
+#[derive(Clone, Copy)]
+struct FlagSpec {
+    name: &'static str,
+    desc: &'static str,
+}
+
+/// One row of the command table. Family nodes (paths like `["categories"]`)
+/// have empty `forms`/`flags`; their leaves carry the actual usage and flags.
+struct Spec {
+    topic: HelpTopic,
+    /// Full command path, e.g. `["categories", "list"]`. Single element for
+    /// top-level/standalone commands.
+    path: &'static [&'static str],
+    /// Usage forms. Empty for family nodes (their leaves carry the forms).
+    forms: &'static [Form],
+    /// Documented flags. Empty for family nodes.
+    flags: &'static [FlagSpec],
+}
+
+const FLAG_JSON: FlagSpec = FlagSpec {
+    name: "--json",
+    desc: "Emit JSON instead of human-readable text",
+};
+const FLAG_CSV: FlagSpec = FlagSpec {
+    name: "--csv",
+    desc: "Emit CSV (only valid on `list` commands)",
+};
+const FLAG_FORCE: FlagSpec = FlagSpec {
+    name: "--force",
+    desc: "Delete even if a filter uses the category (clears those filters)",
+};
+const FLAG_LIMIT: FlagSpec = FlagSpec {
+    name: "--limit N",
+    desc: "Cap results (default 100)",
+};
+
+const SPECS: &[Spec] = &[
+    Spec {
+        topic: HelpTopic::Tui,
+        path: &["tui"],
+        forms: &[Form {
+            usage: "tui",
+            desc: "Launch the terminal UI (also the default command)",
+        }],
+        flags: &[],
+    },
+    Spec {
+        topic: HelpTopic::Pull,
+        path: &["pull"],
+        forms: &[Form {
+            usage: "pull",
+            desc: "Refresh transactions from exports/ (run import/pull scripts)",
+        }],
+        flags: &[],
+    },
+    Spec {
+        topic: HelpTopic::Classify,
+        path: &["classify"],
+        forms: &[Form {
+            usage: "classify",
+            desc: "Suggest categories and detect transfers locally",
+        }],
+        flags: &[],
+    },
+    Spec {
+        topic: HelpTopic::Categories,
+        path: &["categories"],
+        forms: &[],
+        flags: &[],
+    },
+    Spec {
+        topic: HelpTopic::CategoriesList,
+        path: &["categories", "list"],
+        forms: &[Form {
+            usage: "categories list [--json|--csv]",
+            desc: "List categories with transaction counts",
+        }],
+        flags: &[FLAG_JSON, FLAG_CSV],
+    },
+    Spec {
+        topic: HelpTopic::CategoriesRename,
+        path: &["categories", "rename"],
+        forms: &[Form {
+            usage: "categories rename <path> <new-path> [--json]",
+            desc: "Rename a single category (does not cascade to children)",
+        }],
+        flags: &[FLAG_JSON],
+    },
+    Spec {
+        topic: HelpTopic::CategoriesMerge,
+        path: &["categories", "merge"],
+        forms: &[Form {
+            usage: "categories merge <source-path> <target-path> [--json]",
+            desc: "Move source's transactions to target, then delete source",
+        }],
+        flags: &[FLAG_JSON],
+    },
+    Spec {
+        topic: HelpTopic::CategoriesDelete,
+        path: &["categories", "delete"],
+        forms: &[Form {
+            usage: "categories delete <path> [--force] [--json]",
+            desc: "Delete a category (blocked if a filter uses it; --force clears them)",
+        }],
+        flags: &[FLAG_FORCE, FLAG_JSON],
+    },
+    Spec {
+        topic: HelpTopic::Transactions,
+        path: &["transactions"],
+        forms: &[],
+        flags: &[],
+    },
+    Spec {
+        topic: HelpTopic::TransactionsList,
+        path: &["transactions", "list"],
+        forms: &[Form {
+            usage: "transactions list [QUERY...] [--limit N] [--json|--csv]",
+            desc: "List transactions matching a search query (default limit 100)",
+        }],
+        flags: &[FLAG_JSON, FLAG_CSV, FLAG_LIMIT],
+    },
+    Spec {
+        topic: HelpTopic::Categorise,
+        path: &["categorise"],
+        forms: &[
+            Form {
+                usage: "categorise <tx-id> <category-path> [--json]",
+                desc: "Assign a category to a transaction (created if new)",
+            },
+            Form {
+                usage: "categorise <tx-id> --clear [--json]",
+                desc: "Remove a transaction's category",
+            },
+        ],
+        flags: &[FLAG_JSON],
+    },
+    Spec {
+        topic: HelpTopic::Ai,
+        path: &["ai"],
+        forms: &[],
+        flags: &[],
+    },
+    Spec {
+        topic: HelpTopic::AiInstallClaudeSkill,
+        path: &["ai", "install-claude-skill"],
+        forms: &[Form {
+            usage: "ai install-claude-skill",
+            desc: "Install the Claude Code skill into this vault's .claude/skills/",
+        }],
+        flags: &[],
+    },
+];
+
+fn find_spec(topic: HelpTopic) -> &'static Spec {
+    SPECS
+        .iter()
+        .find(|s| s.topic == topic)
+        .expect("every HelpTopic has a Spec")
+}
+
+fn command_path(topic: HelpTopic) -> String {
+    find_spec(topic).path.join(" ")
+}
+
+fn form_usage(topic: HelpTopic, idx: usize) -> &'static str {
+    let spec = find_spec(topic);
+    spec.forms.get(idx).map(|f| f.usage).unwrap_or_else(|| {
+        spec.forms
+            .first()
+            .expect("non-family spec has a form")
+            .usage
+    })
+}
+
+/// Resolve `tokens` (the command path, with help tokens already stripped) to the
+/// most-specific known [`HelpTopic`]. Empty tokens → `Global`. Non-empty tokens
+/// that don't even match a known root → `Unknown`.
+fn resolve_topic(tokens: &[&str]) -> HelpTopic {
+    if tokens.is_empty() {
+        return HelpTopic::Global;
+    }
+    let mut best: Option<&Spec> = None;
+    for spec in SPECS {
+        if spec.path.len() <= tokens.len() && spec.path.iter().zip(tokens).all(|(a, b)| a == b) {
+            match best {
+                None => best = Some(spec),
+                Some(cur) if cur.path.len() < spec.path.len() => best = Some(spec),
+                _ => {}
+            }
+        }
+    }
+    match best {
+        Some(spec) => spec.topic,
+        None => HelpTopic::Unknown,
+    }
+}
+
+/// Detect a help request anywhere in the vault-stripped token slice.
+///
+/// Two forms are recognised:
+/// - a leading `help` token (`tally help`, `tally help categories rename`);
+/// - any of `-h`, `--help`, `-?` among the tokens (`tally categories --help`).
+///
+/// A bare `help` appearing later (e.g. `tally transactions list help`) is NOT
+/// help — it keeps its current meaning (there, an FTS search for "help").
+pub fn detect_help(args: &[String]) -> Option<HelpTopic> {
+    if args.first().map(String::as_str) == Some("help") {
+        let tokens: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+        return Some(resolve_topic(&tokens));
+    }
+    if args
+        .iter()
+        .any(|a| matches!(a.as_str(), "-h" | "--help" | "-?"))
+    {
+        let tokens: Vec<&str> = args
+            .iter()
+            .filter(|a| !matches!(a.as_str(), "-h" | "--help" | "-?"))
+            .map(String::as_str)
+            .collect();
+        let topic = resolve_topic(&tokens);
+        // A help flag is always a request for help, never an unknown-command
+        // error, so an unmatched path falls back to the global help (stdout).
+        return Some(if topic == HelpTopic::Unknown {
+            HelpTopic::Global
+        } else {
+            topic
+        });
+    }
+    None
+}
+
+/// Render the help text for `topic`. `main` owns the destination (stdout/stderr)
+/// and the exit code; this is pure data.
+pub fn render_help(topic: HelpTopic) -> String {
+    match topic {
+        HelpTopic::Global | HelpTopic::Unknown => render_global(),
+        HelpTopic::Categories | HelpTopic::Transactions | HelpTopic::Ai => render_family(topic),
+        other => render_leaf(other),
+    }
+}
+
+/// Print the rendered help. `to_stderr` selects the stream; `main` decides it
+/// and the exit code.
+pub fn print_help(topic: HelpTopic, to_stderr: bool) {
+    let text = render_help(topic);
+    if to_stderr {
+        eprint!("{text}");
+    } else {
+        print!("{text}");
+    }
+}
+
+/// "Usage: tally <usage>\n\nsee: tally <path> --help" — the single-sourced
+/// shape consumed by parse errors.
+fn usage_error(topic: HelpTopic, form_idx: usize) -> String {
+    format!(
+        "Usage: tally {}\n\nsee: tally {} --help",
+        form_usage(topic, form_idx),
+        command_path(topic),
+    )
+}
+
+// Global help, composed from the same `SPECS` table so it can never drift.
+fn render_global() -> String {
+    let mut out = String::new();
+    out.push_str("Usage: tally [--vault PATH] [COMMAND]\n\nCommands:\n");
+
+    // Top-level inline group: the default and the three standalone commands.
+    out.push_str("  (none)     Launch the terminal UI (default)\n");
+    for topic in [HelpTopic::Pull, HelpTopic::Classify, HelpTopic::Tui] {
+        let spec = find_spec(topic);
+        out.push_str(&format!("  {:<11} {}\n", spec.path[0], spec.forms[0].desc));
+    }
+
+    out.push('\n');
+
+    // Multi-word commands: usage on one line, description indented under it.
+    for topic in [
+        HelpTopic::CategoriesList,
+        HelpTopic::CategoriesRename,
+        HelpTopic::CategoriesMerge,
+        HelpTopic::CategoriesDelete,
+    ] {
+        let spec = find_spec(topic);
+        out.push_str(&format!("  {}\n", spec.forms[0].usage));
+        out.push_str(&format!("             {}\n", spec.forms[0].desc));
+    }
+
+    out.push('\n');
+
+    let tx = find_spec(HelpTopic::TransactionsList);
+    out.push_str(&format!("  {}\n", tx.forms[0].usage));
+    out.push_str(&format!("             {}\n\n", tx.forms[0].desc));
+
+    let cat = find_spec(HelpTopic::Categorise);
+    for form in cat.forms {
+        out.push_str(&format!("  {}\n", form.usage));
+        out.push_str(&format!("             {}\n", form.desc));
+    }
+
+    out.push('\n');
+
+    let ai = find_spec(HelpTopic::AiInstallClaudeSkill);
+    out.push_str(&format!("  {}\n", ai.forms[0].usage));
+    out.push_str(&format!(
+        "             {}\n\nOutput flags:\n  --json         Emit JSON instead of human-readable text\n  --csv          Emit CSV (only valid on the `list` commands)\n  --limit N      Cap `transactions list` results (default 100)\n\nGlobal flags:\n  --vault PATH   Use PATH as the vault root (or set FM_VAULT)\n",
+        ai.forms[0].desc
+    ));
+
+    out
+}
+
+fn render_leaf(topic: HelpTopic) -> String {
+    let spec = find_spec(topic);
+    let mut out = String::new();
+    if spec.forms.len() == 1 {
+        out.push_str(&format!(
+            "Usage: tally {}\n\n{}\n",
+            spec.forms[0].usage, spec.forms[0].desc
+        ));
+    } else {
+        out.push_str("Usage:\n");
+        for form in spec.forms {
+            out.push_str(&format!("  tally {}\n    {}\n", form.usage, form.desc));
+        }
+        out.push('\n');
+    }
+    if !spec.flags.is_empty() {
+        out.push_str("Flags:\n");
+        let width = spec.flags.iter().map(|f| f.name.len()).max().unwrap_or(0);
+        for flag in spec.flags {
+            out.push_str(&format!(
+                "  {:<width$}  {}\n",
+                flag.name,
+                flag.desc,
+                width = width
+            ));
+        }
+    }
+    out
+}
+
+fn render_family(topic: HelpTopic) -> String {
+    let family = find_spec(topic);
+    let leaves: Vec<&Spec> = SPECS
+        .iter()
+        .filter(|s| s.path.len() > family.path.len() && s.path.starts_with(family.path))
+        .collect();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Usage: tally {} <subcommand> [...]\n\nSubcommands:\n",
+        family.path[0]
+    ));
+    for leaf in &leaves {
+        for form in leaf.forms {
+            out.push_str(&format!(
+                "  tally {}\n              {}\n",
+                form.usage, form.desc
+            ));
+        }
+    }
+
+    // Union of flag descriptions across the family, deduped by name.
+    let mut seen: Vec<&str> = Vec::new();
+    let mut flags: Vec<FlagSpec> = Vec::new();
+    for leaf in &leaves {
+        for flag in leaf.flags {
+            if !seen.contains(&flag.name) {
+                seen.push(flag.name);
+                flags.push(*flag);
+            }
+        }
+    }
+    out.push('\n');
+    if !flags.is_empty() {
+        out.push_str("Flags:\n");
+        let width = flags.iter().map(|f| f.name.len()).max().unwrap_or(0);
+        for flag in flags {
+            out.push_str(&format!(
+                "  {:<width$}  {}\n",
+                flag.name,
+                flag.desc,
+                width = width
+            ));
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "Run `tally {} <subcommand> --help` for a subcommand's flag details.\n",
+        family.path[0]
+    ));
+    out
+}
+
 /// True if `first` names an `ai …` setup command. These act on the vault
 /// directory rather than the store, so `main` routes them to [`run_ai`].
 pub fn is_ai_command(first: &str) -> bool {
@@ -83,9 +517,11 @@ pub fn run_ai(args: &[String], vault_root: &Path) -> Result<(), String> {
             install_claude_skill(vault_root)
         }
         Some(other) => Err(format!(
-            "Unknown ai subcommand: {other} (expected install-claude-skill)"
+            "Unknown ai subcommand: {other} (expected install-claude-skill)\n\nsee: tally ai --help"
         )),
-        None => Err("ai requires a subcommand (install-claude-skill)".to_string()),
+        None => Err(
+            "ai requires a subcommand (install-claude-skill)\n\nsee: tally ai --help".to_string(),
+        ),
     }
 }
 
@@ -203,21 +639,29 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_categories(args: &[String]) -> Result<Command, String> {
-    let (sub, rest) = args
-        .split_first()
-        .ok_or_else(|| "categories requires a subcommand (list|rename|merge|delete)".to_string())?;
+    let (sub, rest) = args.split_first().ok_or_else(|| {
+        "categories requires a subcommand (list|rename|merge|delete)\n\nsee: tally categories --help"
+            .to_string()
+    })?;
 
     match sub.as_str() {
         "list" => {
             let flags = collect_flags(rest, false, true)?;
-            expect_positional(&flags.positional, 0, "categories list")?;
+            expect_positional(
+                &flags.positional,
+                0,
+                &usage_error(HelpTopic::CategoriesList, 0),
+            )?;
             Ok(Command::CategoriesList {
                 format: format_of(&flags),
             })
         }
         "rename" => {
             let flags = collect_flags(rest, false, false)?;
-            let [from, to] = take_two(&flags.positional, "categories rename <path> <new-path>")?;
+            let [from, to] = take_two(
+                &flags.positional,
+                &usage_error(HelpTopic::CategoriesRename, 0),
+            )?;
             Ok(Command::CategoryRename {
                 from,
                 to,
@@ -228,7 +672,7 @@ fn parse_categories(args: &[String]) -> Result<Command, String> {
             let flags = collect_flags(rest, false, false)?;
             let [source, target] = take_two(
                 &flags.positional,
-                "categories merge <source-path> <target-path>",
+                &usage_error(HelpTopic::CategoriesMerge, 0),
             )?;
             Ok(Command::CategoryMerge {
                 source,
@@ -238,7 +682,7 @@ fn parse_categories(args: &[String]) -> Result<Command, String> {
         }
         "delete" => parse_categories_delete(rest),
         other => Err(format!(
-            "Unknown categories subcommand: {other} (expected list|rename|merge|delete)"
+            "Unknown categories subcommand: {other} (expected list|rename|merge|delete)\n\nsee: tally categories --help"
         )),
     }
 }
@@ -260,14 +704,14 @@ fn parse_categories_delete(args: &[String]) -> Result<Command, String> {
         }
     }
 
-    let [path] = take_one(&positional, "categories delete <path>")?;
+    let [path] = take_one(&positional, &usage_error(HelpTopic::CategoriesDelete, 0))?;
     Ok(Command::CategoryDelete { path, json, force })
 }
 
 fn parse_transactions(args: &[String]) -> Result<Command, String> {
-    let (sub, rest) = args
-        .split_first()
-        .ok_or_else(|| "transactions requires a subcommand (list)".to_string())?;
+    let (sub, rest) = args.split_first().ok_or_else(|| {
+        "transactions requires a subcommand (list)\n\nsee: tally transactions --help".to_string()
+    })?;
 
     match sub.as_str() {
         "list" => {
@@ -279,7 +723,7 @@ fn parse_transactions(args: &[String]) -> Result<Command, String> {
             })
         }
         other => Err(format!(
-            "Unknown transactions subcommand: {other} (expected list)"
+            "Unknown transactions subcommand: {other} (expected list)\n\nsee: tally transactions --help"
         )),
     }
 }
@@ -302,12 +746,12 @@ fn parse_categorise(args: &[String]) -> Result<Command, String> {
     }
 
     if clear {
-        let [id] = take_one(&positional, "categorise <tx-id> --clear")?;
+        let [id] = take_one(&positional, &usage_error(HelpTopic::Categorise, 1))?;
         let tx_id = parse_tx_id(&id)?;
         return Ok(Command::Uncategorise { tx_id, json });
     }
 
-    let [id, path] = take_two(&positional, "categorise <tx-id> <category-path>")?;
+    let [id, path] = take_two(&positional, &usage_error(HelpTopic::Categorise, 0))?;
     let tx_id = parse_tx_id(&id)?;
     Ok(Command::Categorise { tx_id, path, json })
 }
@@ -318,25 +762,26 @@ fn parse_tx_id(value: &str) -> Result<i64, String> {
         .map_err(|_| format!("Invalid transaction id: {value}"))
 }
 
-fn expect_positional(positional: &[String], n: usize, usage: &str) -> Result<(), String> {
+/// `err` is the fully-formed error message (typically from [`usage_error`]).
+fn expect_positional(positional: &[String], n: usize, err: &str) -> Result<(), String> {
     if positional.len() == n {
         Ok(())
     } else {
-        Err(format!("Usage: tally {usage}"))
+        Err(err.to_string())
     }
 }
 
-fn take_one(positional: &[String], usage: &str) -> Result<[String; 1], String> {
+fn take_one(positional: &[String], err: &str) -> Result<[String; 1], String> {
     match positional {
         [a] => Ok([a.clone()]),
-        _ => Err(format!("Usage: tally {usage}")),
+        _ => Err(err.to_string()),
     }
 }
 
-fn take_two(positional: &[String], usage: &str) -> Result<[String; 2], String> {
+fn take_two(positional: &[String], err: &str) -> Result<[String; 2], String> {
     match positional {
         [a, b] => Ok([a.clone(), b.clone()]),
-        _ => Err(format!("Usage: tally {usage}")),
+        _ => Err(err.to_string()),
     }
 }
 
@@ -735,6 +1180,171 @@ mod tests {
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
+    }
+
+    // ---------- help detection tests ----------
+
+    #[test]
+    fn detects_help_flag_at_each_level() {
+        use HelpTopic::*;
+        assert_eq!(detect_help(&s(&["--help"])), Some(Global));
+        assert_eq!(detect_help(&s(&["-h"])), Some(Global));
+        assert_eq!(detect_help(&s(&["-?"])), Some(Global));
+        assert_eq!(detect_help(&s(&["tui", "--help"])), Some(Tui));
+        assert_eq!(detect_help(&s(&["pull", "-h"])), Some(Pull));
+        assert_eq!(detect_help(&s(&["classify", "-?"])), Some(Classify));
+        assert_eq!(detect_help(&s(&["categories", "--help"])), Some(Categories));
+        assert_eq!(
+            detect_help(&s(&["categories", "list", "--help"])),
+            Some(CategoriesList)
+        );
+        assert_eq!(
+            detect_help(&s(&["categories", "rename", "--help"])),
+            Some(CategoriesRename)
+        );
+        assert_eq!(
+            detect_help(&s(&["categories", "merge", "--help"])),
+            Some(CategoriesMerge)
+        );
+        assert_eq!(
+            detect_help(&s(&["categories", "delete", "--help"])),
+            Some(CategoriesDelete)
+        );
+        assert_eq!(
+            detect_help(&s(&["transactions", "--help"])),
+            Some(Transactions)
+        );
+        assert_eq!(
+            detect_help(&s(&["transactions", "list", "--help"])),
+            Some(TransactionsList)
+        );
+        assert_eq!(detect_help(&s(&["categorise", "--help"])), Some(Categorise));
+        assert_eq!(detect_help(&s(&["ai", "--help"])), Some(Ai));
+        assert_eq!(
+            detect_help(&s(&["ai", "install-claude-skill", "--help"])),
+            Some(AiInstallClaudeSkill)
+        );
+    }
+
+    #[test]
+    fn detects_leading_help_form() {
+        use HelpTopic::*;
+        assert_eq!(detect_help(&s(&["help"])), Some(Global));
+        assert_eq!(detect_help(&s(&["help", "categories"])), Some(Categories));
+        assert_eq!(
+            detect_help(&s(&["help", "categories", "rename"])),
+            Some(CategoriesRename)
+        );
+        assert_eq!(
+            detect_help(&s(&["help", "transactions", "list"])),
+            Some(TransactionsList)
+        );
+        assert_eq!(detect_help(&s(&["help", "tui"])), Some(Tui));
+        assert_eq!(
+            detect_help(&s(&["help", "ai", "install-claude-skill"])),
+            Some(AiInstallClaudeSkill)
+        );
+    }
+
+    #[test]
+    fn help_flag_mixed_with_args_still_resolves() {
+        assert_eq!(
+            detect_help(&s(&["categories", "rename", "A", "B", "--help"])),
+            Some(HelpTopic::CategoriesRename)
+        );
+    }
+
+    #[test]
+    fn help_flag_unknown_command_falls_back_to_global() {
+        assert_eq!(
+            detect_help(&s(&["frobnicate", "--help"])),
+            Some(HelpTopic::Global)
+        );
+    }
+
+    #[test]
+    fn leading_help_unknown_command_is_unknown() {
+        assert_eq!(
+            detect_help(&s(&["help", "frobnicate"])),
+            Some(HelpTopic::Unknown)
+        );
+    }
+
+    #[test]
+    fn help_word_after_first_token_is_not_help() {
+        // `help` must be the FIRST token to count; later it's a normal token.
+        assert_eq!(detect_help(&s(&["transactions", "list", "help"])), None);
+        // A categories "help" subcommand is not help either.
+        assert_eq!(detect_help(&s(&["categories", "help"])), None);
+    }
+
+    #[test]
+    fn render_leaf_includes_usage_desc_and_flags() {
+        let text = render_help(HelpTopic::CategoriesDelete);
+        assert!(
+            text.contains("Usage: tally categories delete <path> [--force] [--json]"),
+            "{text}"
+        );
+        assert!(text.contains("--force"), "{text}");
+        assert!(text.contains("--json"), "{text}");
+    }
+
+    #[test]
+    fn render_categorise_shows_both_forms() {
+        let text = render_help(HelpTopic::Categorise);
+        assert!(
+            text.contains("categorise <tx-id> <category-path> [--json]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("categorise <tx-id> --clear [--json]"),
+            "{text}"
+        );
+        assert!(text.contains("--json"), "{text}");
+    }
+
+    #[test]
+    fn render_family_lists_all_leaves() {
+        let text = render_help(HelpTopic::Categories);
+        for leaf in ["list", "rename", "merge", "delete"] {
+            assert!(text.contains(&format!("categories {leaf}")), "{text}");
+        }
+        assert!(text.contains("--help"), "{text}");
+    }
+
+    #[test]
+    fn render_global_contains_every_command() {
+        let text = render_help(HelpTopic::Global);
+        for needle in [
+            "(none)",
+            "pull",
+            "classify",
+            "tui",
+            "categories list",
+            "categories rename",
+            "categories merge",
+            "categories delete",
+            "transactions list",
+            "categorise <tx-id> <category-path>",
+            "categorise <tx-id> --clear",
+            "ai install-claude-skill",
+            "--vault PATH",
+            "--json",
+            "--csv",
+            "--limit N",
+        ] {
+            assert!(
+                text.contains(needle),
+                "global help missing {needle:?}:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_error_points_at_help() {
+        let err = parse_command(&s(&["categories", "rename", "A"])).unwrap_err();
+        assert!(err.contains("Usage: tally categories rename"), "{err}");
+        assert!(err.contains("see: tally categories rename --help"), "{err}");
     }
 
     // ---------- parser tests ----------

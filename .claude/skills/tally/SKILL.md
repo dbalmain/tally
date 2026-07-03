@@ -32,7 +32,8 @@ cargo run -q -- <args>
 Examples below show `<args>`. Add `--json` for machine-readable output
 (preferred for scripting) or `--csv` (list commands only) to export. A global
 `--vault PATH` selects a different vault root. On error a command prints a
-message to **stderr** and exits non-zero.
+message to **stderr** and exits non-zero. Any command accepts `--help`/`-h`/`-?`
+(printed to stdout, exit 0; `tally help <command>` works too).
 
 ## Reading
 
