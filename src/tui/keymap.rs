@@ -71,6 +71,7 @@ pub enum Act {
     Confirm,
     ClearSearch,
     ToggleDetails,
+    CategoriseMatching,
     Classify,
 }
 
@@ -391,6 +392,24 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
         ));
     }
 
+    // Fuzzy search narrows the visible rows in memory, but `C` applies to the
+    // whole DB-search set — so hide it while a fuzzy filter is active rather
+    // than act on more rows than the user can see.
+    if supports_bulk_categorise(app)
+        && app.selected_transaction().is_some()
+        && !app.fuzzy_search_active()
+    {
+        out.push(bh(
+            &[Char('C')],
+            "C",
+            "categorise all",
+            "categorise all matching search",
+            true,
+            true,
+            CategoriseMatching,
+        ));
+    }
+
     if app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::Uncategorised {
         out.push(b(&[Char('C')], "C", "classify", true, true, Classify));
     }
@@ -512,6 +531,13 @@ fn is_transaction_view(app: &App) -> bool {
         || (app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::Uncategorised)
 }
 
+/// The views where `C` bulk-categorises every transaction matching the current
+/// search: the Transactions tab and the Todo → AI Review subtab.
+fn supports_bulk_categorise(app: &App) -> bool {
+    app.current_tab == Tab::Transactions
+        || (app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::AiReview)
+}
+
 fn can_save_search_as_filter(app: &App) -> bool {
     app.current_tab == Tab::Transactions
         && app.db_search_active()
@@ -588,6 +614,7 @@ fn run_normal(app: &mut App, act: Act) {
         }
         Act::ClearSearch => app.clear_search(),
         Act::ToggleDetails => app.toggle_view_details(),
+        Act::CategoriseMatching => app.start_bulk_categorise_matching(),
         Act::Classify => app.request_classify(),
     }
 }
@@ -955,6 +982,46 @@ mod tests {
 
         app.current_tab = Tab::Transactions;
         assert!(!has_act(&normal_binds(&app), Act::Classify));
+    }
+
+    #[test]
+    fn bulk_categorise_bind_is_scoped_to_transactions_and_ai_review() {
+        let mut app = app_with_rows();
+
+        app.current_tab = Tab::Transactions;
+        assert!(has_act_trigger(
+            &normal_binds(&app),
+            Act::CategoriseMatching,
+            Trigger::Char('C')
+        ));
+
+        app.current_tab = Tab::Todo;
+        app.todo_subtab = TodoSubTab::AiReview;
+        assert!(has_act_trigger(
+            &normal_binds(&app),
+            Act::CategoriseMatching,
+            Trigger::Char('C')
+        ));
+
+        // Absent where classify's `C` lives, and on unrelated tabs.
+        app.todo_subtab = TodoSubTab::Uncategorised;
+        assert!(!has_act(&normal_binds(&app), Act::CategoriseMatching));
+
+        app.current_tab = Tab::Categories;
+        assert!(!has_act(&normal_binds(&app), Act::CategoriseMatching));
+    }
+
+    #[test]
+    fn bulk_categorise_bind_is_hidden_while_fuzzy_search_is_active() {
+        let mut app = app_with_rows();
+        app.current_tab = Tab::Transactions;
+        assert!(has_act(&normal_binds(&app), Act::CategoriseMatching));
+
+        // A fuzzy filter only narrows the visible rows, so `C` (which would act
+        // on the whole DB-search set) is hidden until it is cleared.
+        app.start_fuzzy_search();
+        assert!(app.fuzzy_search_active());
+        assert!(!has_act(&normal_binds(&app), Act::CategoriseMatching));
     }
 
     #[test]

@@ -32,7 +32,9 @@
 //! - `account:St` — bank prefix; `account:ING/` — all accounts in a bank;
 //!   `account:ING/Orange` — bank + account prefix; `account:/Savings` — any
 //!   bank, account prefix; `account:"ING/Orange"|"St George/Sav"` — OR
-//! - `category:Food` — category contains; `category:Food|Transport` — OR
+//! - `category:Food` — path starts with "Food"; `category:/Groceries` — a
+//!   "Groceries…" segment under any parent (matches after any `/`);
+//!   `category:Food|Transport` — OR
 //! - Quoting for values with spaces: `account:"ING/Orange Everyday"` or
 //!   `account:ING/Orange\ Everyday`
 //!
@@ -44,6 +46,22 @@
 //! - `coffee OR tea` — native FTS5 OR; `(coffee OR tea) breakfast` — grouping
 //! - `"exact phrase"` — phrase match; `coff*` — explicit prefix
 //! - Live typing adds an implicit `*` at the cursor for prefix matching
+//!
+//! **Negation** — a leading `-` at a word boundary negates the token that
+//! follows it, excluding matching rows:
+//!
+//! - `-coffee` / `-"asdf"` — exclude rows whose description matches that FTS
+//!   term/phrase
+//! - `-category:Food`, `-account:ING`, `-amount:>100`, `-date:2024` — exclude
+//!   rows matching that filter (`-category:Food` still keeps uncategorised rows,
+//!   whose NULL path counts as "did not match")
+//! - `-/regex/i` — exclude rows whose description matches the regex
+//! - A lone `-` (followed by whitespace or end-of-input) is literal FTS text,
+//!   NOT negation. A `-` *inside* a filter value is untouched, so
+//!   `amount:-50` stays a signed amount — only a `-` before the whole
+//!   `name:value` token negates it.
+//! - Negation is ignored on transfer searches (a `NOT` is ill-defined across
+//!   the "either side matches" OR).
 //!
 //! **Transition** — end with ` ~` at a word boundary to switch to fuzzy mode
 //! while keeping the DB filters.

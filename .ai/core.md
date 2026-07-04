@@ -431,6 +431,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `v` | Toggle filter review requirement (Filters tab); toggle "view transactions?" — a side panel listing the selected category's transactions (Transactions-view format, no category column) to the right of the category list (Categories tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised); or toggle a side panel of the selected account's transactions (Accounts tab) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
 | `m` | Manage transactions: jump to the Transactions tab with its DB search set to `category:<path>` (Categories tab) or `account:<path>` (Accounts tab) and focus on the first transaction |
+| `C` | Apply a category to **all** transactions matching the current DB search (Transactions tab and Todo → AI Review) — opens the category popup, then a confirmation stating how many transactions will be updated; unlike `c` it does not offer the similar-transactions bulk-apply, and transfer legs are skipped (they can't be categorised). Hidden while a fuzzy (`~`) search is active, since that only narrows the visible rows |
 | `C` | Run local auto-classification (Todo → Uncategorised) — shows a loading modal while it runs, then a summary modal (filter/transfer/suggestion counts) |
 | `d` / `Delete` | Delete transfer (Transfers tab), delete filter (Filters tab; prompts to confirm), delete category (Categories tab; prompts to confirm, noting how many transactions will be left uncategorised), or delete account (Accounts tab; prompts to confirm, noting the exports-folder removal and retained-transaction count) |
 | `u` | Transactions tab: unlink the selected transfer, else uncategorise the transaction (prompts to confirm). The hint reads "unlink" on a linked transfer and "uncategorise" otherwise, and is hidden when the row has neither |
@@ -517,10 +518,14 @@ Full reference: the `src/search/mod.rs` doc comment (canonical).
   unless a `+`/`-` sign or a zero range/comparison endpoint makes it
   signed, e.g. `amount:0..` = credits, `amount:-100..-50` = debits),
   `account:ING/Orange`
-  (Bank/Account prefixes, `|` for OR), `category:Food|Transport`. Bare words
+  (Bank/Account prefixes, `|` for OR), `category:Food` (start-anchored path prefix; a leading `/` matches after any `/`, e.g. `category:/Groceries`; `|` for OR). Bare words
   are FTS5 full-text search (`coffee OR tea`, `"exact phrase"`, `coff*`);
   `/pattern/i` is regex. End with ` ~` to switch to fuzzy mode keeping the
   DB filters.
+- **Negation (`-`)**: a leading `-` at a word boundary excludes matches —
+  `-coffee` / `-"asdf"` (FTS), `-category:Food` (keeps uncategorised rows),
+  `-account:ING`, `-amount:>100`, `-/regex/`. A lone `-`, or a `-` inside a
+  value (`amount:-50`), is literal. Ignored on Transfers searches.
 - **Fuzzy search (`~`)** is in-memory nucleo scoring over the loaded rows.
 - On the Categories tab, **DB search (`/`)** is not SQL-backed: it is an
   in-memory, case-insensitive boundary-prefix filter over the category path

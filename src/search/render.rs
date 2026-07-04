@@ -145,6 +145,18 @@ impl Rendered {
     }
 }
 
+/// Wrap `clause` in `NOT COALESCE((...), 0)` when `negated`. The COALESCE makes
+/// a NULL result (e.g. an uncategorised row's category path) count as "did not
+/// match", so `-category:Food` keeps uncategorised NULL rows; it is harmless for
+/// non-null columns.
+fn negate_if(clause: String, negated: bool) -> String {
+    if negated {
+        format!("NOT COALESCE(({clause}), 0)")
+    } else {
+        clause
+    }
+}
+
 impl ParsedQuery {
     /// Render the parsed query against a context.
     ///
@@ -173,9 +185,22 @@ impl ParsedQuery {
     /// independently against its own table aliases; FTS uses the per-side
     /// `{fts_match}` form so the subquery scopes to that side. Parameters are
     /// appended in order: lhs then rhs.
+    ///
+    /// Negation is ill-defined across the "either side matches" OR (a `NOT`
+    /// wrapped in an `OR` would let one side satisfy the exclusion the other
+    /// side was meant to enforce), so negated parts are dropped before rendering
+    /// each side.
     pub(crate) fn render_transfers(&self, lhs: &SqlContext, rhs: &SqlContext) -> Rendered {
-        let l = self.render(lhs);
-        let r = self.render(rhs);
+        let positive = ParsedQuery {
+            parts: self
+                .parts
+                .iter()
+                .filter(|p| !p.is_negated())
+                .cloned()
+                .collect(),
+        };
+        let l = positive.render(lhs);
+        let r = positive.render(rhs);
         match (l.is_empty(), r.is_empty()) {
             (true, true) => Rendered::default(),
             (false, true) => l,
@@ -200,30 +225,42 @@ impl ParsedQuery {
                             sql,
                             params: filter_params,
                         },
+                    negated,
                     ..
                 } => {
                     let Some(rendered) = ctx.render_template(sql) else {
                         continue;
                     };
-                    clauses.push(rendered);
+                    clauses.push(negate_if(rendered, *negated));
                     params.extend(filter_params.iter().cloned());
                 }
                 QueryPart::Regex {
                     pattern,
                     valid: true,
+                    negated,
                     ..
                 } => {
                     let template = format!("regexp(?, {})", ph::reference(ph::DESCRIPTION));
                     let Some(rendered) = ctx.render_template(&template) else {
                         continue;
                     };
-                    clauses.push(rendered);
+                    clauses.push(negate_if(rendered, *negated));
                     params.push(Value::Text(pattern.clone()));
                 }
                 QueryPart::Fts {
-                    query, valid: true, ..
+                    query,
+                    valid: true,
+                    negated,
+                    ..
                 } if !query.is_empty() => {
-                    let template = ph::reference(ph::FTS_MATCH);
+                    // A negated FTS term uses the `FTS_NOT_MATCH` template, which
+                    // already yields a `NOT IN (...)` form — no COALESCE wrap.
+                    let placeholder = if *negated {
+                        ph::FTS_NOT_MATCH
+                    } else {
+                        ph::FTS_MATCH
+                    };
+                    let template = ph::reference(placeholder);
                     let Some(rendered) = ctx.render_template(&template) else {
                         continue;
                     };
@@ -240,14 +277,28 @@ impl ParsedQuery {
     /// Useful for deciding whether to add an optional JOIN (e.g. category).
     pub fn uses_placeholder(&self, placeholder: &str) -> bool {
         self.parts.iter().any(|p| match p {
+            // Filters report their template placeholders regardless of negation
+            // (a negated `category:` still needs the categories join).
             QueryPart::Filter {
                 result: FilterResult::Valid { sql, .. },
                 ..
             } => placeholders(sql).any(|name| name == placeholder),
+            // Regex reports the description column regardless of negation.
             QueryPart::Regex { valid: true, .. } => placeholder == ph::DESCRIPTION,
+            // A negated FTS part reports FTS_NOT_MATCH; positive reports FTS_MATCH.
             QueryPart::Fts {
-                query, valid: true, ..
-            } if !query.is_empty() => placeholder == ph::FTS_MATCH,
+                query,
+                valid: true,
+                negated,
+                ..
+            } if !query.is_empty() => {
+                placeholder
+                    == if *negated {
+                        ph::FTS_NOT_MATCH
+                    } else {
+                        ph::FTS_MATCH
+                    }
+            }
             _ => false,
         })
     }
@@ -270,6 +321,10 @@ mod tests {
     }
 
     fn make_filter(sql: &str, params: Vec<Value>) -> QueryPart {
+        make_filter_negated(sql, params, false)
+    }
+
+    fn make_filter_negated(sql: &str, params: Vec<Value>, negated: bool) -> QueryPart {
         QueryPart::Filter {
             name: "date",
             value: String::new(),
@@ -279,6 +334,7 @@ mod tests {
             },
             span: Span::new(0, 0),
             value_span: Span::new(0, 0),
+            negated,
         }
     }
 
@@ -365,6 +421,7 @@ mod tests {
                 pattern: "foo".into(),
                 valid: true,
                 span: Span::new(0, 0),
+                negated: false,
             }],
         };
         let r = query.render(&ctx);
@@ -381,6 +438,7 @@ mod tests {
                 pattern: "foo".into(),
                 valid: true,
                 span: Span::new(0, 0),
+                negated: false,
             }],
         };
         let r = query.render(&ctx);
@@ -396,6 +454,7 @@ mod tests {
                 query: "coffee*".into(),
                 valid: true,
                 span: Span::new(0, 0),
+                negated: false,
             }],
         };
         let r = query.render(&ctx);
@@ -412,10 +471,119 @@ mod tests {
                 query: "coffee*".into(),
                 valid: true,
                 span: Span::new(0, 0),
+                negated: false,
             }],
         };
         let r = query.render(&ctx);
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn render_negated_filter_wraps_in_not_coalesce() {
+        let ctx = ctx_full();
+        let query = ParsedQuery {
+            parts: vec![make_filter_negated(
+                "LOWER({category_path}) LIKE ?",
+                vec![Value::Text("food%".into())],
+                true,
+            )],
+        };
+        let r = query.render(&ctx);
+        assert_eq!(r.where_clause, "NOT COALESCE((LOWER(c.path) LIKE ?), 0)");
+        assert_eq!(r.params, vec![Value::Text("food%".into())]);
+    }
+
+    #[test]
+    fn render_negated_fts_uses_not_match_template() {
+        let ctx = SqlContext::new().with(
+            ph::FTS_NOT_MATCH,
+            "t.id NOT IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
+        );
+        let query = ParsedQuery {
+            parts: vec![QueryPart::Fts {
+                original: "coffee".into(),
+                query: "coffee*".into(),
+                valid: true,
+                span: Span::new(0, 0),
+                negated: true,
+            }],
+        };
+        let r = query.render(&ctx);
+        assert_eq!(
+            r.where_clause,
+            "t.id NOT IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)"
+        );
+        assert_eq!(r.params, vec![Value::Text("coffee*".into())]);
+    }
+
+    #[test]
+    fn render_mixed_positive_and_negated_fts() {
+        let ctx = SqlContext::new()
+            .with(ph::FTS_MATCH, "transactions_fts MATCH ?")
+            .with(
+                ph::FTS_NOT_MATCH,
+                "t.id NOT IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
+            );
+        let query = ParsedQuery {
+            parts: vec![
+                QueryPart::Fts {
+                    original: "coffee".into(),
+                    query: "coffee*".into(),
+                    valid: true,
+                    span: Span::new(0, 0),
+                    negated: false,
+                },
+                QueryPart::Fts {
+                    original: "tea".into(),
+                    query: "tea*".into(),
+                    valid: true,
+                    span: Span::new(0, 0),
+                    negated: true,
+                },
+            ],
+        };
+        let r = query.render(&ctx);
+        assert_eq!(
+            r.where_clause,
+            "transactions_fts MATCH ? AND \
+             t.id NOT IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)"
+        );
+        assert_eq!(
+            r.params,
+            vec![Value::Text("coffee*".into()), Value::Text("tea*".into())]
+        );
+    }
+
+    #[test]
+    fn render_transfers_drops_negated_parts() {
+        // A negated part is ill-defined across the transfer OR, so it is dropped;
+        // only the positive part survives on each side.
+        let lhs = SqlContext::new()
+            .with(ph::DATE, "ft.date")
+            .with(ph::CATEGORY_PATH, "fc.path");
+        let rhs = SqlContext::new()
+            .with(ph::DATE, "tt.date")
+            .with(ph::CATEGORY_PATH, "tc.path");
+        let query = ParsedQuery {
+            parts: vec![
+                make_filter("{date} >= ?", vec![Value::Text("2024-01-01".into())]),
+                make_filter_negated(
+                    "LOWER({category_path}) LIKE ?",
+                    vec![Value::Text("food%".into())],
+                    true,
+                ),
+            ],
+        };
+        let r = query.render_transfers(&lhs, &rhs);
+        // Only the date clause is rendered; the negated category clause is gone.
+        assert_eq!(r.where_clause, "((ft.date >= ?) OR (tt.date >= ?))");
+        assert_eq!(
+            r.params,
+            vec![
+                Value::Text("2024-01-01".into()),
+                Value::Text("2024-01-01".into())
+            ]
+        );
     }
 
     #[test]
@@ -479,6 +647,7 @@ mod tests {
                 query: "coffee*".into(),
                 valid: true,
                 span: Span::new(0, 0),
+                negated: false,
             }],
         };
         let r = query.render_transfers(&lhs, &rhs);
@@ -511,12 +680,14 @@ mod tests {
                     query: "x".into(),
                     valid: true,
                     span: Span::new(0, 0),
+                    negated: false,
                 },
                 QueryPart::Regex {
                     original: "/x/".into(),
                     pattern: "x".into(),
                     valid: true,
                     span: Span::new(0, 0),
+                    negated: false,
                 },
             ],
         };

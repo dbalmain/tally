@@ -57,6 +57,57 @@ impl TransactionStore {
         Ok(())
     }
 
+    /// Apply a category to many transactions in one SQLite transaction, skipping
+    /// any that are currently transfer legs (which can't be categorised — see
+    /// [`Self::set_category`]). Returns the number of transactions updated.
+    pub fn set_categories(
+        &mut self,
+        transaction_ids: &[i64],
+        category_id: i64,
+        source: CategorySource,
+        confirmed: bool,
+        ai_confidence: Option<f64>,
+    ) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self.conn.transaction()?;
+        let mut is_transfer_leg = tx.prepare(
+            "SELECT 1 FROM transfers WHERE from_transaction_id = ?1 OR to_transaction_id = ?1 LIMIT 1",
+        )?;
+        let mut upsert = tx.prepare(
+            "INSERT INTO transaction_enrichments
+             (transaction_id, category_id, category_source, category_confirmed, ai_confidence, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(transaction_id) DO UPDATE SET
+                category_id = excluded.category_id,
+                category_source = excluded.category_source,
+                category_confirmed = excluded.category_confirmed,
+                ai_confidence = excluded.ai_confidence,
+                updated_at = excluded.updated_at",
+        )?;
+        let mut updated = 0;
+        for &transaction_id in transaction_ids {
+            // A transaction is either part of a transfer or categorised, never
+            // both — skip transfer legs rather than fail the whole batch.
+            if is_transfer_leg.exists([transaction_id])? {
+                continue;
+            }
+            upsert.execute(params![
+                transaction_id,
+                category_id,
+                source.as_str(),
+                confirmed,
+                ai_confidence,
+                now,
+                now
+            ])?;
+            updated += 1;
+        }
+        drop(is_transfer_leg);
+        drop(upsert);
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Mark a category as user-confirmed.
     pub fn confirm_category(&mut self, transaction_id: i64) -> Result<()> {
         self.conn.execute(
@@ -193,6 +244,48 @@ mod tests {
             store.get_transaction_category(plain).unwrap().unwrap().id,
             cat
         );
+    }
+
+    #[test]
+    fn set_categories_applies_and_skips_transfer_legs() {
+        let (_tmp, mut store, a1, a2) = store_with_two_accounts();
+        let plain1 = insert_tx(&store, a1, "2024-03-11", -1200);
+        let plain2 = insert_tx(&store, a1, "2024-03-12", -3400);
+        let from = insert_tx(&store, a1, "2024-03-10", -5000);
+        let to = insert_tx(&store, a2, "2024-03-10", 5000);
+        store
+            .create_transfer(from, to, TransferSource::Manual, true, None)
+            .unwrap();
+
+        // Give plain1 a pre-existing category so we can prove the batch upserts.
+        let old = store.get_or_create_category("Old").unwrap();
+        store
+            .set_category(plain1, old, CategorySource::Manual, true, None)
+            .unwrap();
+
+        let cat = store.get_or_create_category("Food").unwrap();
+        let updated = store
+            .set_categories(
+                &[plain1, plain2, from, to],
+                cat,
+                CategorySource::Manual,
+                true,
+                None,
+            )
+            .unwrap();
+
+        // Only the two plain transactions are updated; the transfer legs skip.
+        assert_eq!(updated, 2);
+        assert_eq!(
+            store.get_transaction_category(plain1).unwrap().unwrap().id,
+            cat
+        );
+        assert_eq!(
+            store.get_transaction_category(plain2).unwrap().unwrap().id,
+            cat
+        );
+        assert!(store.get_transaction_category(from).unwrap().is_none());
+        assert!(store.get_transaction_category(to).unwrap().is_none());
     }
 
     // ----- Round-trip guard: ENRICHMENT_COLS ↔ parse_enrichment_at_offset -----

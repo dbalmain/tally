@@ -42,6 +42,8 @@ pub enum QueryPart {
         span: Span,
         /// Span of just the value part (e.g., "2024").
         value_span: Span,
+        /// Whether the token is negated by a leading `-` (exclude matches).
+        negated: bool,
     },
     /// A regex pattern like `/coffee.*/i`.
     Regex {
@@ -53,6 +55,8 @@ pub enum QueryPart {
         valid: bool,
         /// Span of the regex token.
         span: Span,
+        /// Whether the token is negated by a leading `-` (exclude matches).
+        negated: bool,
     },
     /// Full-text search terms (everything that isn't a filter or regex).
     Fts {
@@ -67,6 +71,8 @@ pub enum QueryPart {
         valid: bool,
         /// Span of the FTS text.
         span: Span,
+        /// Whether the token is negated by a leading `-` (exclude matches).
+        negated: bool,
     },
     /// Whitespace between tokens (preserved for cursor positioning).
     Whitespace {
@@ -83,6 +89,17 @@ impl QueryPart {
             QueryPart::Regex { span, .. } => *span,
             QueryPart::Fts { span, .. } => *span,
             QueryPart::Whitespace { span } => *span,
+        }
+    }
+
+    /// Whether this part is negated by a leading `-` (exclude matches).
+    /// Always false for whitespace.
+    pub fn is_negated(&self) -> bool {
+        match self {
+            QueryPart::Filter { negated, .. }
+            | QueryPart::Regex { negated, .. }
+            | QueryPart::Fts { negated, .. } => *negated,
+            QueryPart::Whitespace { .. } => false,
         }
     }
 }
@@ -114,13 +131,20 @@ impl ParsedQuery {
         self.fts_queries().into_iter().next()
     }
 
-    /// Get all FTS queries in input order.
+    /// Get all POSITIVE (non-negated) FTS queries in input order.
+    ///
+    /// Only positive FTS parts gate the positive FTS inner join, so a
+    /// negated-only query must report no FTS query here (its exclusion is
+    /// rendered as a `NOT IN (...)` subquery via `FTS_NOT_MATCH` instead).
     pub fn fts_queries(&self) -> Vec<&str> {
         self.parts
             .iter()
             .filter_map(|p| match p {
                 QueryPart::Fts {
-                    query, valid: true, ..
+                    query,
+                    valid: true,
+                    negated: false,
+                    ..
                 } if !query.is_empty() => Some(query.as_str()),
                 _ => None,
             })
@@ -193,6 +217,7 @@ mod tests {
             result,
             span: Span::new(start, end),
             value_span: Span::new(value_start, end),
+            negated: false,
         }
     }
 
@@ -202,6 +227,7 @@ mod tests {
             pattern: text.trim_matches('/').to_string(),
             valid,
             span: Span::new(start, start + text.len()),
+            negated: false,
         }
     }
 
@@ -252,6 +278,7 @@ mod tests {
             query: text.to_string(),
             valid: true,
             span: Span::new(start, start + text.len()),
+            negated: false,
         }
     }
 

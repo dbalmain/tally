@@ -94,6 +94,12 @@ pub enum ConfirmAction {
     Uncategorise {
         tx_id: i64,
     },
+    /// Bulk-categorising every transaction matching the current search (`C` on
+    /// Transactions / AI Review). Applies `category_path` to all `tx_ids`.
+    CategoriseMatching {
+        category_path: String,
+        tx_ids: Vec<i64>,
+    },
     /// Deleting a category from the Categories tab.
     DeleteCategory(i64),
     /// Deleting an account from the Accounts tab (also removes its exports
@@ -105,6 +111,9 @@ pub enum ConfirmAction {
 pub enum CategoryTarget {
     #[default]
     Transaction,
+    /// The popup applies to every transaction matching the current search
+    /// rather than the single selected one (`C` on Transactions / AI Review).
+    MatchingTransactions,
     Filter(i64),
 }
 
@@ -329,11 +338,11 @@ impl App {
         }
     }
 
-    fn current_tab_key(&self) -> TabKey {
+    pub(super) fn current_tab_key(&self) -> TabKey {
         tab_key(self.current_tab, self.todo_subtab)
     }
 
-    fn confirm(&mut self, message: String, action: ConfirmAction) {
+    pub(super) fn confirm(&mut self, message: String, action: ConfirmAction) {
         self.confirm_message = Some(message);
         self.confirm_action = Some(action);
         self.input_mode = InputMode::Confirm;
@@ -927,6 +936,25 @@ impl App {
                     self.refresh_data();
                 }
             }
+            ConfirmAction::CategoriseMatching {
+                category_path,
+                tx_ids,
+            } => {
+                let applied = self.try_mutation("apply category", |s| {
+                    let category_id = s.get_or_create_category(&category_path)?;
+                    s.set_categories(
+                        &tx_ids,
+                        category_id,
+                        crate::CategorySource::Manual,
+                        true,
+                        None,
+                    )?;
+                    Ok(())
+                });
+                if applied {
+                    self.refresh_data();
+                }
+            }
             ConfirmAction::DeleteCategory(category_id) => {
                 if self.try_mutation("delete category", |s| {
                     s.delete_category(category_id).map(|_| ())
@@ -1208,6 +1236,100 @@ mod tests {
 
         assert!(app.get_cached_transfer(from.id).is_none());
         assert!(app.get_cached_transfer(to.id).is_none());
+    }
+
+    #[test]
+    fn bulk_categorise_matching_applies_and_excludes_transfer_legs() {
+        // Four transactions share the FTS term "shop"; two are plain, two are a
+        // transfer pair. The bulk apply must categorise the plain ones and skip
+        // the transfer legs.
+        let (_temp, mut store) = store_with_transactions(&[
+            FixtureTx {
+                description: "shop groceries",
+                amount_cents: -1200,
+            },
+            FixtureTx {
+                description: "shop hardware",
+                amount_cents: -3400,
+            },
+            FixtureTx {
+                description: "shop transfer out",
+                amount_cents: -5000,
+            },
+            FixtureTx {
+                description: "shop transfer in",
+                amount_cents: 5000,
+            },
+        ]);
+        let plain1 = tx_by_description(&store, "shop groceries");
+        let plain2 = tx_by_description(&store, "shop hardware");
+        let from = tx_by_description(&store, "shop transfer out");
+        let to = tx_by_description(&store, "shop transfer in");
+        store
+            .create_transfer(from.id, to.id, TransferSource::Manual, true, None)
+            .unwrap();
+
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Transactions;
+        app.reload_current_tab();
+
+        // Apply a DB search that matches all four rows.
+        app.start_db_search();
+        for c in "shop".chars() {
+            app.handle_db_search_input(tui_input::InputRequest::InsertChar(c));
+        }
+        app.confirm_db_search();
+
+        // Drive the bulk-categorise popup: open it, type a category, confirm.
+        app.start_bulk_categorise_matching();
+        assert_eq!(app.category_target, CategoryTarget::MatchingTransactions);
+        for c in "Shopping".chars() {
+            app.update_category_input(c);
+        }
+        app.confirm_category();
+
+        // Lands in a confirmation whose ids exclude the transfer legs.
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        let ConfirmAction::CategoriseMatching {
+            ref category_path,
+            ref tx_ids,
+        } = app.confirm_action.clone().unwrap()
+        else {
+            panic!("expected a CategoriseMatching confirm action");
+        };
+        assert_eq!(category_path, "Shopping");
+        assert!(tx_ids.contains(&plain1.id));
+        assert!(tx_ids.contains(&plain2.id));
+        assert!(!tx_ids.contains(&from.id));
+        assert!(!tx_ids.contains(&to.id));
+
+        // Apply.
+        app.confirm_proceed();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.store
+                .get_transaction_category(plain1.id)
+                .unwrap()
+                .unwrap()
+                .path,
+            "Shopping"
+        );
+        assert_eq!(
+            app.store
+                .get_transaction_category(plain2.id)
+                .unwrap()
+                .unwrap()
+                .path,
+            "Shopping"
+        );
+        assert!(
+            app.store
+                .get_transaction_category(from.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(app.store.get_transaction_category(to.id).unwrap().is_none());
     }
 
     #[test]

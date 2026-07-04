@@ -114,6 +114,10 @@ fn transaction_ctx() -> SqlContext {
     aliased_transaction_ctx("t")
         .with(ph::CATEGORY_PATH, "c.path")
         .with(ph::FTS_MATCH, "transactions_fts MATCH ?")
+        .with(
+            ph::FTS_NOT_MATCH,
+            "t.id NOT IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
+        )
 }
 
 /// SQL context for one side of a transfer query, rooted at

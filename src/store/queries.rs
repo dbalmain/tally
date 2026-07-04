@@ -337,8 +337,10 @@ mod tests {
     #[test]
     fn query_category_or() {
         let (_t, store) = setup_rich_fixture();
+        // `Income` is a start-anchored prefix; `Coffee` lives under Food, so it
+        // needs the leading-slash "after any /" form to match Food/Coffee.
         let txs = store
-            .query_transactions(&q("category:Income|Coffee"), None)
+            .query_transactions(&q("category:Income|/Coffee"), None)
             .unwrap();
         // Salary (Income), Coffee Shop (Food/Coffee), Coffee Bean (Food/Coffee)
         assert_eq!(txs.len(), 3);
@@ -350,6 +352,36 @@ mod tests {
         let upper = store.query_transactions(&q("category:Food"), None).unwrap();
         let lower = store.query_transactions(&q("category:food"), None).unwrap();
         assert_eq!(upper.len(), lower.len());
+    }
+
+    #[test]
+    fn query_negated_category_keeps_uncategorised() {
+        let (_t, store) = setup_rich_fixture();
+        // `-category:Food` excludes Food rows but keeps everything else,
+        // INCLUDING uncategorised rows (their NULL category path counts as
+        // "did not match" via the NOT COALESCE wrap).
+        let txs = store
+            .query_transactions(&q("-category:Food"), None)
+            .unwrap();
+        let descs: Vec<String> = txs.into_iter().map(|t| t.description).collect();
+        // Uncategorised row present:
+        assert!(descs.iter().any(|d| d == "Interest"));
+        // Food row absent:
+        assert!(!descs.iter().any(|d| d == "Grocery Store"));
+        assert!(!descs.iter().any(|d| d == "Coffee Shop"));
+    }
+
+    #[test]
+    fn query_negated_fts_excludes_matches() {
+        let (_t, store) = setup_rich_fixture();
+        // `-coffee` → `coffee*` in the NOT-IN subquery (the `q` helper adds the
+        // implicit trailing `*`). Excludes rows matching "coffee".
+        let txs = store.query_transactions(&q("-coffee"), None).unwrap();
+        let descs: Vec<String> = txs.into_iter().map(|t| t.description).collect();
+        assert!(!descs.iter().any(|d| d == "Coffee Shop"));
+        assert!(!descs.iter().any(|d| d == "Coffee Bean"));
+        // Non-matching rows kept:
+        assert!(descs.iter().any(|d| d == "Salary"));
     }
 
     #[test]

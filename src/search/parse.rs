@@ -96,6 +96,7 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
                 value,
                 span,
                 value_span,
+                negated,
             } => {
                 flush_fts(&mut fts_tokens, cursor, &mut parts, &mut cursor_context);
                 if let Some(ws_span) = pending_whitespace.take() {
@@ -120,10 +121,18 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
                         result,
                         span: *span,
                         value_span: *value_span,
+                        negated: *negated,
                     });
                 } else {
-                    // Unknown filter - treat as FTS text
-                    fts_tokens.push((format!("{}:{}", name, value), *span));
+                    // Unknown filter — treat as FTS text. A negated unknown
+                    // filter behaves like a negated FTS term over the whole
+                    // `name:value` string.
+                    let text = format!("{}:{}", name, value);
+                    if *negated {
+                        push_negated_fts(&text, *span, cursor, &mut parts, &mut cursor_context);
+                    } else {
+                        fts_tokens.push((text, *span));
+                    }
                 }
             }
 
@@ -133,6 +142,7 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
                 flags,
                 complete,
                 span,
+                negated,
             } => {
                 flush_fts(&mut fts_tokens, cursor, &mut parts, &mut cursor_context);
                 if let Some(ws_span) = pending_whitespace.take() {
@@ -161,13 +171,29 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
                     pattern: compiled_pattern,
                     valid,
                     span: *span,
+                    negated: *negated,
                 });
             }
 
-            RawToken::Fts { text, span } => {
-                // Clear pending whitespace — the combined FTS span will cover it
-                pending_whitespace = None;
-                fts_tokens.push((text.clone(), *span));
+            RawToken::Fts {
+                text,
+                span,
+                negated,
+            } => {
+                if *negated {
+                    // A negated FTS token is its own standalone part: flush any
+                    // pending positive FTS run first so `coffee -tea shop` keeps
+                    // "coffee" and "shop" separate from the negated "tea".
+                    flush_fts(&mut fts_tokens, cursor, &mut parts, &mut cursor_context);
+                    if let Some(ws_span) = pending_whitespace.take() {
+                        parts.push(QueryPart::Whitespace { span: ws_span });
+                    }
+                    push_negated_fts(text, *span, cursor, &mut parts, &mut cursor_context);
+                } else {
+                    // Clear pending whitespace — the combined FTS span will cover it
+                    pending_whitespace = None;
+                    fts_tokens.push((text.clone(), *span));
+                }
             }
 
             RawToken::Whitespace { span } => {
@@ -193,6 +219,47 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
     }
 
     (ParsedQuery { parts }, cursor_context)
+}
+
+/// Emit a single negated FTS token as its own standalone `QueryPart::Fts`
+/// (`negated: true`). Its `span` covers the leading `-` even though `text` does
+/// not, so the in-token cursor for prefix-`*` insertion is measured from the
+/// first text char (one past the dash).
+///
+/// Known limitation: a negated multi-word quoted phrase like `-"a b"` will NOT
+/// combine correctly — the tokenizer splits on whitespace, so only the `-"a`
+/// token is negated. Single-word `-"asdf"` works. This is intentionally not
+/// fixed here.
+fn push_negated_fts(
+    text: &str,
+    span: Span,
+    cursor: usize,
+    parts: &mut Vec<QueryPart>,
+    cursor_context: &mut CursorContext,
+) {
+    // `text` starts one char after `span.start` (the dash), so shift the cursor
+    // by one when mapping it into the text.
+    let text_start = span.start + 1;
+    let cursor_in_text = if cursor >= text_start && cursor <= span.end {
+        Some(cursor - text_start)
+    } else {
+        None
+    };
+    let query = process_fts_query(text, cursor_in_text);
+
+    if span.contains(cursor) || span.at_end(cursor) {
+        *cursor_context = CursorContext::Fts {
+            offset: cursor - span.start,
+        };
+    }
+
+    parts.push(QueryPart::Fts {
+        original: text.to_string(),
+        query,
+        valid: true,
+        span,
+        negated: true,
+    });
 }
 
 /// Flush pending FTS tokens into parts, updating cursor context if needed.
@@ -245,6 +312,7 @@ fn combine_fts_tokens(tokens: &[(String, Span)], cursor: usize) -> QueryPart {
         query,
         valid: true,
         span,
+        negated: false,
     }
 }
 
@@ -501,7 +569,7 @@ mod tests {
         let rendered = query.render(&test_sql_ctx());
 
         assert_eq!(rendered.where_clause, "LOWER(c.path) LIKE ?");
-        assert_eq!(rendered.params, vec![Value::Text("%food%".to_string())]);
+        assert_eq!(rendered.params, vec![Value::Text("food%".to_string())]);
     }
 
     #[test]
@@ -517,8 +585,8 @@ mod tests {
         assert_eq!(
             rendered.params,
             vec![
-                Value::Text("%food%".to_string()),
-                Value::Text("%transport%".to_string()),
+                Value::Text("food%".to_string()),
+                Value::Text("transport%".to_string()),
             ]
         );
     }
@@ -593,6 +661,86 @@ mod tests {
                 assert_eq!(original, "unknown:value");
             }
             _ => panic!("Expected FTS"),
+        }
+    }
+
+    /// Collect the parsed FTS parts as `(query, negated)` in order.
+    fn fts_parts(query: &super::ParsedQuery) -> Vec<(String, bool)> {
+        query
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                QueryPart::Fts { query, negated, .. } => Some((query.clone(), *negated)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_parse_negated_fts_standalone() {
+        let config = test_config();
+        // Cursor at 0 so no implicit prefix is added to any token.
+        let (query, _) = parse(&config, "coffee -tea shop", 0);
+        // "coffee" (positive), "tea" (negated, standalone), "shop" (positive).
+        assert_eq!(
+            fts_parts(&query),
+            vec![
+                ("coffee".to_string(), false),
+                ("tea".to_string(), true),
+                ("shop".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_two_negated_fts() {
+        let config = test_config();
+        let (query, _) = parse(&config, "-coffee -tea", 0);
+        // Two standalone negated parts.
+        assert_eq!(
+            fts_parts(&query),
+            vec![("coffee".to_string(), true), ("tea".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn test_parse_negated_filter_propagates() {
+        let config = test_config();
+        let (query, _) = parse(&config, "-category:Food", 0);
+        assert_eq!(query.parts.len(), 1);
+        match &query.parts[0] {
+            QueryPart::Filter { name, negated, .. } => {
+                assert_eq!(*name, "category");
+                assert!(negated);
+            }
+            _ => panic!("Expected Filter"),
+        }
+    }
+
+    #[test]
+    fn test_parse_negated_regex_propagates() {
+        let config = test_config();
+        let (query, _) = parse(&config, "-/coffee/i", 0);
+        assert_eq!(query.parts.len(), 1);
+        match &query.parts[0] {
+            QueryPart::Regex {
+                pattern, negated, ..
+            } => {
+                assert_eq!(pattern, "(?i)coffee");
+                assert!(negated);
+            }
+            _ => panic!("Expected Regex"),
+        }
+    }
+
+    #[test]
+    fn test_parse_negated_fts_cursor_context() {
+        let config = test_config();
+        // Cursor inside "-tea" (span covers the dash) → FTS context.
+        let (_, context) = parse(&config, "-tea", 2);
+        match context {
+            CursorContext::Fts { .. } => {}
+            _ => panic!("Expected FTS context, got {:?}", context),
         }
     }
 

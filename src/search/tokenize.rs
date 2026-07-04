@@ -14,10 +14,12 @@ pub enum RawToken {
         name: String,
         /// The value after the colon.
         value: String,
-        /// Span of the entire token.
+        /// Span of the entire token (includes a leading `-` when negated).
         span: Span,
         /// Span of just the value (after the colon).
         value_span: Span,
+        /// Whether the token is negated by a leading `-`.
+        negated: bool,
     },
     /// A regex token like `/pattern/flags`.
     Regex {
@@ -29,15 +31,19 @@ pub enum RawToken {
         flags: String,
         /// Whether the regex is complete (has closing slash).
         complete: bool,
-        /// Span of the entire token.
+        /// Span of the entire token (includes a leading `-` when negated).
         span: Span,
+        /// Whether the token is negated by a leading `-`.
+        negated: bool,
     },
     /// Free-text search (everything that isn't a filter or regex).
     Fts {
-        /// The text content.
+        /// The text content (never includes the leading `-` of a negation).
         text: String,
-        /// Span of the text.
+        /// Span of the text (includes a leading `-` when negated).
         span: Span,
+        /// Whether the token is negated by a leading `-`.
+        negated: bool,
     },
     /// Whitespace between tokens.
     Whitespace {
@@ -60,6 +66,11 @@ impl RawToken {
 /// Tokenize search input into raw tokens.
 ///
 /// Rules:
+/// - **Negation**: a leading `-` at a word boundary, immediately followed by a
+///   non-whitespace char, negates the token that follows (`-coffee`,
+///   `-category:Food`, `-/re/`). A lone `-` (followed by whitespace or
+///   end-of-input) is literal FTS text, not negation. A `-` *inside* a value
+///   (`amount:-50`) is untouched.
 /// - **Filter**: `name:value` where value has no whitespace
 /// - **Regex**: `/` at word boundary, content until unescaped `/`, then flags until whitespace
 /// - **FTS**: Everything else (whitespace-separated, quotes for phrases)
@@ -83,41 +94,78 @@ pub fn tokenize(input: &str) -> Vec<RawToken> {
             continue;
         }
 
+        // Detect a leading `-` that negates the following token. A lone `-`
+        // (next char is whitespace or end-of-input) is literal FTS, so it falls
+        // through to the normal path below with `negated: false`.
+        let dash = pos;
+        let negated = chars[pos] == '-' && chars.get(pos + 1).is_some_and(|c| !c.is_whitespace());
+        let token_start = if negated { pos + 1 } else { pos };
+
         // Check for regex at word boundary (pos == 0 or after whitespace)
-        if chars[pos] == '/' {
-            let regex_token = parse_regex(&chars, pos);
+        if chars[token_start] == '/' {
+            let mut regex_token = parse_regex(&chars, token_start);
             pos = regex_token.span().end;
+            if negated {
+                rewrite_span_start(&mut regex_token, dash);
+                set_negated(&mut regex_token);
+            }
             tokens.push(regex_token);
             continue;
         }
 
         // Try to parse as filter (word:value)
-        if let Some((filter_token, end)) = try_parse_filter(&chars, pos) {
-            tokens.push(filter_token);
+        if let Some((mut filter_token, end)) = try_parse_filter(&chars, token_start) {
             pos = end;
+            if negated {
+                rewrite_span_start(&mut filter_token, dash);
+                set_negated(&mut filter_token);
+            }
+            tokens.push(filter_token);
             continue;
         }
 
-        // Otherwise, it's FTS text - consume until whitespace or special token start
-        let start = pos;
+        // Otherwise, it's FTS text - consume until whitespace. When negated, the
+        // text starts after the dash but the span covers the dash so highlighting
+        // includes `-token`.
         let mut text = String::new();
-
+        pos = token_start;
         while pos < len && !chars[pos].is_whitespace() {
-            // Check if we're about to hit a regex start (/ at word boundary after space)
-            // This shouldn't happen mid-word, so just consume the character
             text.push(chars[pos]);
             pos += 1;
         }
 
-        if !text.is_empty() {
+        if negated || !text.is_empty() {
+            let span_start = if negated { dash } else { token_start };
             tokens.push(RawToken::Fts {
                 text,
-                span: Span::new(start, pos),
+                span: Span::new(span_start, pos),
+                negated,
             });
         }
     }
 
     tokens
+}
+
+/// Rewrite a token's span start (used to extend a negated token's span back
+/// over the leading `-`).
+fn rewrite_span_start(token: &mut RawToken, start: usize) {
+    match token {
+        RawToken::Filter { span, .. }
+        | RawToken::Regex { span, .. }
+        | RawToken::Fts { span, .. } => span.start = start,
+        RawToken::Whitespace { span } => span.start = start,
+    }
+}
+
+/// Mark a token as negated.
+fn set_negated(token: &mut RawToken) {
+    match token {
+        RawToken::Filter { negated, .. }
+        | RawToken::Regex { negated, .. }
+        | RawToken::Fts { negated, .. } => *negated = true,
+        RawToken::Whitespace { .. } => {}
+    }
 }
 
 /// Try to parse a filter token starting at pos.
@@ -154,6 +202,7 @@ fn try_parse_filter(chars: &[char], start: usize) -> Option<(RawToken, usize)> {
             value,
             span: Span::new(start, pos),
             value_span: Span::new(value_start, pos),
+            negated: false,
         },
         pos,
     ))
@@ -201,6 +250,7 @@ fn parse_regex(chars: &[char], start: usize) -> RawToken {
         flags,
         complete,
         span: Span::new(start, pos),
+        negated: false,
     }
 }
 
@@ -227,6 +277,7 @@ mod tests {
                 value,
                 span,
                 value_span,
+                negated,
             } => {
                 assert_eq!(name, "date");
                 assert_eq!(value, "2024");
@@ -234,6 +285,7 @@ mod tests {
                 assert_eq!(span.end, 9);
                 assert_eq!(value_span.start, 5);
                 assert_eq!(value_span.end, 9);
+                assert!(!negated);
             }
             _ => panic!("Expected Filter token"),
         }
@@ -405,6 +457,140 @@ mod tests {
             RawToken::Filter { name, value, .. } => {
                 assert_eq!(name, "date");
                 assert_eq!(value, "");
+            }
+            _ => panic!("Expected Filter token"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_negated_fts() {
+        // `-coffee`: text is "coffee" (no dash), span covers the dash.
+        let tokens = tokenize("-coffee");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            RawToken::Fts {
+                text,
+                span,
+                negated,
+            } => {
+                assert_eq!(text, "coffee");
+                assert!(negated);
+                assert_eq!(*span, Span::new(0, 7));
+            }
+            _ => panic!("Expected Fts token"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_negated_quoted_fts() {
+        // Single-word quoted token negates; span covers the dash.
+        let tokens = tokenize("-\"asdf\"");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            RawToken::Fts {
+                text,
+                span,
+                negated,
+            } => {
+                assert_eq!(text, "\"asdf\"");
+                assert!(negated);
+                assert_eq!(*span, Span::new(0, 7));
+            }
+            _ => panic!("Expected Fts token"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_negated_filter() {
+        let tokens = tokenize("-category:Food");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            RawToken::Filter {
+                name,
+                value,
+                span,
+                value_span,
+                negated,
+            } => {
+                assert_eq!(name, "category");
+                assert_eq!(value, "Food");
+                assert!(negated);
+                // Span covers the dash; value_span is unchanged.
+                assert_eq!(*span, Span::new(0, 14));
+                assert_eq!(*value_span, Span::new(10, 14));
+            }
+            _ => panic!("Expected Filter token"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_negated_regex() {
+        let tokens = tokenize("-/re/i");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            RawToken::Regex {
+                pattern,
+                flags,
+                span,
+                negated,
+                ..
+            } => {
+                assert_eq!(pattern, "re");
+                assert_eq!(flags, "i");
+                assert!(negated);
+                assert_eq!(*span, Span::new(0, 6));
+            }
+            _ => panic!("Expected Regex token"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_lone_dash_is_literal() {
+        // A lone `-` at end-of-input is literal FTS, not negation.
+        let tokens = tokenize("-");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            RawToken::Fts { text, negated, .. } => {
+                assert_eq!(text, "-");
+                assert!(!negated);
+            }
+            _ => panic!("Expected Fts token"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_dash_then_space_is_literal() {
+        // `- foo`: the `-` is literal FTS (next char is whitespace).
+        let tokens = tokenize("- foo");
+        assert_eq!(tokens.len(), 3);
+        match &tokens[0] {
+            RawToken::Fts { text, negated, .. } => {
+                assert_eq!(text, "-");
+                assert!(!negated);
+            }
+            _ => panic!("Expected Fts token"),
+        }
+        assert!(matches!(&tokens[1], RawToken::Whitespace { .. }));
+        assert!(
+            matches!(&tokens[2], RawToken::Fts { text, negated, .. } if text == "foo" && !negated)
+        );
+    }
+
+    #[test]
+    fn test_tokenize_signed_amount_not_negated() {
+        // `amount:-50`: the `-` is inside the value, so the token is NOT negated.
+        let tokens = tokenize("amount:-50");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            RawToken::Filter {
+                name,
+                value,
+                negated,
+                ..
+            } => {
+                assert_eq!(name, "amount");
+                assert_eq!(value, "-50");
+                assert!(!negated);
             }
             _ => panic!("Expected Filter token"),
         }

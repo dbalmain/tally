@@ -131,13 +131,91 @@ impl App {
             prev_wrapping(self.category_selected, self.category_suggestions.len());
     }
 
+    /// Start bulk-categorising every transaction matching the current search.
+    /// Scoped to Transactions and Todo → AI Review; a no-op elsewhere.
+    pub fn start_bulk_categorise_matching(&mut self) {
+        let supported = self.current_tab == Tab::Transactions
+            || (self.current_tab == Tab::Todo && self.todo_subtab == TodoSubTab::AiReview);
+        if !supported {
+            return;
+        }
+        self.open_category_popup(CategoryTarget::MatchingTransactions, String::new());
+    }
+
     pub fn confirm_category(&mut self) {
         if let CategoryTarget::Filter(filter_id) = self.category_target {
             self.confirm_filter_category(filter_id);
             return;
         }
 
+        if self.category_target == CategoryTarget::MatchingTransactions {
+            self.confirm_bulk_categorise_matching();
+            return;
+        }
+
         self.confirm_transaction_category();
+    }
+
+    /// Resolve the chosen category, count the matching (non-transfer)
+    /// transactions, and open a confirmation before the bulk apply. Unlike the
+    /// single-transaction path, this never offers the similar-transactions
+    /// popup — it goes straight to the count confirmation.
+    fn confirm_bulk_categorise_matching(&mut self) {
+        let Some(category_path) = self.selected_category_path() else {
+            self.cancel_input();
+            return;
+        };
+        let ids = self.matching_transactions_for_bulk();
+        self.clear_category_popup();
+        if ids.is_empty() {
+            self.cancel_input();
+            return;
+        }
+
+        let count = ids.len();
+        self.confirm(
+            format!(
+                "Apply category \"{}\" to {} transaction{}?",
+                category_path,
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+            ConfirmAction::CategoriseMatching {
+                category_path,
+                tx_ids: ids,
+            },
+        );
+    }
+
+    /// Transaction ids matching the current DB search on the active tab,
+    /// excluding transfer legs (which can't be categorised). Empty on tabs the
+    /// feature doesn't cover.
+    fn matching_transactions_for_bulk(&mut self) -> Vec<i64> {
+        let parsed = self
+            .current_search_state()
+            .map(|s| s.search_bar.parsed().clone())
+            .unwrap_or_default();
+        match self.current_tab_key() {
+            (Tab::Transactions, _) => {
+                let txns = self.load_or_show("load matching transactions", |s| {
+                    s.query_transactions(&parsed, None)
+                });
+                let ids: Vec<i64> = txns.iter().map(|tx| tx.id).collect();
+                let transfers =
+                    self.load_or_show("load transfers", |s| s.get_transfers_for_transactions(&ids));
+                ids.into_iter()
+                    .filter(|id| !transfers.contains_key(id))
+                    .collect()
+            }
+            (Tab::Todo, Some(TodoSubTab::AiReview)) => self
+                .load_or_show("load matching transactions", |s| {
+                    s.get_pending_ai_reviews(&parsed, None)
+                })
+                .into_iter()
+                .map(|r| r.transaction.id)
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     fn confirm_transaction_category(&mut self) {
