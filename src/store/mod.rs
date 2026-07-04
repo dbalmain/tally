@@ -5,6 +5,7 @@
 //! `parse_*` counterpart reads columns. The store methods themselves live in
 //! focused submodules, each contributing an `impl TransactionStore` block.
 
+mod accounts;
 mod categories;
 mod enrichments;
 mod filters;

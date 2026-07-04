@@ -27,6 +27,9 @@ cargo run -- categories list [--json|--csv]
 cargo run -- categories rename <path> <new-path>   # single row; does not cascade to children
 cargo run -- categories merge <source-path> <target-path>
 cargo run -- categories delete <path> [--force]   # blocked if a filter uses it; --force clears those filters
+cargo run -- accounts list [--json|--csv]
+cargo run -- accounts rename <path> <new-path>    # full Bank/Account path; moves the exports folder (creates target bank)
+cargo run -- accounts delete <path> --force       # removes the exports folder + soft-deletes the row; keeps transactions; --force required
 cargo run -- transactions list [QUERY...] [--limit N] [--json|--csv]
 cargo run -- categorise <tx-id> <category-path>    # or: categorise <tx-id> --clear
 
@@ -58,6 +61,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 | Tab definitions / per-tab data & dispatch | `src/tui/app/tabs.rs` |
 | DB-search / fuzzy-search behaviour in the app | `src/tui/app/search.rs`; Categories search is applied in memory by `src/tui/app/tabs.rs` (`/` path boundary-prefix, `~` path fuzzy) |
 | Category actions (assign, rename, merge, delete, AI review) | `src/tui/app/categories.rs` |
+| Account actions (rename/move, delete, view transactions) | `src/tui/app/accounts.rs` |
 | Filter actions (create, rename, categorise, override/review/delete) | `src/tui/app/filters.rs` |
 | Transfer actions (mark, confirm, delete) | `src/tui/app/transfers.rs` |
 | Search-bar widget (rendering, cursor-context keys, autocomplete) | `src/tui/search_bar.rs` |
@@ -82,6 +86,7 @@ src/
 │   ├── import.rs           # refresh(): pull/CSV import, bank/account sync, soft deletes
 │   ├── queries.rs          # General reads: query_transactions, Todo-tab queries, id lookups
 │   ├── categories.rs       # Category CRUD, rename/merge/delete, counts
+│   ├── accounts.rs         # Account list/lookup, rename/move + delete (exports-folder sync), counts
 │   ├── enrichments.rs      # set/confirm/clear category, confirmed examples
 │   ├── transfers.rs        # Transfer lifecycle, candidates, transfer queries
 │   ├── filters.rs          # Filter CRUD, apply_filters/preview_filters
@@ -111,6 +116,7 @@ src/
         ├── tabs.rs         # Tab/TodoSubTab enums + TabLists (per-tab dispatch)
         ├── search.rs       # TabSearchState + search/autocomplete actions
         ├── categories.rs   # Category popup, AI review, rename/merge
+        ├── accounts.rs      # Account rename/move, delete, transaction side panel
         ├── filters.rs      # Saved-search filter management
         └── transfers.rs    # Transfer marking, confirmation, deletion
 
@@ -231,6 +237,10 @@ maintains:
 - `filters.category_id` never dangles — rename preserves it, merge repoints
   it, delete clears it to NULL (`apply_filters` skips NULL-category filters).
 - Deleting a category deletes its enrichments and reports the count.
+- Account rename/move and delete keep the `exports/` folder in sync: rename
+  moves `exports/{Bank}/{Account}` (creating the target bank folder, never
+  merging onto an existing one); delete removes the folder and soft-deletes the
+  row while retaining the account's transactions. Both are store-only.
 
 ### Saved filters
 
@@ -410,13 +420,13 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `n` | Create filter (Filters tab) |
 | `a` | Apply filter categories (Filters tab) — opens a scrollable confirmation modal listing the affected transactions (date/description/amount) before applying. On the Filter Edit screen this is `Ctrl-A` |
 | `c` | Set category on transaction (including Todo → AI Review), or set/clear filter category (Filters tab); categorising a transfer prompts to unlink it first |
-| `r` | Rename category (Categories tab), or rename filter (Filters tab) |
+| `r` | Rename category (Categories tab), rename/move account (Accounts tab; full `Bank/Account` path, moves the exports folder), or rename filter (Filters tab) |
 | `o` | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`) |
-| `v` | Toggle filter review requirement (Filters tab); toggle "view transactions?" — a side panel listing the selected category's transactions (Transactions-view format, no category column) to the right of the category list (Categories tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised) |
+| `v` | Toggle filter review requirement (Filters tab); toggle "view transactions?" — a side panel listing the selected category's transactions (Transactions-view format, no category column) to the right of the category list (Categories tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised); or toggle a side panel of the selected account's transactions (Accounts tab) |
 | `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
-| `m` | Manage transactions: jump to the Transactions tab with its DB search set to `category:<path>` and focus on the first transaction (Categories tab) |
+| `m` | Manage transactions: jump to the Transactions tab with its DB search set to `category:<path>` (Categories tab) or `account:<path>` (Accounts tab) and focus on the first transaction |
 | `C` | Run local auto-classification (Todo → Uncategorised) — shows a loading modal while it runs, then a summary modal (filter/transfer/suggestion counts) |
-| `d` / `Delete` | Delete transfer (Transfers tab), delete filter (Filters tab; prompts to confirm), or delete category (Categories tab; prompts to confirm, noting how many transactions will be left uncategorised) |
+| `d` / `Delete` | Delete transfer (Transfers tab), delete filter (Filters tab; prompts to confirm), delete category (Categories tab; prompts to confirm, noting how many transactions will be left uncategorised), or delete account (Accounts tab; prompts to confirm, noting the exports-folder removal and retained-transaction count) |
 | `u` | Transactions tab: unlink the selected transfer, else uncategorise the transaction (prompts to confirm). The hint reads "unlink" on a linked transfer and "uncategorise" otherwise, and is hidden when the row has neither |
 | `Delete` | AI Review: remove category. Transfer Review: unlink transfer |
 | `Enter` | Confirm (AI review, transfer review), or open filter edit (Filters tab) |
@@ -541,6 +551,12 @@ store.get_transaction_category(tx_id) -> Option<Category>
 store.find_matching_transfer_candidates(tx) -> Vec<Transaction>
 store.create_transfer(from_id, to_id, source, confirmed, confidence)
 store.get_transfer_for_transaction(tx_id) -> Option<Transfer>
+
+// Accounts
+store.list_accounts_with_bank() -> Vec<AccountWithBank>   // path = "Bank/Account"
+store.get_account_by_path(path) -> Option<AccountWithBank>
+store.rename_account(id, "Bank/Account")                  // moves the exports folder; never merges
+store.delete_account(id) -> usize                         // removes folder, soft-deletes; returns tx count
 ```
 
 ## Import Sources

@@ -62,6 +62,19 @@ pub enum Command {
         tx_id: i64,
         json: bool,
     },
+    AccountsList {
+        format: Format,
+    },
+    AccountRename {
+        from: String,
+        to: String,
+        json: bool,
+    },
+    AccountDelete {
+        path: String,
+        json: bool,
+        force: bool,
+    },
 }
 
 const DEFAULT_LIMIT: usize = 100;
@@ -89,6 +102,10 @@ pub enum HelpTopic {
     CategoriesRename,
     CategoriesMerge,
     CategoriesDelete,
+    Accounts,
+    AccountsList,
+    AccountsRename,
+    AccountsDelete,
     Transactions,
     TransactionsList,
     Categorise,
@@ -135,6 +152,10 @@ const FLAG_CSV: FlagSpec = FlagSpec {
 const FLAG_FORCE: FlagSpec = FlagSpec {
     name: "--force",
     desc: "Delete even if a filter uses the category (clears those filters)",
+};
+const FLAG_FORCE_ACCOUNT: FlagSpec = FlagSpec {
+    name: "--force",
+    desc: "Confirm the delete: removes the exports folder (scripts + CSVs)",
 };
 const FLAG_LIMIT: FlagSpec = FlagSpec {
     name: "--limit N",
@@ -210,6 +231,39 @@ const SPECS: &[Spec] = &[
             desc: "Delete a category (blocked if a filter uses it; --force clears them)",
         }],
         flags: &[FLAG_FORCE, FLAG_JSON],
+    },
+    Spec {
+        topic: HelpTopic::Accounts,
+        path: &["accounts"],
+        forms: &[],
+        flags: &[],
+    },
+    Spec {
+        topic: HelpTopic::AccountsList,
+        path: &["accounts", "list"],
+        forms: &[Form {
+            usage: "accounts list [--json|--csv]",
+            desc: "List accounts with transaction counts",
+        }],
+        flags: &[FLAG_JSON, FLAG_CSV],
+    },
+    Spec {
+        topic: HelpTopic::AccountsRename,
+        path: &["accounts", "rename"],
+        forms: &[Form {
+            usage: "accounts rename <path> <new-path> [--json]",
+            desc: "Rename/move an account (Bank/Account); moves its exports folder",
+        }],
+        flags: &[FLAG_JSON],
+    },
+    Spec {
+        topic: HelpTopic::AccountsDelete,
+        path: &["accounts", "delete"],
+        forms: &[Form {
+            usage: "accounts delete <path> [--force] [--json]",
+            desc: "Delete an account: removes its exports folder and soft-deletes the row (requires --force)",
+        }],
+        flags: &[FLAG_FORCE_ACCOUNT, FLAG_JSON],
     },
     Spec {
         topic: HelpTopic::Transactions,
@@ -341,7 +395,9 @@ pub fn detect_help(args: &[String]) -> Option<HelpTopic> {
 pub fn render_help(topic: HelpTopic) -> String {
     match topic {
         HelpTopic::Global | HelpTopic::Unknown => render_global(),
-        HelpTopic::Categories | HelpTopic::Transactions | HelpTopic::Ai => render_family(topic),
+        HelpTopic::Categories | HelpTopic::Accounts | HelpTopic::Transactions | HelpTopic::Ai => {
+            render_family(topic)
+        }
         other => render_leaf(other),
     }
 }
@@ -387,6 +443,18 @@ fn render_global() -> String {
         HelpTopic::CategoriesRename,
         HelpTopic::CategoriesMerge,
         HelpTopic::CategoriesDelete,
+    ] {
+        let spec = find_spec(topic);
+        out.push_str(&format!("  {}\n", spec.forms[0].usage));
+        out.push_str(&format!("             {}\n", spec.forms[0].desc));
+    }
+
+    out.push('\n');
+
+    for topic in [
+        HelpTopic::AccountsList,
+        HelpTopic::AccountsRename,
+        HelpTopic::AccountsDelete,
     ] {
         let spec = find_spec(topic);
         out.push_str(&format!("  {}\n", spec.forms[0].usage));
@@ -547,7 +615,10 @@ fn install_claude_skill(vault_root: &Path) -> Result<(), String> {
 
 /// True if `first` names one of the CLI subcommands handled here.
 pub fn is_cli_command(first: &str) -> bool {
-    matches!(first, "categories" | "transactions" | "categorise")
+    matches!(
+        first,
+        "categories" | "accounts" | "transactions" | "categorise"
+    )
 }
 
 /// Output flags shared by every command, collected in one pass.
@@ -632,6 +703,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
 
     match head.as_str() {
         "categories" => parse_categories(rest),
+        "accounts" => parse_accounts(rest),
         "transactions" => parse_transactions(rest),
         "categorise" => parse_categorise(rest),
         other => Err(format!("Unknown command: {other}")),
@@ -706,6 +778,64 @@ fn parse_categories_delete(args: &[String]) -> Result<Command, String> {
 
     let [path] = take_one(&positional, &usage_error(HelpTopic::CategoriesDelete, 0))?;
     Ok(Command::CategoryDelete { path, json, force })
+}
+
+fn parse_accounts(args: &[String]) -> Result<Command, String> {
+    let (sub, rest) = args.split_first().ok_or_else(|| {
+        "accounts requires a subcommand (list|rename|delete)\n\nsee: tally accounts --help"
+            .to_string()
+    })?;
+
+    match sub.as_str() {
+        "list" => {
+            let flags = collect_flags(rest, false, true)?;
+            expect_positional(
+                &flags.positional,
+                0,
+                &usage_error(HelpTopic::AccountsList, 0),
+            )?;
+            Ok(Command::AccountsList {
+                format: format_of(&flags),
+            })
+        }
+        "rename" => {
+            let flags = collect_flags(rest, false, false)?;
+            let [from, to] = take_two(
+                &flags.positional,
+                &usage_error(HelpTopic::AccountsRename, 0),
+            )?;
+            Ok(Command::AccountRename {
+                from,
+                to,
+                json: flags.json,
+            })
+        }
+        "delete" => parse_accounts_delete(rest),
+        other => Err(format!(
+            "Unknown accounts subcommand: {other} (expected list|rename|delete)\n\nsee: tally accounts --help"
+        )),
+    }
+}
+
+fn parse_accounts_delete(args: &[String]) -> Result<Command, String> {
+    // `delete` carries a `--force` flag alongside its positional, so it can't
+    // use the shared flag collector (which rejects unknown `--` flags).
+    let mut json = false;
+    let mut force = false;
+    let mut positional = Vec::new();
+
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--force" => force = true,
+            "--csv" => return Err("--csv is only valid on `list` commands".to_string()),
+            other if other.starts_with("--") => return Err(format!("Unknown flag: {other}")),
+            other => positional.push(other.to_string()),
+        }
+    }
+
+    let [path] = take_one(&positional, &usage_error(HelpTopic::AccountsDelete, 0))?;
+    Ok(Command::AccountDelete { path, json, force })
 }
 
 fn parse_transactions(args: &[String]) -> Result<Command, String> {
@@ -805,6 +935,9 @@ pub fn run(command: Command, store: &mut TransactionStore) -> Result<(), String>
         } => transactions_list(store, &query, limit, format),
         Command::Categorise { tx_id, path, json } => categorise(store, tx_id, &path, json),
         Command::Uncategorise { tx_id, json } => uncategorise(store, tx_id, json),
+        Command::AccountsList { format } => accounts_list(store, format),
+        Command::AccountRename { from, to, json } => account_rename(store, &from, &to, json),
+        Command::AccountDelete { path, json, force } => account_delete(store, &path, json, force),
     }
 }
 
@@ -1108,6 +1241,108 @@ fn uncategorise(store: &mut TransactionStore, tx_id: i64, json: bool) -> Result<
         }));
     } else {
         println!("Cleared category from transaction {tx_id}");
+    }
+    Ok(())
+}
+
+fn accounts_list(store: &TransactionStore, format: Format) -> Result<(), String> {
+    let accounts = store.list_accounts_with_bank().map_err(stringify)?;
+    let counts = store.get_account_transaction_counts().map_err(stringify)?;
+
+    match format {
+        Format::Json => {
+            let rows: Vec<_> = accounts
+                .iter()
+                .map(|a| {
+                    serde_json::json!({
+                        "id": a.id,
+                        "bank": a.bank_name,
+                        "name": a.name,
+                        "path": a.path,
+                        "transactions": counts.get(&a.id).copied().unwrap_or(0),
+                    })
+                })
+                .collect();
+            print_json(&serde_json::Value::Array(rows));
+        }
+        Format::Csv => {
+            print!("{}", csv_row(&["path", "transactions"]));
+            for a in &accounts {
+                let count = counts.get(&a.id).copied().unwrap_or(0);
+                print!("{}", csv_row(&[&a.path, &count.to_string()]));
+            }
+        }
+        Format::Text => {
+            let count_width = accounts
+                .iter()
+                .map(|a| counts.get(&a.id).copied().unwrap_or(0).to_string().len())
+                .max()
+                .unwrap_or(1);
+            for a in &accounts {
+                let count = counts.get(&a.id).copied().unwrap_or(0);
+                println!("{:>count_width$}  {}  (id {})", count, a.path, a.id);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn account_rename(
+    store: &mut TransactionStore,
+    from: &str,
+    to: &str,
+    json: bool,
+) -> Result<(), String> {
+    let account = store
+        .get_account_by_path(from)
+        .map_err(stringify)?
+        .ok_or_else(|| format!("Account \"{from}\" not found"))?;
+    match store.rename_account(account.id, to) {
+        Ok(()) => {}
+        Err(Error::AccountExists(_)) => {
+            return Err(format!(
+                "Account \"{to}\" already exists; choose a different Bank/Account."
+            ));
+        }
+        Err(Error::InvalidAccountPath(msg)) => return Err(msg),
+        Err(e) => return Err(stringify(e)),
+    }
+
+    if json {
+        print_json(&serde_json::json!({ "action": "rename", "from": from, "to": to }));
+    } else {
+        println!("Renamed \"{from}\" → \"{to}\"");
+    }
+    Ok(())
+}
+
+fn account_delete(
+    store: &mut TransactionStore,
+    path: &str,
+    json: bool,
+    force: bool,
+) -> Result<(), String> {
+    let account = store
+        .get_account_by_path(path)
+        .map_err(stringify)?
+        .ok_or_else(|| format!("Account \"{path}\" not found"))?;
+    let count = store
+        .count_transactions_in_account(account.id)
+        .map_err(stringify)?;
+    if !force {
+        return Err(format!(
+            "Refusing to delete account \"{path}\" without --force: this removes its exports folder and soft-deletes the account ({count} transactions retained). Re-run with --force."
+        ));
+    }
+    let removed = store.delete_account(account.id).map_err(stringify)?;
+    if json {
+        print_json(
+            &serde_json::json!({ "action": "delete", "path": path, "transactions": removed }),
+        );
+    } else {
+        println!(
+            "Deleted account \"{path}\" (exports folder removed, {removed} transactions retained)"
+        );
     }
     Ok(())
 }
@@ -1467,6 +1702,72 @@ mod tests {
                 json: true,
             }
         );
+    }
+
+    #[test]
+    fn parses_accounts_list_formats() {
+        assert_eq!(
+            parse_command(&s(&["accounts", "list"])).unwrap(),
+            Command::AccountsList {
+                format: Format::Text
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["accounts", "list", "--json"])).unwrap(),
+            Command::AccountsList {
+                format: Format::Json
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["accounts", "list", "--csv"])).unwrap(),
+            Command::AccountsList {
+                format: Format::Csv
+            }
+        );
+    }
+
+    #[test]
+    fn parses_account_rename() {
+        assert_eq!(
+            parse_command(&s(&["accounts", "rename", "A", "B"])).unwrap(),
+            Command::AccountRename {
+                from: "A".into(),
+                to: "B".into(),
+                json: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_account_delete() {
+        assert_eq!(
+            parse_command(&s(&["accounts", "delete", "TB/A1"])).unwrap(),
+            Command::AccountDelete {
+                path: "TB/A1".into(),
+                json: false,
+                force: false,
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["accounts", "delete", "TB/A1", "--force"])).unwrap(),
+            Command::AccountDelete {
+                path: "TB/A1".into(),
+                json: false,
+                force: true,
+            }
+        );
+    }
+
+    #[test]
+    fn accounts_unknown_subcommand_errors() {
+        let err = parse_command(&s(&["accounts", "bogus"])).unwrap_err();
+        assert!(err.contains("Unknown accounts subcommand"), "{err}");
+    }
+
+    #[test]
+    fn accounts_delete_csv_errors_as_list_only() {
+        let err = parse_command(&s(&["accounts", "delete", "X", "--csv"])).unwrap_err();
+        assert!(err.contains("only valid on `list`"), "{err}");
     }
 
     #[test]
@@ -1832,5 +2133,82 @@ echo '[{"date":"2025-01-01","description":"Test transaction","amount_cents":-100
         )
         .unwrap_err();
         assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn account_rename_executor_moves_account_and_folder() {
+        let (temp, mut store) = fixture_store();
+
+        run(
+            Command::AccountRename {
+                from: "TestBank/Checking".into(),
+                to: "TestBank/Main".into(),
+                json: false,
+            },
+            &mut store,
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .get_account_by_path("TestBank/Main")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .get_account_by_path("TestBank/Checking")
+                .unwrap()
+                .is_none()
+        );
+        assert!(temp.path().join("TestBank").join("Main").exists());
+        assert!(!temp.path().join("TestBank").join("Checking").exists());
+    }
+
+    #[test]
+    fn account_delete_without_force_is_noop_error() {
+        let (temp, mut store) = fixture_store();
+
+        assert!(
+            run(
+                Command::AccountDelete {
+                    path: "TestBank/Checking".into(),
+                    json: false,
+                    force: false,
+                },
+                &mut store,
+            )
+            .is_err()
+        );
+        assert!(
+            store
+                .get_account_by_path("TestBank/Checking")
+                .unwrap()
+                .is_some()
+        );
+        assert!(temp.path().join("TestBank").join("Checking").exists());
+    }
+
+    #[test]
+    fn account_delete_with_force_removes_folder_and_soft_deletes() {
+        let (temp, mut store) = fixture_store();
+
+        run(
+            Command::AccountDelete {
+                path: "TestBank/Checking".into(),
+                json: false,
+                force: true,
+            },
+            &mut store,
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .get_account_by_path("TestBank/Checking")
+                .unwrap()
+                .is_none()
+        );
+        assert!(!temp.path().join("TestBank").join("Checking").exists());
     }
 }

@@ -221,7 +221,10 @@ impl TransactionStore {
         Ok(result)
     }
 
-    fn ensure_bank(&self, name: &str, report: &mut RefreshReport) -> Result<i64> {
+    /// Resolve a bank by name, undeleting or inserting as needed. Returns
+    /// `(bank_id, was_created)`; `was_created` is true only for the INSERT
+    /// branch (an undelete is not a creation).
+    pub(crate) fn get_or_create_bank(&self, name: &str) -> Result<(i64, bool)> {
         let existing: Option<(i64, Option<String>)> = self
             .conn
             .query_row(
@@ -235,16 +238,23 @@ impl TransactionStore {
             Some((id, Some(_))) => {
                 self.conn
                     .execute("UPDATE banks SET deleted_at = NULL WHERE id = ?", [id])?;
-                Ok(id)
+                Ok((id, false))
             }
-            Some((id, None)) => Ok(id),
+            Some((id, None)) => Ok((id, false)),
             None => {
                 self.conn
                     .execute("INSERT INTO banks (name) VALUES (?)", [name])?;
-                report.banks_added += 1;
-                Ok(self.conn.last_insert_rowid())
+                Ok((self.conn.last_insert_rowid(), true))
             }
         }
+    }
+
+    fn ensure_bank(&self, name: &str, report: &mut RefreshReport) -> Result<i64> {
+        let (id, created) = self.get_or_create_bank(name)?;
+        if created {
+            report.banks_added += 1;
+        }
+        Ok(id)
     }
 
     fn ensure_account(&self, bank_id: i64, name: &str, report: &mut RefreshReport) -> Result<i64> {

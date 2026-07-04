@@ -161,6 +161,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Transactions => draw_transactions(f, app, content),
         Tab::Transfers => draw_transfers(f, app, content),
         Tab::Categories => draw_categories(f, app, content),
+        Tab::Accounts => draw_accounts(f, app, content),
         Tab::Todo => draw_todo(f, app, content),
         Tab::Filters => draw_filters(f, app, content),
     }
@@ -1057,6 +1058,81 @@ fn draw_categories_list(f: &mut Frame, app: &App, area: Rect) {
             Cell::from(Line::from(format!("{}", tx_count)).alignment(Alignment::Right))
                 .style(Style::default().fg(count_fg)),
             Cell::from(cat.path.as_str()).style(Style::default().fg(Color::Yellow)),
+        ])
+        .style(Style::default().bg(bg))
+    });
+}
+
+fn draw_accounts(f: &mut Frame, app: &App, area: Rect) {
+    if app.show_account_transactions {
+        // It's still the account view, so don't truncate paths: size the list to
+        // the longest one and give the rest to the transactions panel.
+        let longest = app
+            .lists
+            .accounts
+            .iter()
+            .map(|a| a.path.chars().count() as u16)
+            .max()
+            .unwrap_or(0);
+        let left = categories_pane_width(longest, area.width);
+        let chunks = Layout::horizontal([
+            Constraint::Length(left),
+            Constraint::Length(CATEGORY_PANEL_GAP),
+            Constraint::Min(0),
+        ])
+        .split(area);
+        draw_accounts_list(f, app, chunks[0]);
+        draw_account_transactions(f, app, chunks[2]);
+    } else {
+        draw_accounts_list(f, app, area);
+    }
+}
+
+/// Side panel listing every transaction in the selected account, in the
+/// Transactions table format minus the Category column. Read-only: no row is
+/// highlighted because focus stays on the accounts list.
+fn draw_account_transactions(f: &mut Frame, app: &App, area: Rect) {
+    let transactions: Vec<_> = app.account_transactions.iter().collect();
+    if transactions.is_empty() {
+        draw_empty_message(f, "No transactions in this account.", area);
+        return;
+    }
+    draw_transaction_table(f, app, &transactions, 0, area, false, false);
+}
+
+fn draw_accounts_list(f: &mut Frame, app: &App, area: Rect) {
+    let accounts: Vec<_> = app.lists.accounts.iter().collect();
+
+    if accounts.is_empty() {
+        draw_empty_message(f, "No accounts yet.", area);
+        return;
+    }
+
+    const COUNT_COL: u16 = 4;
+    // Path column width the Table will lay out, so `fit_path` truncates to the
+    // same budget rather than letting ratatui clip mid-word.
+    let path_width = area.width.saturating_sub(COUNT_COL + COLUMN_SPACING).max(1) as usize;
+
+    ScrollTable::new(
+        &accounts,
+        app.selected_index,
+        &[Constraint::Length(COUNT_COL), Constraint::Min(30)],
+    )
+    .render(f, area, |i, account| {
+        let is_selected = i == app.selected_index;
+        let bg = row_bg(is_selected);
+        let count_fg = if is_selected {
+            Color::Gray
+        } else {
+            Color::DarkGray
+        };
+
+        let tx_count = app.account_transaction_count(account.id);
+
+        Row::new(vec![
+            Cell::from(Line::from(format!("{}", tx_count)).alignment(Alignment::Right))
+                .style(Style::default().fg(count_fg)),
+            Cell::from(fit_path(&account.path, path_width)),
         ])
         .style(Style::default().bg(bg))
     });

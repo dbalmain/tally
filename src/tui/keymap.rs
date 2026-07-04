@@ -52,6 +52,10 @@ pub enum Act {
     ViewCategoryTransactions,
     ManageCategoryTransactions,
     DeleteCategory,
+    RenameAccount,
+    ViewAccountTransactions,
+    ManageAccountTransactions,
+    DeleteAccount,
     CreateFilter,
     ApplyFilters,
     SaveSearchAsFilter,
@@ -267,6 +271,35 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
             true,
             true,
             DeleteCategory,
+        ));
+    }
+
+    if app.selected_account().is_some() {
+        out.push(b(&[Char('r')], "r", "rename", true, true, RenameAccount));
+        out.push(bh(
+            &[Char('v')],
+            "v",
+            "view txns?",
+            "view transactions?",
+            true,
+            true,
+            ViewAccountTransactions,
+        ));
+        out.push(b(
+            &[Char('m')],
+            "m",
+            "manage",
+            true,
+            true,
+            ManageAccountTransactions,
+        ));
+        out.push(b(
+            &[Char('d'), Code(KeyCode::Delete)],
+            "d",
+            "delete",
+            true,
+            true,
+            DeleteAccount,
         ));
     }
 
@@ -533,6 +566,10 @@ fn run_normal(app: &mut App, act: Act) {
         Act::ViewCategoryTransactions => app.toggle_category_transactions(),
         Act::ManageCategoryTransactions => app.manage_category_transactions(),
         Act::DeleteCategory => app.start_category_delete(),
+        Act::RenameAccount => app.start_account_rename(),
+        Act::ViewAccountTransactions => app.toggle_account_transactions(),
+        Act::ManageAccountTransactions => app.manage_account_transactions(),
+        Act::DeleteAccount => app.start_account_delete(),
         Act::CreateFilter => app.start_filter_create(),
         Act::ApplyFilters => app.apply_filter_categories(),
         Act::SaveSearchAsFilter => app.start_filter_from_search(),
@@ -770,8 +807,8 @@ mod tests {
     use super::*;
     use crate::tui::filtered_list::FilteredList;
     use crate::{
-        Category, Filter, FilterOverride, Transaction, TransactionStore, TransactionWithEnrichment,
-        Transfer, TransferSource, TransferWithTransactions,
+        AccountWithBank, Category, Filter, FilterOverride, Transaction, TransactionStore,
+        TransactionWithEnrichment, Transfer, TransferSource, TransferWithTransactions,
     };
     use chrono::{NaiveDate, Utc};
     use tui_input::InputRequest;
@@ -830,6 +867,36 @@ mod tests {
             Trigger::Code(KeyCode::Delete)
         ));
         assert!(!has_act(&binds, Act::DeleteTransfer));
+
+        app.current_tab = Tab::Accounts;
+        let binds = normal_binds(&app);
+        assert!(has_act_trigger(
+            &binds,
+            Act::RenameAccount,
+            Trigger::Char('r')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::ViewAccountTransactions,
+            Trigger::Char('v')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::ManageAccountTransactions,
+            Trigger::Char('m')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::DeleteAccount,
+            Trigger::Char('d')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::DeleteAccount,
+            Trigger::Code(KeyCode::Delete)
+        ));
+        // No categorise binding on the Accounts tab.
+        assert!(!has_act(&binds, Act::Categorise));
 
         app.current_tab = Tab::Transfers;
         let binds = normal_binds(&app);
@@ -1087,11 +1154,12 @@ mod tests {
         }
     }
 
-    fn contexts() -> [(Tab, TodoSubTab); 7] {
+    fn contexts() -> [(Tab, TodoSubTab); 8] {
         [
             (Tab::Transactions, TodoSubTab::Uncategorised),
             (Tab::Transfers, TodoSubTab::Uncategorised),
             (Tab::Categories, TodoSubTab::Uncategorised),
+            (Tab::Accounts, TodoSubTab::Uncategorised),
             (Tab::Todo, TodoSubTab::Uncategorised),
             (Tab::Todo, TodoSubTab::AiReview),
             (Tab::Todo, TodoSubTab::TransferReview),
@@ -1140,6 +1208,7 @@ mod tests {
             to_transaction: tx2,
         }]);
         app.lists.categories = FilteredList::new(vec![category]);
+        app.lists.accounts = FilteredList::new(vec![account_with_bank(1)]);
         app.lists.filters = FilteredList::new(vec![filter(1)]);
         app
     }
@@ -1165,6 +1234,16 @@ mod tests {
             id,
             path: "Food/Groceries".to_string(),
             created_at: Utc::now(),
+        }
+    }
+
+    fn account_with_bank(id: i64) -> AccountWithBank {
+        AccountWithBank {
+            id,
+            bank_id: 1,
+            bank_name: "TB".to_string(),
+            name: "Checking".to_string(),
+            path: "TB/Checking".to_string(),
         }
     }
 

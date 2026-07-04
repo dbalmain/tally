@@ -48,6 +48,16 @@ pub struct Account {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+/// An account joined to its bank, with a display `path` like "Bank/Account".
+#[derive(Debug, Clone)]
+pub struct AccountWithBank {
+    pub id: i64,
+    pub bank_id: i64,
+    pub bank_name: String,
+    pub name: String,
+    pub path: String,
+}
+
 /// Tracked CSV import file metadata.
 #[derive(Debug, Clone)]
 pub struct ImportedFile {

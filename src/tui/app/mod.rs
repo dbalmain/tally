@@ -10,6 +10,7 @@
 //! - `filters` — saved-search filter management
 //! - `transfers` — transfer marking, confirmation, deletion
 
+mod accounts;
 mod categories;
 mod filters;
 mod search;
@@ -95,6 +96,9 @@ pub enum ConfirmAction {
     },
     /// Deleting a category from the Categories tab.
     DeleteCategory(i64),
+    /// Deleting an account from the Accounts tab (also removes its exports
+    /// folder; transactions are retained in history).
+    DeleteAccount(i64),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -107,6 +111,7 @@ pub enum CategoryTarget {
 #[derive(Debug, Clone)]
 pub enum TextPromptTarget {
     CategoryRename(Category),
+    AccountRename(crate::AccountWithBank),
     FilterCreate,
     FilterCreateFromQuery(String),
     FilterRename(i64),
@@ -151,6 +156,11 @@ pub struct App {
     pub show_category_transactions: bool,
     /// Transactions backing that side panel (the selected category's rows).
     pub category_transactions: Vec<Transaction>,
+    /// Whether the Accounts tab shows the side panel listing the selected
+    /// account's transactions.
+    pub show_account_transactions: bool,
+    /// Transactions backing that side panel (the selected account's rows).
+    pub account_transactions: Vec<Transaction>,
     // Category popup state
     pub category_input: String,
     pub category_suggestions: Vec<Category>,
@@ -168,6 +178,7 @@ pub struct App {
     category_by_tx_id: HashMap<i64, String>,
     transfer_by_tx_id: HashMap<i64, Transfer>,
     category_tx_count: HashMap<i64, usize>,
+    account_tx_count: HashMap<i64, usize>,
     similarity_candidates: HashMap<i64, Transaction>,
     // Shared single-line text prompt state
     text_prompt: Option<TextPrompt>,
@@ -247,6 +258,8 @@ impl App {
             view_details: false,
             show_category_transactions: false,
             category_transactions: Vec::new(),
+            show_account_transactions: false,
+            account_transactions: Vec::new(),
             category_input: String::new(),
             category_suggestions: Vec::new(),
             category_selected: 0,
@@ -261,6 +274,7 @@ impl App {
             category_by_tx_id: HashMap::new(),
             transfer_by_tx_id: HashMap::new(),
             category_tx_count: HashMap::new(),
+            account_tx_count: HashMap::new(),
             similarity_candidates: HashMap::new(),
             text_prompt: None,
             filter_edit: None,
@@ -273,6 +287,7 @@ impl App {
         };
         app.rebuild_tx_caches();
         app.rebuild_category_counts();
+        app.rebuild_account_counts();
         Ok(app)
     }
 
@@ -551,6 +566,7 @@ impl App {
             }
         }
         self.reload_category_transactions();
+        self.reload_account_transactions();
     }
 
     pub fn previous(&mut self) {
@@ -577,6 +593,7 @@ impl App {
             }
         }
         self.reload_category_transactions();
+        self.reload_account_transactions();
     }
 
     fn list_len(&self) -> usize {
@@ -637,6 +654,7 @@ impl App {
         self.apply_fuzzy_filter();
         self.clamp_selection();
         self.reload_category_transactions();
+        self.reload_account_transactions();
     }
 
     /// Apply fuzzy filter on top of loaded data for current tab only
@@ -662,9 +680,12 @@ impl App {
         self.similarity_candidates.clear();
         let categories = self.load_or_show("load categories", |s| s.list_categories());
         self.lists.categories.set_items(categories);
+        let accounts = self.load_or_show("load accounts", |s| s.list_accounts_with_bank());
+        self.lists.accounts.set_items(accounts);
         self.rebuild_search_configs();
         self.reload_current_tab();
         self.rebuild_category_counts();
+        self.rebuild_account_counts();
     }
 
     fn rebuild_similarity_index(&mut self) {
@@ -784,6 +805,9 @@ impl App {
         match prompt.target {
             TextPromptTarget::CategoryRename(category) => {
                 self.confirm_category_rename(category, value);
+            }
+            TextPromptTarget::AccountRename(account) => {
+                self.confirm_account_rename(account, value);
             }
             TextPromptTarget::FilterCreate => self.confirm_filter_create(value),
             TextPromptTarget::FilterCreateFromQuery(query) => {
@@ -908,6 +932,13 @@ impl App {
                     s.delete_category(category_id).map(|_| ())
                 }) {
                     self.delete_category_after();
+                }
+            }
+            ConfirmAction::DeleteAccount(account_id) => {
+                if self.try_mutation("delete account", |s| {
+                    s.delete_account(account_id).map(|_| ())
+                }) {
+                    self.delete_account_after();
                 }
             }
             ConfirmAction::DiscardFilterEdit => self.exit_filter_edit(),

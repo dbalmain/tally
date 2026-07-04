@@ -61,7 +61,7 @@ impl App {
     /// on tabs whose rows have no category (Uncategorised) or where the
     /// filter is meaningless (raw transfer lists).
     pub(super) fn build_search_config(&self, key: TabKey) -> SearchConfig {
-        if matches!(key, (Tab::Categories | Tab::Filters, _)) {
+        if matches!(key, (Tab::Categories | Tab::Accounts | Tab::Filters, _)) {
             return SearchConfig::new(Vec::new());
         }
 

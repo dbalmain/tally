@@ -22,6 +22,15 @@ pub enum Error {
 
     #[error("Category already exists: {0}")]
     CategoryExists(String),
+
+    #[error("Account not found: {0}")]
+    AccountNotFound(String),
+
+    #[error("Account already exists: {0}")]
+    AccountExists(String),
+
+    #[error("Invalid account path: {0}")]
+    InvalidAccountPath(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

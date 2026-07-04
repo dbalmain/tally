@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::search::ParsedQuery;
 use crate::tui::filtered_list::FilteredList;
 use crate::{
-    Category, Filter, FuzzyMatcher, Result, Transaction, TransactionStore,
+    AccountWithBank, Category, Filter, FuzzyMatcher, Result, Transaction, TransactionStore,
     TransactionWithEnrichment, Transfer, TransferWithTransactions,
 };
 
@@ -20,6 +20,7 @@ pub enum Tab {
     Todo,
     Transactions,
     Categories,
+    Accounts,
     Transfers,
     Filters,
 }
@@ -30,6 +31,7 @@ impl Tab {
             Tab::Todo,
             Tab::Transactions,
             Tab::Categories,
+            Tab::Accounts,
             Tab::Transfers,
             Tab::Filters,
         ]
@@ -40,6 +42,7 @@ impl Tab {
             Tab::Todo => "Todo",
             Tab::Transactions => "Transactions",
             Tab::Categories => "Categories",
+            Tab::Accounts => "Accounts",
             Tab::Transfers => "Transfers",
             Tab::Filters => "Filters",
         }
@@ -99,6 +102,7 @@ pub struct TabLists {
     pub transactions: FilteredList<Transaction>,
     pub linked_transfers: FilteredList<TransferWithTransactions>,
     pub categories: FilteredList<Category>,
+    pub accounts: FilteredList<AccountWithBank>,
     pub uncategorised: FilteredList<Transaction>,
     pub ai_reviews: FilteredList<TransactionWithEnrichment>,
     pub transfer_reviews: FilteredList<Transfer>,
@@ -115,6 +119,7 @@ impl TabLists {
                 store.list_transfers_with_transactions(true, &query, limit)?,
             ),
             categories: FilteredList::new(store.list_categories()?),
+            accounts: FilteredList::new(store.list_accounts_with_bank()?),
             uncategorised: FilteredList::new(store.get_uncategorised_transactions(&query, limit)?),
             ai_reviews: FilteredList::new(store.get_pending_ai_reviews(&query, limit)?),
             transfer_reviews: FilteredList::new(store.get_pending_transfer_reviews(&query, limit)?),
@@ -142,6 +147,7 @@ impl TabLists {
                 .linked_transfers
                 .set_items(store.list_transfers_with_transactions(true, query, limit)?),
             (Tab::Categories, _) => {}
+            (Tab::Accounts, _) => {}
             (Tab::Filters, _) => self.filters.set_items(store.list_filters()?),
             (Tab::Todo, sub) => match sub.unwrap_or(TodoSubTab::Uncategorised) {
                 TodoSubTab::Uncategorised => self
@@ -164,6 +170,7 @@ impl TabLists {
             (Tab::Transactions, _) => self.transactions.len(),
             (Tab::Transfers, _) => self.linked_transfers.len(),
             (Tab::Categories, _) => self.categories.len(),
+            (Tab::Accounts, _) => self.accounts.len(),
             (Tab::Filters, _) => self.filters.len(),
             (Tab::Todo, sub) => match sub.unwrap_or(TodoSubTab::Uncategorised) {
                 TodoSubTab::Uncategorised => self.uncategorised.len(),
@@ -175,8 +182,8 @@ impl TabLists {
 
     /// Re-apply in-memory filters to the list behind `key`. Non-Categories
     /// tabs ignore `db_query` because their DB search has already been pushed
-    /// to SQL during reload; Categories apply `db_query` as an in-memory
-    /// boundary-prefix filter over the category path, then layer fuzzy
+    /// to SQL during reload; Categories and Accounts apply `db_query` as an
+    /// in-memory boundary-prefix filter over the path, then layer fuzzy
     /// matching over it. `tx_by_id` resolves the transaction IDs held by
     /// transfer reviews.
     pub(super) fn apply_fuzzy(
@@ -204,9 +211,12 @@ impl TabLists {
                     ],
                 )
             }),
-            (Tab::Categories, _) => self.categories.refilter(|c| {
-                category_boundary_prefix(&c.path, db_query) && any_match(pattern, &[&c.path])
-            }),
+            (Tab::Categories, _) => self
+                .categories
+                .refilter(|c| boundary_prefix(&c.path, db_query) && any_match(pattern, &[&c.path])),
+            (Tab::Accounts, _) => self
+                .accounts
+                .refilter(|a| boundary_prefix(&a.path, db_query) && any_match(pattern, &[&a.path])),
             (Tab::Filters, _) => self.filters.refilter(|filter| {
                 [db_query, pattern]
                     .into_iter()
@@ -271,7 +281,7 @@ impl TabLists {
 /// True if `query` is a case-insensitive prefix of `path` starting at any
 /// boundary: the start of the string or immediately after a non-alphanumeric
 /// character. Empty query matches everything.
-fn category_boundary_prefix(path: &str, query: &str) -> bool {
+fn boundary_prefix(path: &str, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
@@ -306,37 +316,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn category_boundary_prefix_matches_start_of_path() {
-        assert!(category_boundary_prefix("tododo", "todo"));
+    fn boundary_prefix_matches_start_of_path() {
+        assert!(boundary_prefix("tododo", "todo"));
     }
 
     #[test]
-    fn category_boundary_prefix_matches_after_slash() {
-        assert!(category_boundary_prefix("tax/todos", "todo"));
+    fn boundary_prefix_matches_after_slash() {
+        assert!(boundary_prefix("tax/todos", "todo"));
     }
 
     #[test]
-    fn category_boundary_prefix_matches_after_hyphen() {
-        assert!(category_boundary_prefix("Personal-todos", "todo"));
+    fn boundary_prefix_matches_after_hyphen() {
+        assert!(boundary_prefix("Personal-todos", "todo"));
     }
 
     #[test]
-    fn category_boundary_prefix_does_not_match_after_digit() {
-        assert!(!category_boundary_prefix("Food2todo", "todo"));
+    fn boundary_prefix_does_not_match_after_digit() {
+        assert!(!boundary_prefix("Food2todo", "todo"));
     }
 
     #[test]
-    fn category_boundary_prefix_does_not_match_inside_segment() {
-        assert!(!category_boundary_prefix("AllTax/Larbert", "tax"));
+    fn boundary_prefix_does_not_match_inside_segment() {
+        assert!(!boundary_prefix("AllTax/Larbert", "tax"));
     }
 
     #[test]
-    fn category_boundary_prefix_is_case_insensitive() {
-        assert!(category_boundary_prefix("AllTax/Larbert", "lar"));
+    fn boundary_prefix_is_case_insensitive() {
+        assert!(boundary_prefix("AllTax/Larbert", "lar"));
     }
 
     #[test]
-    fn category_boundary_prefix_empty_query_matches() {
-        assert!(category_boundary_prefix("AllTax/Larbert", ""));
+    fn boundary_prefix_empty_query_matches() {
+        assert!(boundary_prefix("AllTax/Larbert", ""));
+    }
+
+    fn account(id: i64, path: &str) -> AccountWithBank {
+        let (bank_name, name) = path.split_once('/').unwrap();
+        AccountWithBank {
+            id,
+            bank_id: 1,
+            bank_name: bank_name.to_string(),
+            name: name.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    fn lists_with_accounts(paths: &[(i64, &str)]) -> TabLists {
+        let accounts = paths.iter().map(|(id, path)| account(*id, path)).collect();
+        TabLists {
+            transactions: FilteredList::default(),
+            linked_transfers: FilteredList::default(),
+            categories: FilteredList::default(),
+            accounts: FilteredList::new(accounts),
+            uncategorised: FilteredList::default(),
+            ai_reviews: FilteredList::default(),
+            transfer_reviews: FilteredList::default(),
+            filters: FilteredList::default(),
+        }
+    }
+
+    #[test]
+    fn accounts_db_search_is_boundary_prefix_over_path() {
+        let mut lists = lists_with_accounts(&[(1, "ING/Orange"), (2, "TB/Checking")]);
+        let mut matcher = FuzzyMatcher::new();
+        let by_id = HashMap::new();
+
+        // `/`-search (db_query) matches at a path boundary (the account segment).
+        lists.apply_fuzzy((Tab::Accounts, None), "check", "", &mut matcher, &by_id);
+        let visible: Vec<_> = lists.accounts.iter().map(|a| a.path.as_str()).collect();
+        assert_eq!(visible, vec!["TB/Checking"]);
+    }
+
+    #[test]
+    fn accounts_fuzzy_search_scores_over_path() {
+        let mut lists = lists_with_accounts(&[(1, "ING/Orange"), (2, "TB/Checking")]);
+        let mut matcher = FuzzyMatcher::new();
+        let by_id = HashMap::new();
+
+        // `~`-search (pattern) fuzzy-matches the path.
+        lists.apply_fuzzy((Tab::Accounts, None), "", "orng", &mut matcher, &by_id);
+        let visible: Vec<_> = lists.accounts.iter().map(|a| a.path.as_str()).collect();
+        assert_eq!(visible, vec!["ING/Orange"]);
     }
 }
