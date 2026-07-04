@@ -215,10 +215,15 @@ in `src/classify/similarity.rs`; the cutoff is `SIMILARITY_THRESHOLD`.
 ### Transfer / category are mutually exclusive
 
 A transaction is either part of a transfer or categorised, never both. The
-invariant is enforced in `store.create_transfer`, which deletes any enrichment
-on both endpoints (a no-op for the uncategorised rows AI detection picks). The
-TUI guards the inverse: categorising a transfer (`c`) prompts to unlink it
-first, and marking a transfer (`t`) whose chosen endpoint is already linked
+invariant is enforced on both sides in the store: `store.create_transfer`
+deletes any enrichment on both endpoints (a no-op for the uncategorised rows AI
+detection picks), and `store.set_category` refuses a transaction that is
+currently a transfer leg with `Error::TransactionInTransfer` — so no path
+(including the CLI `categorise`) can categorise a transfer leg without first
+unlinking it. The TUI guards the inverse ahead of that error for a friendlier
+flow: categorising a transfer (`c`) prompts to unlink it first (the
+`BreakTransferForCategory` confirm deletes the transfer before calling
+`set_category`), and marking a transfer (`t`) whose chosen endpoint is already linked
 prompts to break the existing transfer(s). Both prompts run through the generic
 `InputMode::Confirm` / `ConfirmAction` flow (`App::confirm_proceed`). Transfer
 candidate search (`store.transfer_candidates`) therefore no longer hides
@@ -233,7 +238,8 @@ silently, so agents must never mutate via ad-hoc SQL. The invariants the store
 maintains:
 
 - A transaction is either categorised or in a transfer, never both
-  (`create_transfer` clears enrichments; the TUI guards the inverse).
+  (`create_transfer` clears enrichments; `set_category` rejects a transfer leg
+  with `Error::TransactionInTransfer`; the TUI guards the inverse first).
 - `filters.category_id` never dangles — rename preserves it, merge repoints
   it, delete clears it to NULL (`apply_filters` skips NULL-category filters).
 - Deleting a category deletes its enrichments and reports the count.

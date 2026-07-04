@@ -13,6 +13,11 @@ pub(super) type EnrichmentMeta = (Option<CategorySource>, bool, Option<i64>);
 
 impl TransactionStore {
     /// Set or update the category for a transaction.
+    ///
+    /// Rejects a transaction that is currently a transfer leg with
+    /// [`Error::TransactionInTransfer`]: a transaction is either part of a
+    /// transfer or categorised, never both, so the caller must unlink the
+    /// transfer first.
     pub fn set_category(
         &mut self,
         transaction_id: i64,
@@ -21,6 +26,13 @@ impl TransactionStore {
         confirmed: bool,
         ai_confidence: Option<f64>,
     ) -> Result<()> {
+        // Invariant: a transaction is either part of a transfer or categorised,
+        // never both. Refuse to categorise a transfer leg here so any path that
+        // reaches set_category (e.g. the CLI `categorise`) cannot silently
+        // violate the invariant.
+        if self.get_transfer_for_transaction(transaction_id)?.is_some() {
+            return Err(Error::TransactionInTransfer(transaction_id));
+        }
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO transaction_enrichments
@@ -129,12 +141,12 @@ impl TransactionStore {
 mod tests {
     use chrono::NaiveDate;
 
-    use crate::CategorySource;
     use crate::search::ParsedQuery;
     use crate::store::test_support::{
         assert_category_matches_db, assert_enrichment_matches_db, insert_tx, setup_rich_fixture,
         store_with_two_accounts,
     };
+    use crate::{CategorySource, Error, TransferSource};
 
     #[test]
     fn confirmed_examples_include_only_confirmed_assignments() {
@@ -152,6 +164,34 @@ mod tests {
             !examples
                 .iter()
                 .any(|example| example.description == "Coffee Bean")
+        );
+    }
+
+    #[test]
+    fn set_category_rejects_transfer_legs() {
+        let (_tmp, mut store, a1, a2) = store_with_two_accounts();
+        let from = insert_tx(&store, a1, "2024-03-10", -5000);
+        let to = insert_tx(&store, a2, "2024-03-10", 5000);
+        store
+            .create_transfer(from, to, TransferSource::Manual, true, None)
+            .unwrap();
+
+        let cat = store.get_or_create_category("Food").unwrap();
+
+        // Either leg of the transfer is refused.
+        let from_err = store.set_category(from, cat, CategorySource::Manual, true, None);
+        assert!(matches!(from_err, Err(Error::TransactionInTransfer(id)) if id == from));
+        let to_err = store.set_category(to, cat, CategorySource::Manual, true, None);
+        assert!(matches!(to_err, Err(Error::TransactionInTransfer(id)) if id == to));
+
+        // A non-transfer transaction can still be categorised.
+        let plain = insert_tx(&store, a1, "2024-03-11", -1200);
+        store
+            .set_category(plain, cat, CategorySource::Manual, true, None)
+            .unwrap();
+        assert_eq!(
+            store.get_transaction_category(plain).unwrap().unwrap().id,
+            cat
         );
     }
 

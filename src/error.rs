@@ -31,6 +31,9 @@ pub enum Error {
 
     #[error("Invalid account path: {0}")]
     InvalidAccountPath(String),
+
+    #[error("Transaction {0} is part of a transfer; unlink the transfer before categorising")]
+    TransactionInTransfer(i64),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
