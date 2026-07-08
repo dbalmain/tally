@@ -71,6 +71,7 @@ pub enum Act {
     Confirm,
     ClearSearch,
     ToggleDetails,
+    ToggleSum,
     CategoriseMatching,
     Classify,
 }
@@ -392,6 +393,19 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
         ));
     }
 
+    // Hidden: shown in the `?` popover only, not the footer.
+    if app.current_tab == Tab::Transactions {
+        out.push(bh(
+            &[Char('s')],
+            "s",
+            "sum",
+            "toggle sum row?",
+            false,
+            true,
+            ToggleSum,
+        ));
+    }
+
     // Fuzzy search narrows the visible rows in memory, but `C` applies to the
     // whole DB-search set — so hide it while a fuzzy filter is active rather
     // than act on more rows than the user can see.
@@ -614,6 +628,7 @@ fn run_normal(app: &mut App, act: Act) {
         }
         Act::ClearSearch => app.clear_search(),
         Act::ToggleDetails => app.toggle_view_details(),
+        Act::ToggleSum => app.toggle_sum(),
         Act::CategoriseMatching => app.start_bulk_categorise_matching(),
         Act::Classify => app.request_classify(),
     }

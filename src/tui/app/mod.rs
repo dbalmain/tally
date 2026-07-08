@@ -160,6 +160,9 @@ pub struct App {
     /// Whether the transaction view shows the inline detail panel (full
     /// description, source file, and metadata) for the selected row.
     pub view_details: bool,
+    /// Whether the Transactions tab shows a row summing the amounts of the
+    /// currently visible transactions.
+    pub show_sum: bool,
     /// Whether the Categories tab shows the side panel listing the selected
     /// category's transactions.
     pub show_category_transactions: bool,
@@ -265,6 +268,7 @@ impl App {
             keybind_help_open: false,
             hints_visible: true,
             view_details: false,
+            show_sum: false,
             show_category_transactions: false,
             category_transactions: Vec::new(),
             show_account_transactions: false,
@@ -635,6 +639,12 @@ impl App {
     /// file, and metadata) for the selected row.
     pub fn toggle_view_details(&mut self) {
         self.view_details = !self.view_details;
+    }
+
+    /// Toggle the row summing the amounts of the currently visible
+    /// transactions on the Transactions tab.
+    pub fn toggle_sum(&mut self) {
+        self.show_sum = !self.show_sum;
     }
 
     // ==================== Data Loading ====================

@@ -115,6 +115,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     let has_db_search = app.db_search_active() || app.input_mode == InputMode::DbSearch;
     let has_fuzzy_search = app.fuzzy_search_active() || app.input_mode == InputMode::FuzzySearch;
 
+    // The sum row piggybacks on the last active search bar (whichever sits
+    // closest to the content) when one is open, so it doesn't cost an extra
+    // line; otherwise it gets its own row.
+    let show_sum = app.current_tab == Tab::Transactions && app.show_sum;
+    let sum_inline = show_sum && (has_db_search || has_fuzzy_search);
+    let sum_own_row = show_sum && !sum_inline;
+
     // Header rows top to bottom: main tabs, then (Todo only) subtabs, then
     // any active search bars, then content. Computing the whole layout here
     // keeps it in one place, so popups that anchor to a header row (the
@@ -128,6 +135,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         constraints.push(Constraint::Length(1));
     }
     if has_fuzzy_search {
+        constraints.push(Constraint::Length(1));
+    }
+    if sum_own_row {
         constraints.push(Constraint::Length(1));
     }
     let modal_open = overlay_open(app);
@@ -149,10 +159,20 @@ pub fn draw(f: &mut Frame, app: &App) {
     if has_db_search {
         draw_db_search_bar(f, app, chunks[idx]);
         db_search_area = Some(chunks[idx]);
+        if sum_inline && !has_fuzzy_search {
+            draw_sum_overlay(f, app, chunks[idx]);
+        }
         idx += 1;
     }
     if has_fuzzy_search {
         draw_fuzzy_search_bar(f, app, chunks[idx]);
+        if sum_inline {
+            draw_sum_overlay(f, app, chunks[idx]);
+        }
+        idx += 1;
+    }
+    if sum_own_row {
+        draw_sum_row(f, app, chunks[idx]);
         idx += 1;
     }
     let content = chunks[idx];
@@ -306,6 +326,49 @@ fn draw_fuzzy_search_bar(f: &mut Frame, app: &App, area: Rect) {
         ]);
         f.render_widget(Paragraph::new(search_line), area);
     }
+}
+
+/// Sum of the amounts of the currently visible (search/fuzzy-filtered)
+/// Transactions-tab rows.
+fn visible_transactions_sum(app: &App) -> i64 {
+    app.lists
+        .transactions
+        .iter()
+        .map(|tx| tx.amount_cents)
+        .sum()
+}
+
+fn sum_span(sum_cents: i64) -> Span<'static> {
+    Span::styled(
+        format!("Σ {}", format_cents(sum_cents)),
+        Style::default().fg(amount_color(sum_cents)),
+    )
+}
+
+/// Right-aligned sum overlay on a search bar row, drawn after the bar itself
+/// so it never covers the search text (it's skipped if there isn't room).
+fn draw_sum_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let span = sum_span(visible_transactions_sum(app));
+    let w = span.content.chars().count() as u16;
+    if area.width <= w {
+        return;
+    }
+    let sum_area = Rect {
+        x: area.x + area.width - w,
+        width: w,
+        ..area
+    };
+    f.render_widget(Paragraph::new(Line::from(span)), sum_area);
+}
+
+/// Dedicated sum row, used when no search bar is open to piggyback on. Kept
+/// right-aligned to match the inline overlay on a search bar row.
+fn draw_sum_row(f: &mut Frame, app: &App, area: Rect) {
+    f.render_widget(
+        Paragraph::new(Line::from(sum_span(visible_transactions_sum(app))))
+            .alignment(Alignment::Right),
+        area,
+    );
 }
 
 fn draw_filter_edit_heading(f: &mut Frame, app: &App, area: Rect) {
