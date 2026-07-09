@@ -16,7 +16,7 @@ use rusqlite::types::Value;
 
 use super::FilterResult;
 use super::placeholders as ph;
-use super::query::{ParsedQuery, QueryPart};
+use super::query::{ParsedQuery, QueryPart, SortColumn, SortKey};
 
 /// Maps placeholder names like `"date"` to SQL column references like `"t.date"`.
 ///
@@ -198,6 +198,7 @@ impl ParsedQuery {
                 .filter(|p| !p.is_negated())
                 .cloned()
                 .collect(),
+            sort_keys: None,
         };
         let l = positive.render(lhs);
         let r = positive.render(rhs);
@@ -228,6 +229,9 @@ impl ParsedQuery {
                     negated,
                     ..
                 } => {
+                    if sql.is_empty() {
+                        continue;
+                    }
                     let Some(rendered) = ctx.render_template(sql) else {
                         continue;
                     };
@@ -300,7 +304,85 @@ impl ParsedQuery {
                     }
             }
             _ => false,
-        })
+        }) || self
+            .sort_keys
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|key| sort_key_placeholders(*key).contains(&placeholder))
+    }
+
+    /// Render the ORDER BY body for the last valid `sort:` term.
+    ///
+    /// Unsupported sort keys are dropped in the same way unsupported filters
+    /// are dropped for a context. If at least one user key renders, a stable
+    /// transaction-id tiebreaker is appended.
+    pub(crate) fn order_by(&self, ctx: &SqlContext) -> Option<String> {
+        let sort_keys = self.sort_keys.as_deref()?;
+        let mut clauses = Vec::new();
+
+        for key in sort_keys {
+            clauses.extend(render_sort_key(*key, ctx));
+        }
+
+        if clauses.is_empty() {
+            return None;
+        }
+
+        let id_template = format!("{} DESC", ph::reference(ph::TRANSACTION_ID));
+        if let Some(tiebreaker) = ctx.render_template(&id_template) {
+            clauses.push(tiebreaker);
+        }
+
+        Some(clauses.join(", "))
+    }
+}
+
+fn render_sort_key(key: SortKey, ctx: &SqlContext) -> Vec<String> {
+    let direction = if key.descending { "DESC" } else { "ASC" };
+    match key.column {
+        SortColumn::Category => {
+            let nulls_last_template = format!("{} IS NULL ASC", ph::reference(ph::CATEGORY_PATH));
+            let value_template = format!("{} {direction}", ph::reference(ph::CATEGORY_PATH));
+            let Some(nulls_last) = ctx.render_template(&nulls_last_template) else {
+                return Vec::new();
+            };
+            let Some(value) = ctx.render_template(&value_template) else {
+                return Vec::new();
+            };
+            vec![nulls_last, value]
+        }
+        column => {
+            let template = format!(
+                "{} {direction}",
+                ph::reference(sort_column_placeholder(column))
+            );
+            ctx.render_template(&template).into_iter().collect()
+        }
+    }
+}
+
+fn sort_key_placeholders(key: SortKey) -> &'static [&'static str] {
+    match key.column {
+        SortColumn::Date => &[ph::DATE],
+        SortColumn::Description => &[ph::DESCRIPTION],
+        SortColumn::Amount => &[ph::AMOUNT_CENTS],
+        SortColumn::Balance => &[ph::BALANCE_CENTS],
+        SortColumn::Account => &[ph::ACCOUNT_NAME],
+        SortColumn::Bank => &[ph::BANK_NAME],
+        SortColumn::Category => &[ph::CATEGORY_PATH],
+    }
+}
+
+fn sort_column_placeholder(column: SortColumn) -> &'static str {
+    match column {
+        SortColumn::Date => ph::DATE,
+        SortColumn::Description => ph::DESCRIPTION,
+        SortColumn::Amount => ph::AMOUNT_CENTS,
+        SortColumn::Balance => ph::BALANCE_CENTS,
+        SortColumn::Account => ph::ACCOUNT_NAME,
+        SortColumn::Bank => ph::BANK_NAME,
+        SortColumn::Category => ph::CATEGORY_PATH,
     }
 }
 
@@ -311,8 +393,10 @@ mod tests {
 
     fn ctx_full() -> SqlContext {
         SqlContext::new()
+            .with(ph::TRANSACTION_ID, "t.id")
             .with(ph::DATE, "t.date")
             .with(ph::AMOUNT_CENTS, "t.amount_cents")
+            .with(ph::BALANCE_CENTS, "t.balance_cents")
             .with(ph::DESCRIPTION, "t.description")
             .with(ph::BANK_NAME, "b.name")
             .with(ph::ACCOUNT_NAME, "a.name")
@@ -335,6 +419,20 @@ mod tests {
             span: Span::new(0, 0),
             value_span: Span::new(0, 0),
             negated,
+        }
+    }
+
+    fn parsed(parts: Vec<QueryPart>) -> ParsedQuery {
+        ParsedQuery {
+            parts,
+            sort_keys: None,
+        }
+    }
+
+    fn parsed_with_sort(sort_keys: Vec<SortKey>) -> ParsedQuery {
+        ParsedQuery {
+            parts: Vec::new(),
+            sort_keys: Some(sort_keys),
         }
     }
 
@@ -376,12 +474,10 @@ mod tests {
     #[test]
     fn render_drops_filter_with_missing_placeholder() {
         let ctx = SqlContext::new().with(ph::DATE, "t.date");
-        let query = ParsedQuery {
-            parts: vec![
-                make_filter("{date} >= ?", vec![Value::Text("2024-01-01".into())]),
-                make_filter("{category_path} LIKE ?", vec![Value::Text("Food".into())]),
-            ],
-        };
+        let query = parsed(vec![
+            make_filter("{date} >= ?", vec![Value::Text("2024-01-01".into())]),
+            make_filter("{category_path} LIKE ?", vec![Value::Text("Food".into())]),
+        ]);
         let r = query.render(&ctx);
         assert_eq!(r.where_clause, "t.date >= ?");
         assert_eq!(r.params.len(), 1);
@@ -390,15 +486,13 @@ mod tests {
     #[test]
     fn render_joins_clauses_with_and() {
         let ctx = ctx_full();
-        let query = ParsedQuery {
-            parts: vec![
-                make_filter("{date} >= ?", vec![Value::Text("2024".into())]),
-                QueryPart::Whitespace {
-                    span: Span::new(0, 0),
-                },
-                make_filter("{amount_cents} > ?", vec![Value::Integer(100)]),
-            ],
-        };
+        let query = parsed(vec![
+            make_filter("{date} >= ?", vec![Value::Text("2024".into())]),
+            QueryPart::Whitespace {
+                span: Span::new(0, 0),
+            },
+            make_filter("{amount_cents} > ?", vec![Value::Integer(100)]),
+        ]);
         let r = query.render(&ctx);
         assert_eq!(r.where_clause, "t.date >= ? AND t.amount_cents > ?");
         assert_eq!(r.params.len(), 2);
@@ -415,15 +509,13 @@ mod tests {
     #[test]
     fn render_regex_uses_description_placeholder() {
         let ctx = SqlContext::new().with(ph::DESCRIPTION, "t.description");
-        let query = ParsedQuery {
-            parts: vec![QueryPart::Regex {
-                original: "/foo/".into(),
-                pattern: "foo".into(),
-                valid: true,
-                span: Span::new(0, 0),
-                negated: false,
-            }],
-        };
+        let query = parsed(vec![QueryPart::Regex {
+            original: "/foo/".into(),
+            pattern: "foo".into(),
+            valid: true,
+            span: Span::new(0, 0),
+            negated: false,
+        }]);
         let r = query.render(&ctx);
         assert_eq!(r.where_clause, "regexp(?, t.description)");
         assert_eq!(r.params, vec![Value::Text("foo".into())]);
@@ -432,15 +524,13 @@ mod tests {
     #[test]
     fn render_regex_dropped_without_description_placeholder() {
         let ctx = SqlContext::new().with(ph::DATE, "t.date");
-        let query = ParsedQuery {
-            parts: vec![QueryPart::Regex {
-                original: "/foo/".into(),
-                pattern: "foo".into(),
-                valid: true,
-                span: Span::new(0, 0),
-                negated: false,
-            }],
-        };
+        let query = parsed(vec![QueryPart::Regex {
+            original: "/foo/".into(),
+            pattern: "foo".into(),
+            valid: true,
+            span: Span::new(0, 0),
+            negated: false,
+        }]);
         let r = query.render(&ctx);
         assert!(r.is_empty());
     }
@@ -448,15 +538,13 @@ mod tests {
     #[test]
     fn render_fts_emits_match() {
         let ctx = SqlContext::new().with(ph::FTS_MATCH, "transactions_fts MATCH ?");
-        let query = ParsedQuery {
-            parts: vec![QueryPart::Fts {
-                original: "coffee".into(),
-                query: "coffee*".into(),
-                valid: true,
-                span: Span::new(0, 0),
-                negated: false,
-            }],
-        };
+        let query = parsed(vec![QueryPart::Fts {
+            original: "coffee".into(),
+            query: "coffee*".into(),
+            valid: true,
+            span: Span::new(0, 0),
+            negated: false,
+        }]);
         let r = query.render(&ctx);
         assert_eq!(r.where_clause, "transactions_fts MATCH ?");
         assert_eq!(r.params, vec![Value::Text("coffee*".into())]);
@@ -465,15 +553,13 @@ mod tests {
     #[test]
     fn render_fts_dropped_without_fts_placeholder() {
         let ctx = SqlContext::new().with(ph::DATE, "t.date");
-        let query = ParsedQuery {
-            parts: vec![QueryPart::Fts {
-                original: "coffee".into(),
-                query: "coffee*".into(),
-                valid: true,
-                span: Span::new(0, 0),
-                negated: false,
-            }],
-        };
+        let query = parsed(vec![QueryPart::Fts {
+            original: "coffee".into(),
+            query: "coffee*".into(),
+            valid: true,
+            span: Span::new(0, 0),
+            negated: false,
+        }]);
         let r = query.render(&ctx);
         assert!(r.is_empty());
     }
@@ -481,13 +567,11 @@ mod tests {
     #[test]
     fn render_negated_filter_wraps_in_not_coalesce() {
         let ctx = ctx_full();
-        let query = ParsedQuery {
-            parts: vec![make_filter_negated(
-                "LOWER({category_path}) LIKE ?",
-                vec![Value::Text("food%".into())],
-                true,
-            )],
-        };
+        let query = parsed(vec![make_filter_negated(
+            "LOWER({category_path}) LIKE ?",
+            vec![Value::Text("food%".into())],
+            true,
+        )]);
         let r = query.render(&ctx);
         assert_eq!(r.where_clause, "NOT COALESCE((LOWER(c.path) LIKE ?), 0)");
         assert_eq!(r.params, vec![Value::Text("food%".into())]);
@@ -499,15 +583,13 @@ mod tests {
             ph::FTS_NOT_MATCH,
             "t.id NOT IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
         );
-        let query = ParsedQuery {
-            parts: vec![QueryPart::Fts {
-                original: "coffee".into(),
-                query: "coffee*".into(),
-                valid: true,
-                span: Span::new(0, 0),
-                negated: true,
-            }],
-        };
+        let query = parsed(vec![QueryPart::Fts {
+            original: "coffee".into(),
+            query: "coffee*".into(),
+            valid: true,
+            span: Span::new(0, 0),
+            negated: true,
+        }]);
         let r = query.render(&ctx);
         assert_eq!(
             r.where_clause,
@@ -524,24 +606,22 @@ mod tests {
                 ph::FTS_NOT_MATCH,
                 "t.id NOT IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
             );
-        let query = ParsedQuery {
-            parts: vec![
-                QueryPart::Fts {
-                    original: "coffee".into(),
-                    query: "coffee*".into(),
-                    valid: true,
-                    span: Span::new(0, 0),
-                    negated: false,
-                },
-                QueryPart::Fts {
-                    original: "tea".into(),
-                    query: "tea*".into(),
-                    valid: true,
-                    span: Span::new(0, 0),
-                    negated: true,
-                },
-            ],
-        };
+        let query = parsed(vec![
+            QueryPart::Fts {
+                original: "coffee".into(),
+                query: "coffee*".into(),
+                valid: true,
+                span: Span::new(0, 0),
+                negated: false,
+            },
+            QueryPart::Fts {
+                original: "tea".into(),
+                query: "tea*".into(),
+                valid: true,
+                span: Span::new(0, 0),
+                negated: true,
+            },
+        ]);
         let r = query.render(&ctx);
         assert_eq!(
             r.where_clause,
@@ -564,16 +644,14 @@ mod tests {
         let rhs = SqlContext::new()
             .with(ph::DATE, "tt.date")
             .with(ph::CATEGORY_PATH, "tc.path");
-        let query = ParsedQuery {
-            parts: vec![
-                make_filter("{date} >= ?", vec![Value::Text("2024-01-01".into())]),
-                make_filter_negated(
-                    "LOWER({category_path}) LIKE ?",
-                    vec![Value::Text("food%".into())],
-                    true,
-                ),
-            ],
-        };
+        let query = parsed(vec![
+            make_filter("{date} >= ?", vec![Value::Text("2024-01-01".into())]),
+            make_filter_negated(
+                "LOWER({category_path}) LIKE ?",
+                vec![Value::Text("food%".into())],
+                true,
+            ),
+        ]);
         let r = query.render_transfers(&lhs, &rhs);
         // Only the date clause is rendered; the negated category clause is gone.
         assert_eq!(r.where_clause, "((ft.date >= ?) OR (tt.date >= ?))");
@@ -590,12 +668,10 @@ mod tests {
     fn render_transfers_combines_with_or() {
         let lhs = SqlContext::new().with(ph::DATE, "ft.date");
         let rhs = SqlContext::new().with(ph::DATE, "tt.date");
-        let query = ParsedQuery {
-            parts: vec![make_filter(
-                "{date} >= ?",
-                vec![Value::Text("2024-01-01".into())],
-            )],
-        };
+        let query = parsed(vec![make_filter(
+            "{date} >= ?",
+            vec![Value::Text("2024-01-01".into())],
+        )]);
         let r = query.render_transfers(&lhs, &rhs);
         assert_eq!(r.where_clause, "((ft.date >= ?) OR (tt.date >= ?))");
         assert_eq!(r.params.len(), 2);
@@ -617,12 +693,10 @@ mod tests {
         // (no spurious OR with empty side).
         let lhs = SqlContext::new().with(ph::DATE, "t.date");
         let rhs = SqlContext::new();
-        let query = ParsedQuery {
-            parts: vec![make_filter(
-                "{date} >= ?",
-                vec![Value::Text("2024-01-01".into())],
-            )],
-        };
+        let query = parsed(vec![make_filter(
+            "{date} >= ?",
+            vec![Value::Text("2024-01-01".into())],
+        )]);
         let r = query.render_transfers(&lhs, &rhs);
         assert_eq!(r.where_clause, "t.date >= ?");
         assert_eq!(r.params.len(), 1);
@@ -641,15 +715,13 @@ mod tests {
             ph::FTS_MATCH,
             "tt.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)",
         );
-        let query = ParsedQuery {
-            parts: vec![QueryPart::Fts {
-                original: "coffee".into(),
-                query: "coffee*".into(),
-                valid: true,
-                span: Span::new(0, 0),
-                negated: false,
-            }],
-        };
+        let query = parsed(vec![QueryPart::Fts {
+            original: "coffee".into(),
+            query: "coffee*".into(),
+            valid: true,
+            span: Span::new(0, 0),
+            negated: false,
+        }]);
         let r = query.render_transfers(&lhs, &rhs);
         assert_eq!(
             r.where_clause,
@@ -663,34 +735,91 @@ mod tests {
     }
 
     #[test]
+    fn order_by_renders_sort_keys_and_tiebreaker() {
+        let query = parsed_with_sort(vec![
+            SortKey {
+                column: SortColumn::Category,
+                descending: false,
+            },
+            SortKey {
+                column: SortColumn::Amount,
+                descending: true,
+            },
+        ]);
+
+        assert_eq!(
+            query.order_by(&ctx_full()).as_deref(),
+            Some("c.path IS NULL ASC, c.path ASC, t.amount_cents DESC, t.id DESC")
+        );
+    }
+
+    #[test]
+    fn order_by_drops_keys_missing_from_context() {
+        let ctx = SqlContext::new()
+            .with(ph::TRANSACTION_ID, "t.id")
+            .with(ph::AMOUNT_CENTS, "t.amount_cents");
+        let query = parsed_with_sort(vec![
+            SortKey {
+                column: SortColumn::Balance,
+                descending: false,
+            },
+            SortKey {
+                column: SortColumn::Amount,
+                descending: false,
+            },
+        ]);
+
+        assert_eq!(
+            query.order_by(&ctx).as_deref(),
+            Some("t.amount_cents ASC, t.id DESC")
+        );
+    }
+
+    #[test]
+    fn order_by_returns_none_without_renderable_keys() {
+        let query = parsed_with_sort(vec![SortKey {
+            column: SortColumn::Balance,
+            descending: false,
+        }]);
+
+        assert_eq!(query.order_by(&SqlContext::new()), None);
+    }
+
+    #[test]
+    fn uses_placeholder_detects_sort_key_reference() {
+        let query = parsed_with_sort(vec![SortKey {
+            column: SortColumn::Category,
+            descending: false,
+        }]);
+
+        assert!(query.uses_placeholder(ph::CATEGORY_PATH));
+    }
+
+    #[test]
     fn uses_placeholder_detects_filter_template_reference() {
-        let query = ParsedQuery {
-            parts: vec![make_filter("{category_path} LIKE ?", vec![])],
-        };
+        let query = parsed(vec![make_filter("{category_path} LIKE ?", vec![])]);
         assert!(query.uses_placeholder(ph::CATEGORY_PATH));
         assert!(!query.uses_placeholder(ph::DATE));
     }
 
     #[test]
     fn uses_placeholder_detects_fts_and_description() {
-        let query = ParsedQuery {
-            parts: vec![
-                QueryPart::Fts {
-                    original: "x".into(),
-                    query: "x".into(),
-                    valid: true,
-                    span: Span::new(0, 0),
-                    negated: false,
-                },
-                QueryPart::Regex {
-                    original: "/x/".into(),
-                    pattern: "x".into(),
-                    valid: true,
-                    span: Span::new(0, 0),
-                    negated: false,
-                },
-            ],
-        };
+        let query = parsed(vec![
+            QueryPart::Fts {
+                original: "x".into(),
+                query: "x".into(),
+                valid: true,
+                span: Span::new(0, 0),
+                negated: false,
+            },
+            QueryPart::Regex {
+                original: "/x/".into(),
+                pattern: "x".into(),
+                valid: true,
+                span: Span::new(0, 0),
+                negated: false,
+            },
+        ]);
         assert!(query.uses_placeholder(ph::FTS_MATCH));
         assert!(query.uses_placeholder(ph::DESCRIPTION));
     }
@@ -698,9 +827,7 @@ mod tests {
     #[test]
     fn uses_placeholder_does_not_match_prefixes() {
         // "{date}" should not match a search for "dat".
-        let query = ParsedQuery {
-            parts: vec![make_filter("{date} >= ?", vec![])],
-        };
+        let query = parsed(vec![make_filter("{date} >= ?", vec![])]);
         assert!(query.uses_placeholder(ph::DATE));
         assert!(!query.uses_placeholder("dat"));
     }

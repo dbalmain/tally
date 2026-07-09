@@ -14,8 +14,16 @@
 //!
 //! - `date:2024-01-15` — exact date; `date:2024-01` — entire month;
 //!   `date:2024` — entire year
-//! - `date:2024-01..2024-06` — range; `date:>2024-01` / `date:<2024-06` —
-//!   after/before
+//! - `date:2024-01..2024-06` — inclusive range; `date:..2024-06` — up to
+//!   the end of June 2024; `date:2024-01..` — from the start of January 2024
+//! - Date presets work anywhere a date spec works, including range endpoints:
+//!   `date:yesterday`, `date:last-month`, `date:this-quarter`,
+//!   `date:last-financial-year`, `date:last-quarter..yesterday`
+//! - Relative date presets are the complete periods immediately before the
+//!   current one, excluding the in-progress period:
+//!   `date:last-7-days`, `date:last-3-months`,
+//!   `date:last-2-financial-years`. Supported periods are `days`, `weeks`,
+//!   `months`, `quarters`, `years`, and `financial-years`
 //! - `amount:100` — precision-aware: any $100-something ($100.00–$100.99);
 //!   `amount:7.5` — any $7.5x; `amount:7.50` — exactly $7.50 (two decimals =
 //!   exact cents). Matches either sign.
@@ -35,6 +43,12 @@
 //! - `category:Food` — path starts with "Food"; `category:/Groceries` — a
 //!   "Groceries…" segment under any parent (matches after any `/`);
 //!   `category:Food|Transport` — OR
+//! - `sort:category,amount` — transaction DB searches only: order by the listed
+//!   columns in order. Columns are `date`, `description`, `amount`, `balance`,
+//!   `account`, `bank`, and `category`. Prefix a column with `-` for descending,
+//!   e.g. `sort:-amount`. Ascending is the default for every column. Category
+//!   sorting keeps uncategorised rows last. Multiple `sort:` terms are allowed;
+//!   the last one wins.
 //! - Quoting for values with spaces: `account:"ING/Orange Everyday"` or
 //!   `account:ING/Orange\ Everyday`
 //!
@@ -60,13 +74,14 @@
 //!   NOT negation. A `-` *inside* a filter value is untouched, so
 //!   `amount:-50` stays a signed amount — only a `-` before the whole
 //!   `name:value` token negates it.
+//! - `-sort:...` is invalid; sorting is not a row match and cannot be negated.
 //! - Negation is ignored on transfer searches (a `NOT` is ill-defined across
 //!   the "either side matches" OR).
 //!
 //! **Transition** — end with ` ~` at a word boundary to switch to fuzzy mode
 //! while keeping the DB filters.
 //!
-//! Combined example: `date:2024-01 amount:>100 account:Chase/ groceries`
+//! Combined example: `date:2024-01 amount:>100 account:Chase/ sort:-amount groceries`
 
 mod context;
 mod filter;
@@ -80,9 +95,9 @@ mod tokenize;
 
 pub use context::CursorContext;
 pub use filter::{Filter, FilterResult};
-pub use filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
-pub use parse::{SearchConfig, parse};
-pub use query::{ParsedQuery, QueryPart, Span};
+pub use filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, SortFilter};
+pub use parse::{SearchConfig, SearchOptions, parse};
+pub use query::{ParsedQuery, QueryPart, SortColumn, SortKey, Span};
 pub use render::SqlContext;
 pub use tokenize::{RawToken, tokenize};
 

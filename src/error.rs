@@ -11,6 +11,18 @@ pub enum Error {
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("Failed to parse config {path}: {source}")]
+    ConfigParse {
+        path: std::path::PathBuf,
+        source: toml::de::Error,
+    },
+
+    #[error("Invalid config value in {path}: {message}")]
+    ConfigValue {
+        path: std::path::PathBuf,
+        message: String,
+    },
+
     #[error("Import script failed: {0}")]
     ImportFailed(String),
 

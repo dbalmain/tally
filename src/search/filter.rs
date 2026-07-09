@@ -2,6 +2,8 @@
 
 use rusqlite::types::Value;
 
+use super::query::SortKey;
+
 /// Result of parsing a filter value.
 #[derive(Debug, Clone)]
 pub enum FilterResult {
@@ -52,5 +54,28 @@ pub trait Filter: Send + Sync {
     /// Returns `None` if no completions available (e.g., range filters like date/amount).
     fn completions(&self, _value: &str, _cursor: usize) -> Option<(Vec<String>, usize)> {
         None
+    }
+
+    /// Parse this filter as a non-WHERE sort term.
+    ///
+    /// Most filters return `None` and contribute WHERE clauses through
+    /// [`Filter::parse`]. The `sort` pseudo-filter returns keys here so parsing,
+    /// spans, errors, and autocomplete still flow through the same registry.
+    fn sort_keys(&self, _value: &str) -> Option<Result<Vec<SortKey>, String>> {
+        None
+    }
+
+    /// End offset of the completion segment that starts at `segment_start`.
+    ///
+    /// List-style filters use `|` by default. Filters with different segment
+    /// syntax override this so the search bar does not need filter-name
+    /// special cases.
+    fn completion_segment_end(&self, value: &str, segment_start: usize) -> usize {
+        value
+            .chars()
+            .enumerate()
+            .skip(segment_start)
+            .find_map(|(idx, c)| (c == '|').then_some(idx))
+            .unwrap_or_else(|| value.chars().count())
     }
 }

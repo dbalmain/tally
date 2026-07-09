@@ -2,6 +2,62 @@
 
 use super::filter::FilterResult;
 
+/// Sortable transaction columns in DB search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumn {
+    Date,
+    Description,
+    Amount,
+    Balance,
+    Account,
+    Bank,
+    Category,
+}
+
+impl SortColumn {
+    pub const ALL: [Self; 7] = [
+        Self::Date,
+        Self::Description,
+        Self::Amount,
+        Self::Balance,
+        Self::Account,
+        Self::Bank,
+        Self::Category,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Date => "date",
+            Self::Description => "description",
+            Self::Amount => "amount",
+            Self::Balance => "balance",
+            Self::Account => "account",
+            Self::Bank => "bank",
+            Self::Category => "category",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "date" => Some(Self::Date),
+            "description" => Some(Self::Description),
+            "amount" => Some(Self::Amount),
+            "balance" => Some(Self::Balance),
+            "account" => Some(Self::Account),
+            "bank" => Some(Self::Bank),
+            "category" => Some(Self::Category),
+            _ => None,
+        }
+    }
+}
+
+/// One user-requested sort key from `sort:`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortKey {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
 /// A span of characters in the original input string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
@@ -109,6 +165,8 @@ impl QueryPart {
 pub struct ParsedQuery {
     /// The parsed parts of the query.
     pub parts: Vec<QueryPart>,
+    /// Sort keys from the last valid `sort:` term, if any.
+    pub sort_keys: Option<Vec<SortKey>>,
 }
 
 impl ParsedQuery {
@@ -237,19 +295,24 @@ mod tests {
         }
     }
 
+    fn parsed(parts: Vec<QueryPart>) -> ParsedQuery {
+        ParsedQuery {
+            parts,
+            sort_keys: None,
+        }
+    }
+
     #[test]
     fn error_at_cursor_returns_none_when_all_valid() {
-        let q = ParsedQuery {
-            parts: vec![filter(
-                "date",
-                "2024",
-                FilterResult::Valid {
-                    sql: String::new(),
-                    params: vec![],
-                },
-                0,
-            )],
-        };
+        let q = parsed(vec![filter(
+            "date",
+            "2024",
+            FilterResult::Valid {
+                sql: String::new(),
+                params: vec![],
+            },
+            0,
+        )]);
         assert_eq!(q.error_at_cursor(0), None);
         assert_eq!(q.error_at_cursor(5), None);
     }
@@ -257,13 +320,11 @@ mod tests {
     #[test]
     fn error_at_cursor_prefers_cursor_position_over_leftmost() {
         // Two invalid filters; cursor is inside the second one.
-        let q = ParsedQuery {
-            parts: vec![
-                filter("date", "x", FilterResult::Invalid("bad date".into()), 0),
-                ws(6, 7),
-                filter("amount", "y", FilterResult::Invalid("bad amount".into()), 7),
-            ],
-        };
+        let q = parsed(vec![
+            filter("date", "x", FilterResult::Invalid("bad date".into()), 0),
+            ws(6, 7),
+            filter("amount", "y", FilterResult::Invalid("bad amount".into()), 7),
+        ]);
         // Cursor in second filter's span returns its message.
         assert_eq!(q.error_at_cursor(10), Some("bad amount"));
         // Cursor in first filter's span returns its message.
@@ -284,9 +345,7 @@ mod tests {
 
     #[test]
     fn revalidate_fts_drops_invalid_from_sql_and_reports_error() {
-        let mut q = ParsedQuery {
-            parts: vec![fts("asdf~", 0)],
-        };
+        let mut q = parsed(vec![fts("asdf~", 0)]);
         // Optimistically valid before revalidation.
         assert_eq!(q.fts_queries(), vec!["asdf~"]);
         assert_eq!(q.error_at_cursor(0), None);
@@ -301,9 +360,7 @@ mod tests {
 
     #[test]
     fn error_at_cursor_reports_invalid_regex() {
-        let q = ParsedQuery {
-            parts: vec![regex("/[/", false, 0)],
-        };
+        let q = parsed(vec![regex("/[/", false, 0)]);
         assert_eq!(q.error_at_cursor(1), Some("Invalid regex pattern"));
     }
 
@@ -311,26 +368,24 @@ mod tests {
     fn error_at_cursor_skips_valid_parts_under_cursor() {
         // Cursor inside the valid filter; falls back to the leftmost
         // invalid part further along.
-        let q = ParsedQuery {
-            parts: vec![
-                filter(
-                    "date",
-                    "2024",
-                    FilterResult::Valid {
-                        sql: String::new(),
-                        params: vec![],
-                    },
-                    0,
-                ),
-                ws(9, 10),
-                filter(
-                    "amount",
-                    "x",
-                    FilterResult::Invalid("bad amount".into()),
-                    10,
-                ),
-            ],
-        };
+        let q = parsed(vec![
+            filter(
+                "date",
+                "2024",
+                FilterResult::Valid {
+                    sql: String::new(),
+                    params: vec![],
+                },
+                0,
+            ),
+            ws(9, 10),
+            filter(
+                "amount",
+                "x",
+                FilterResult::Invalid("bad amount".into()),
+                10,
+            ),
+        ]);
         assert_eq!(q.error_at_cursor(3), Some("bad amount"));
     }
 }

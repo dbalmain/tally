@@ -40,6 +40,26 @@ cargo run -- ai install-claude-skill
 # stdout, exit 0, and never needs a valid vault.
 ```
 
+## Vault Config
+
+At startup, Tally loads `<vault>/tally.toml` if it exists. Missing file means
+defaults; malformed TOML or invalid consumed values fail startup with an error.
+Unknown keys/sections are ignored so users can keep future/local settings in
+the same file.
+
+```toml
+[dates]
+week_start = "monday"   # full weekday name, case-insensitive; default monday
+
+[tax]
+year_end = "06-30"      # MM-DD financial year end; default Australian FY
+```
+
+`week_start` feeds `date:this-week`, `date:last-week`, and relative week
+presets. `tax.year_end` feeds financial-year date presets. Config parsing lives
+in `src/config.rs`; search receives only `search::SearchOptions`, not the config
+module itself.
+
 ## Project Goals
 
 Tally is a personal finance tool for aggregating bank transactions. Key principles:
@@ -78,6 +98,7 @@ Tally is a personal finance tool for aggregating bank transactions. Key principl
 src/
 ├── main.rs                 # CLI entry point, argument parsing
 ├── lib.rs                  # Public API exports
+├── config.rs               # tally.toml loader and validation
 ├── classify/               # Pure temporal + TF-IDF/SVM classification, similarity index, adapter
 ├── types.rs                # Core data structures
 ├── db.rs                   # SQLite schema, transactions_view, FTS index
@@ -358,7 +379,9 @@ background connection writes; WAL sidecar files (`-wal`/`-shm`) are expected.
    that don't provide its columns.
 3. Register in `src/search/filters/mod.rs` and in `SearchConfig::standard`
    (`src/search/parse.rs`) — the single registration point; every search bar
-   picks it up from there.
+   picks it up from there. Filters that depend on runtime date/config state
+   should take it from `SearchOptions`; do not make `src/search` depend on
+   `src/config.rs`.
 4. If the filter needs a column not yet in the standard contexts, add it to
    `transactions_view` in `src/db.rs` and to the `SEARCHABLE_TRANSACTION_COLUMNS`
    table (or the `transaction_ctx()` / `transfer_side_ctx()` extras for
@@ -514,18 +537,25 @@ feedback.
 Full reference: the `src/search/mod.rs` doc comment (canonical).
 
 - **DB search (`/`)** pushes filters to SQL: `date:2024-01..2024-06`,
+  `date:last-month`, `date:this-financial-year`,
+  `date:last-3-months`, `date:last-quarter..yesterday`,
   `amount:>100` (precision-aware for bare values; matches either sign
   unless a `+`/`-` sign or a zero range/comparison endpoint makes it
   signed, e.g. `amount:0..` = credits, `amount:-100..-50` = debits),
   `account:ING/Orange`
-  (Bank/Account prefixes, `|` for OR), `category:Food` (start-anchored path prefix; a leading `/` matches after any `/`, e.g. `category:/Groceries`; `|` for OR). Bare words
+  (Bank/Account prefixes, `|` for OR), `category:Food` (start-anchored path
+  prefix; a leading `/` matches after any `/`, e.g. `category:/Groceries`;
+  `|` for OR), `sort:category,-amount` (ORDER BY; columns: `date`,
+  `description`, `amount`, `balance`, `account`, `bank`, `category`; last
+  `sort:` wins; uncategorised rows sort last for `category`). Bare words
   are FTS5 full-text search (`coffee OR tea`, `"exact phrase"`, `coff*`);
   `/pattern/i` is regex. End with ` ~` to switch to fuzzy mode keeping the
   DB filters.
 - **Negation (`-`)**: a leading `-` at a word boundary excludes matches —
   `-coffee` / `-"asdf"` (FTS), `-category:Food` (keeps uncategorised rows),
   `-account:ING`, `-amount:>100`, `-/regex/`. A lone `-`, or a `-` inside a
-  value (`amount:-50`), is literal. Ignored on Transfers searches.
+  value (`amount:-50`), is literal. `-sort:...` is invalid. Ignored on
+  Transfers searches.
 - **Fuzzy search (`~`)** is in-memory nucleo scoring over the loaded rows.
 - On the Categories tab, **DB search (`/`)** is not SQL-backed: it is an
   in-memory, case-insensitive boundary-prefix filter over the category path

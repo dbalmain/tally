@@ -15,7 +15,15 @@
 - export as CSV or JSON
 - range grammar should utilise `..` and `..=` only. 
 
-- give a nicer error when running tally in an empty/non-compatible directory
-- better transfer identification
-- when categorising a transaction, if the matching algorithm matches a number of other unconfirmed transactions, offer to apply it
-- in the category view, toggle transaction view on the right
+- confirm when deleting filter
+- for toggle keybinds, add a ? to the clue to indicat that it's a toggle
+- delete category
+- transaction view - add appreviated account
+- add max category length
+- We'll have to start thinking about migrations soon.
+- from and to should include the bank
+
+- I should be able to select what I'm typing in the category selector
+- confirm all
+- better account management of pocketsmith accounts
+- pocketsmith pull into rust code

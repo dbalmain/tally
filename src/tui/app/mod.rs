@@ -25,7 +25,8 @@ use std::collections::HashMap;
 use tui_input::Input;
 
 use crate::classify::{SimilarityIndex, normalise};
-use crate::search::ParsedQuery;
+use crate::config::Config;
+use crate::search::{ParsedQuery, SearchOptions};
 use crate::tui::search_bar::SearchBar;
 use crate::{
     Account, Bank, Category, FuzzyMatcher, Result, Transaction, TransactionStore, Transfer,
@@ -207,6 +208,7 @@ pub struct App {
     pub classify_report: Option<crate::classify::ClassifyReport>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
+    search_options: SearchOptions,
 }
 
 /// Preview backing the Ctrl-A apply-filters confirmation modal: the
@@ -241,6 +243,18 @@ impl App {
     }
 
     pub fn new_with_refreshing(store: TransactionStore, refreshing: bool) -> Result<Self> {
+        Self::new_with_refreshing_and_search_options(
+            store,
+            refreshing,
+            Config::default().search_options(),
+        )
+    }
+
+    pub fn new_with_refreshing_and_search_options(
+        store: TransactionStore,
+        refreshing: bool,
+        search_options: SearchOptions,
+    ) -> Result<Self> {
         let lists = TabLists::load(&store, Some(LIST_LIMIT))?;
 
         let bank_list = store.list_banks()?;
@@ -297,6 +311,7 @@ impl App {
             classify_requested: false,
             classify_report: None,
             tab_search_state: HashMap::new(),
+            search_options,
         };
         app.rebuild_tx_caches();
         app.rebuild_category_counts();

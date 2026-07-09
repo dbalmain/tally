@@ -48,11 +48,17 @@ impl TransactionStore {
         sql.push_str(" WHERE t.account_deleted_at IS NULL");
         sql.push_str(extra_where);
 
-        let rendered = query.render(&transaction_ctx());
+        let ctx = transaction_ctx();
+        let rendered = query.render(&ctx);
         sql.push_str(&rendered.and_prefix());
         let mut params = rendered.params;
 
-        sql.push_str(" ORDER BY t.date DESC, t.id DESC");
+        sql.push_str(" ORDER BY ");
+        sql.push_str(
+            &query
+                .order_by(&ctx)
+                .unwrap_or_else(|| "t.date DESC, t.id DESC".to_string()),
+        );
         push_limit(&mut sql, &mut params, limit);
 
         log::debug!("{debug_label} SQL: {} params: {:?}", sql, params);
@@ -124,11 +130,17 @@ impl TransactionStore {
                AND e.category_confirmed = 0",
         );
 
-        let rendered = query.render(&transaction_ctx());
+        let ctx = transaction_ctx();
+        let rendered = query.render(&ctx);
         sql.push_str(&rendered.and_prefix());
         let mut params = rendered.params;
 
-        sql.push_str(" ORDER BY t.date DESC, t.id DESC");
+        sql.push_str(" ORDER BY ");
+        sql.push_str(
+            &query
+                .order_by(&ctx)
+                .unwrap_or_else(|| "t.date DESC, t.id DESC".to_string()),
+        );
         push_limit(&mut sql, &mut params, limit);
 
         log::debug!("get_pending_ai_reviews SQL: {} params: {:?}", sql, params);
@@ -434,6 +446,40 @@ mod tests {
         // Jan 15 Coffee Shop ($5, too small), Feb 20 Grocery ($85, matches)
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0].description, "Grocery Store");
+    }
+
+    #[test]
+    fn query_sort_amount_orders_by_amount() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store.query_transactions(&q("sort:amount"), None).unwrap();
+        let amounts: Vec<i64> = txs.iter().map(|tx| tx.amount_cents).collect();
+
+        assert_eq!(
+            amounts,
+            vec![-10000, -8500, -750, -500, 1234, 10000, 250000]
+        );
+    }
+
+    #[test]
+    fn query_sort_category_amount_groups_categories_and_nulls_last() {
+        let (_t, store) = setup_rich_fixture();
+        let txs = store
+            .query_transactions(&q("sort:category,amount"), None)
+            .unwrap();
+        let descs: Vec<&str> = txs.iter().map(|tx| tx.description.as_str()).collect();
+
+        assert_eq!(
+            descs,
+            vec![
+                "Coffee Bean",
+                "Coffee Shop",
+                "Grocery Store",
+                "Salary",
+                "Transfer Out",
+                "Interest",
+                "Transfer In",
+            ]
+        );
     }
 
     #[test]

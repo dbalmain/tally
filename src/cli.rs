@@ -10,7 +10,11 @@
 
 use std::path::Path;
 
+use tally::search::SearchOptions;
 use tally::{CategorySource, Error, TransactionStore};
+
+#[cfg(test)]
+use tally::config::Config;
 
 /// The canonical Claude Code skill, embedded at build time so an installed
 /// binary can write it into any vault via `tally ai install-claude-skill`.
@@ -918,7 +922,16 @@ fn take_two(positional: &[String], err: &str) -> Result<[String; 2], String> {
 // ==================== Execution ====================
 
 /// Run a parsed command against the store, printing its output to stdout.
+#[cfg(test)]
 pub fn run(command: Command, store: &mut TransactionStore) -> Result<(), String> {
+    run_with_search_options(command, store, Config::default().search_options())
+}
+
+pub fn run_with_search_options(
+    command: Command,
+    store: &mut TransactionStore,
+    search_options: SearchOptions,
+) -> Result<(), String> {
     match command {
         Command::CategoriesList { format } => categories_list(store, format),
         Command::CategoryRename { from, to, json } => category_rename(store, &from, &to, json),
@@ -932,7 +945,7 @@ pub fn run(command: Command, store: &mut TransactionStore) -> Result<(), String>
             query,
             limit,
             format,
-        } => transactions_list(store, &query, limit, format),
+        } => transactions_list(store, &query, limit, format, search_options),
         Command::Categorise { tx_id, path, json } => categorise(store, tx_id, &path, json),
         Command::Uncategorise { tx_id, json } => uncategorise(store, tx_id, json),
         Command::AccountsList { format } => accounts_list(store, format),
@@ -1105,8 +1118,10 @@ fn transactions_list(
     query: &str,
     limit: usize,
     format: Format,
+    search_options: SearchOptions,
 ) -> Result<(), String> {
-    let config = tally::search::SearchConfig::standard(Vec::new(), Some(Vec::new()));
+    let config =
+        tally::search::SearchConfig::standard(Vec::new(), Some(Vec::new()), search_options);
     let parsed = if query.trim().is_empty() {
         tally::search::ParsedQuery::empty()
     } else {

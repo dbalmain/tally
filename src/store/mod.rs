@@ -15,12 +15,14 @@ mod queries;
 pub(crate) mod test_support;
 mod transfers;
 
-use chrono::{NaiveDate, Utc};
-use rusqlite::{Connection, Row, types::Value};
 use std::path::{Path, PathBuf};
 
+use chrono::{NaiveDate, Utc};
+use rusqlite::{Connection, Row, types::Value};
+
+use crate::config::Config;
 use crate::db::init_db;
-use crate::search::{ParsedQuery, SqlContext, placeholders as ph};
+use crate::search::{ParsedQuery, SearchOptions, SqlContext, placeholders as ph};
 use crate::{Category, Filter, Result, Transaction, TransactionEnrichment, Transfer};
 
 /// Column list for selecting a full `Transaction` from `transactions_view`
@@ -94,9 +96,11 @@ const FILTER_COLS: &str =
 
 /// SQL context for queries rooted at `transactions_view t` (with optional
 /// `categories c` and `transactions_fts fts` joins).
-const SEARCHABLE_TRANSACTION_COLUMNS: [(&str, &str); 5] = [
+const SEARCHABLE_TRANSACTION_COLUMNS: [(&str, &str); 7] = [
+    (ph::TRANSACTION_ID, "id"),
     (ph::DATE, "date"),
     (ph::AMOUNT_CENTS, "amount_cents"),
+    (ph::BALANCE_CENTS, "balance_cents"),
     (ph::DESCRIPTION, "description"),
     (ph::BANK_NAME, "bank_name"),
     (ph::ACCOUNT_NAME, "account_name"),
@@ -182,6 +186,7 @@ fn push_limit(sql: &mut String, params: &mut Vec<Value>, limit: Option<usize>) {
 pub struct TransactionStore {
     conn: Connection,
     exports_dir: PathBuf,
+    search_options: SearchOptions,
 }
 
 impl TransactionStore {
@@ -194,6 +199,7 @@ impl TransactionStore {
         Ok(Self {
             conn,
             exports_dir: exports_dir.to_path_buf(),
+            search_options: Config::default().search_options(),
         })
     }
 
@@ -204,7 +210,12 @@ impl TransactionStore {
         Ok(Self {
             conn,
             exports_dir: exports_dir.to_path_buf(),
+            search_options: Config::default().search_options(),
         })
+    }
+
+    pub fn set_search_options(&mut self, search_options: SearchOptions) {
+        self.search_options = search_options;
     }
 }
 

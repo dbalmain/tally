@@ -23,19 +23,24 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 use tui_input::InputRequest;
 
+use crate::search::SearchOptions;
 use crate::{RefreshReport, Result, TransactionStore};
 
 use app::InputMode;
 
 /// Launch the interactive TUI application.
-pub fn run(store: TransactionStore, refresh_rx: Receiver<Result<RefreshReport>>) -> Result<()> {
+pub fn run(
+    store: TransactionStore,
+    refresh_rx: Receiver<Result<RefreshReport>>,
+    search_options: SearchOptions,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new_with_refreshing(store, true)?;
+    let mut app = App::new_with_refreshing_and_search_options(store, true, search_options)?;
     let res = run_app(&mut terminal, &mut app, &refresh_rx);
 
     disable_raw_mode()?;

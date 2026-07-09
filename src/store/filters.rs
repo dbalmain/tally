@@ -140,7 +140,7 @@ impl TransactionStore {
             [],
         )?;
 
-        let config = SearchConfig::standard(Vec::new(), None);
+        let config = SearchConfig::standard(Vec::new(), None, self.search_options);
         let mut claimed: HashSet<i64> = HashSet::new();
         let mut applied = Vec::new();
 

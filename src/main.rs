@@ -1,7 +1,8 @@
 mod cli;
 
 use std::path::{Path, PathBuf};
-use tally::TransactionStore;
+use tally::search::SearchOptions;
+use tally::{TransactionStore, config::Config};
 
 struct CliArgs {
     vault: Option<PathBuf>,
@@ -68,11 +69,20 @@ fn main() {
         std::process::exit(1);
     }
 
+    let config = match Config::load(&vault_root) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let search_options = config.search_options();
+
     match invocation {
-        Invocation::Tui => run_tui(&db_path, &exports_dir),
-        Invocation::Refresh => run_refresh(&db_path, &exports_dir),
-        Invocation::Classify => run_classify(&db_path, &exports_dir),
-        Invocation::Cli => run_cli(&args.rest, &db_path, &exports_dir),
+        Invocation::Tui => run_tui(&db_path, &exports_dir, search_options),
+        Invocation::Refresh => run_refresh(&db_path, &exports_dir, search_options),
+        Invocation::Classify => run_classify(&db_path, &exports_dir, search_options),
+        Invocation::Cli => run_cli(&args.rest, &db_path, &exports_dir, search_options),
         Invocation::Ai => {
             if let Err(message) = cli::run_ai(&args.rest, &vault_root) {
                 eprintln!("{message}");
@@ -83,7 +93,7 @@ fn main() {
     }
 }
 
-fn run_cli(rest: &[String], db_path: &Path, exports_dir: &Path) {
+fn run_cli(rest: &[String], db_path: &Path, exports_dir: &Path, search_options: SearchOptions) {
     let command = match cli::parse_command(rest) {
         Ok(command) => command,
         Err(message) => {
@@ -94,8 +104,9 @@ fn run_cli(rest: &[String], db_path: &Path, exports_dir: &Path) {
 
     let mut store =
         TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
+    store.set_search_options(search_options);
 
-    if let Err(message) = cli::run(command, &mut store) {
+    if let Err(message) = cli::run_with_search_options(command, &mut store, search_options) {
         eprintln!("{message}");
         std::process::exit(1);
     }
@@ -145,9 +156,10 @@ fn invocation_for_command(rest: &[String]) -> Invocation {
     }
 }
 
-fn run_refresh(db_path: &Path, exports_dir: &Path) {
+fn run_refresh(db_path: &Path, exports_dir: &Path, search_options: SearchOptions) {
     let mut store =
         TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
+    store.set_search_options(search_options);
 
     println!("Refreshing transactions...");
     let report = store.refresh().expect("Failed to refresh");
@@ -179,28 +191,33 @@ fn run_refresh(db_path: &Path, exports_dir: &Path) {
     }
 }
 
-fn run_tui(db_path: &Path, exports_dir: &Path) {
-    let store =
+fn run_tui(db_path: &Path, exports_dir: &Path, search_options: SearchOptions) {
+    let mut store =
         TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
+    store.set_search_options(search_options);
 
     let (refresh_tx, refresh_rx) = std::sync::mpsc::channel();
     let refresh_db_path = db_path.to_path_buf();
     let refresh_exports_dir = exports_dir.to_path_buf();
     std::thread::spawn(move || {
-        let result = TransactionStore::open(&refresh_db_path, &refresh_exports_dir)
-            .and_then(|mut store| store.refresh());
+        let result =
+            TransactionStore::open(&refresh_db_path, &refresh_exports_dir).and_then(|mut store| {
+                store.set_search_options(search_options);
+                store.refresh()
+            });
         let _ = refresh_tx.send(result);
     });
 
-    if let Err(e) = tally::tui::run(store, refresh_rx) {
+    if let Err(e) = tally::tui::run(store, refresh_rx, search_options) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run_classify(db_path: &Path, exports_dir: &Path) {
+fn run_classify(db_path: &Path, exports_dir: &Path, search_options: SearchOptions) {
     let mut store =
         TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
+    store.set_search_options(search_options);
     let report = tally::classify::classify(&mut store).expect("Failed to classify");
 
     println!("Classification complete:");

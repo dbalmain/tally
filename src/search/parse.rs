@@ -6,11 +6,28 @@
 //! - FTS parts ready for SQLite FTS5
 //! - Cursor context for key handling
 
+use chrono::{NaiveDate, Weekday};
 use regex::Regex;
 
-#[cfg(test)]
 use super::FilterResult;
 use super::{CursorContext, Filter, ParsedQuery, QueryPart, RawToken, Span, tokenize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchOptions {
+    pub today: NaiveDate,
+    pub week_start: Weekday,
+    pub financial_year_end: (u32, u32),
+}
+
+impl SearchOptions {
+    pub fn new(today: NaiveDate, week_start: Weekday, financial_year_end: (u32, u32)) -> Self {
+        Self {
+            today,
+            week_start,
+            financial_year_end,
+        }
+    }
+}
 
 /// Configuration for parsing search queries.
 pub struct SearchConfig {
@@ -30,13 +47,18 @@ impl SearchConfig {
     ///
     /// `category_options` is `None` for contexts where a category filter is
     /// meaningless (e.g. lists of uncategorised transactions).
-    pub fn standard(account_options: Vec<String>, category_options: Option<Vec<String>>) -> Self {
-        use super::filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
+    pub fn standard(
+        account_options: Vec<String>,
+        category_options: Option<Vec<String>>,
+        options: SearchOptions,
+    ) -> Self {
+        use super::filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, SortFilter};
 
         let mut filters: Vec<Box<dyn Filter>> = vec![
-            Box::new(DateFilter),
+            Box::new(DateFilter::new(options)),
             Box::new(AmountFilter),
             Box::new(AccountFilter::new(account_options)),
+            Box::new(SortFilter),
         ];
         if let Some(options) = category_options {
             filters.push(Box::new(CategoryFilter::new(options)));
@@ -81,6 +103,7 @@ impl SearchConfig {
 pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery, CursorContext) {
     let raw_tokens = tokenize(input);
     let mut parts = Vec::new();
+    let mut sort_keys = None;
     let mut cursor_context = CursorContext::Whitespace;
 
     // Collect FTS tokens for combining
@@ -105,7 +128,20 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
 
                 if let Some(filter) = config.find_filter(name) {
                     let canonical = filter.name();
-                    let result = filter.parse(value);
+                    let mut result = filter.parse(value);
+
+                    if let Some(parsed_sort) = filter.sort_keys(value) {
+                        if *negated {
+                            result = FilterResult::Invalid("sort: cannot be negated".to_string());
+                            sort_keys = None;
+                        } else {
+                            match parsed_sort {
+                                Ok(keys) if keys.is_empty() => sort_keys = None,
+                                Ok(keys) => sort_keys = Some(keys),
+                                Err(_) => sort_keys = None,
+                            }
+                        }
+                    }
 
                     // Check if cursor is in this filter's value
                     if cursor >= value_span.start && cursor <= value_span.end {
@@ -218,7 +254,7 @@ pub fn parse(config: &SearchConfig, input: &str, cursor: usize) -> (ParsedQuery,
         parts.push(QueryPart::Whitespace { span: ws_span });
     }
 
-    (ParsedQuery { parts }, cursor_context)
+    (ParsedQuery { parts, sort_keys }, cursor_context)
 }
 
 /// Emit a single negated FTS token as its own standalone `QueryPart::Fts`
@@ -392,17 +428,27 @@ mod tests {
     use rusqlite::types::Value;
 
     use crate::search::{
-        AccountFilter, AmountFilter, CategoryFilter, DateFilter, SqlContext, placeholders as ph,
+        AccountFilter, AmountFilter, CategoryFilter, DateFilter, SortColumn, SortFilter, SortKey,
+        SqlContext, placeholders as ph,
     };
+
+    fn test_options() -> SearchOptions {
+        SearchOptions::new(
+            NaiveDate::from_ymd_opt(2026, 7, 9).unwrap(),
+            Weekday::Mon,
+            (6, 30),
+        )
+    }
 
     fn test_config() -> SearchConfig {
         SearchConfig::new(vec![
-            Box::new(DateFilter),
+            Box::new(DateFilter::new(test_options())),
             Box::new(AmountFilter),
             Box::new(AccountFilter::new(vec![
                 "ING/Orange".to_string(),
                 "NAB/Classic".to_string(),
             ])),
+            Box::new(SortFilter),
             Box::new(CategoryFilter::new(vec![
                 "Food".to_string(),
                 "Transport".to_string(),
@@ -457,6 +503,88 @@ mod tests {
             }
             _ => panic!("Expected Filter"),
         }
+    }
+
+    #[test]
+    fn test_parse_sort_multi_column() {
+        let config = test_config();
+        let (query, _) = parse(&config, "sort:category,amount", 20);
+
+        assert_eq!(
+            query.sort_keys,
+            Some(vec![
+                SortKey {
+                    column: SortColumn::Category,
+                    descending: false,
+                },
+                SortKey {
+                    column: SortColumn::Amount,
+                    descending: false,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_sort_descending() {
+        let config = test_config();
+        let (query, _) = parse(&config, "sort:-amount", 12);
+
+        assert_eq!(
+            query.sort_keys,
+            Some(vec![SortKey {
+                column: SortColumn::Amount,
+                descending: true,
+            }])
+        );
+    }
+
+    #[test]
+    fn test_parse_sort_invalid_column() {
+        let config = test_config();
+        let (query, _) = parse(&config, "sort:nope", 9);
+
+        assert_eq!(query.sort_keys, None);
+        match &query.parts[0] {
+            QueryPart::Filter {
+                result: FilterResult::Invalid(message),
+                ..
+            } => assert_eq!(message, "Unknown sort column: nope"),
+            _ => panic!("Expected invalid sort filter"),
+        }
+    }
+
+    #[test]
+    fn test_parse_negated_sort_invalid() {
+        let config = test_config();
+        let (query, _) = parse(&config, "-sort:amount", 12);
+
+        assert_eq!(query.sort_keys, None);
+        match &query.parts[0] {
+            QueryPart::Filter {
+                result: FilterResult::Invalid(message),
+                negated,
+                ..
+            } => {
+                assert_eq!(message, "sort: cannot be negated");
+                assert!(*negated);
+            }
+            _ => panic!("Expected invalid sort filter"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_sort_terms_last_wins() {
+        let config = test_config();
+        let (query, _) = parse(&config, "sort:date sort:-amount", 22);
+
+        assert_eq!(
+            query.sort_keys,
+            Some(vec![SortKey {
+                column: SortColumn::Amount,
+                descending: true,
+            }])
+        );
     }
 
     #[test]

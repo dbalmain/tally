@@ -197,6 +197,10 @@ impl SearchBar {
             return false;
         };
 
+        let Some(filter) = self.config.find_filter_by_name(ac.filter_name) else {
+            return false;
+        };
+
         // Find the filter part that corresponds to this autocomplete
         let filter_part = self.parsed.parts.iter().find(|p| {
             matches!(p, QueryPart::Filter { name, value_span, .. }
@@ -218,12 +222,7 @@ impl SearchBar {
         let value_start = value_span.start;
         let segment_start_in_value = ac.anchor_offset.saturating_sub(value_start);
 
-        let segment_end_in_value = value
-            .chars()
-            .enumerate()
-            .skip(segment_start_in_value)
-            .find_map(|(idx, c)| (c == '|').then_some(idx))
-            .unwrap_or(char_len(value));
+        let segment_end_in_value = filter.completion_segment_end(value, segment_start_in_value);
 
         // Build new value with replaced segment
         let old_input = self.input.value().to_string();
@@ -767,16 +766,29 @@ fn word_start_before_cursor(s: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::{AccountFilter, AmountFilter, CategoryFilter, DateFilter};
+    use chrono::{NaiveDate, Weekday};
+
+    use crate::search::{
+        AccountFilter, AmountFilter, CategoryFilter, DateFilter, SearchOptions, SortFilter,
+    };
+
+    fn test_options() -> SearchOptions {
+        SearchOptions::new(
+            NaiveDate::from_ymd_opt(2026, 7, 9).unwrap(),
+            Weekday::Mon,
+            (6, 30),
+        )
+    }
 
     fn test_config() -> SearchConfig {
         SearchConfig::new(vec![
-            Box::new(DateFilter),
+            Box::new(DateFilter::new(test_options())),
             Box::new(AmountFilter),
             Box::new(AccountFilter::new(vec![
                 "ING/Orange".to_string(),
                 "NAB/Classic".to_string(),
             ])),
+            Box::new(SortFilter),
             Box::new(CategoryFilter::new(vec![
                 "Food".to_string(),
                 "Transport".to_string(),
@@ -933,7 +945,7 @@ mod tests {
     #[test]
     fn test_unicode_input_uses_character_indices() {
         let mut bar = SearchBar::new(SearchConfig::new(vec![
-            Box::new(DateFilter),
+            Box::new(DateFilter::new(test_options())),
             Box::new(CategoryFilter::new(vec![
                 "Food/Cafe".to_string(),
                 "Food/Café".to_string(),
@@ -951,6 +963,91 @@ mod tests {
         assert!(bar.autocomplete_active());
         assert!(bar.autocomplete_select());
         assert!(bar.value().starts_with("category:Food/Caf"));
+    }
+
+    #[test]
+    fn test_date_autocomplete_replaces_right_side_of_range() {
+        let mut bar = SearchBar::new(test_config());
+        bar.set_value("date:..las");
+
+        assert!(bar.autocomplete_active());
+        assert!(bar.autocomplete_select());
+
+        assert!(bar.value().starts_with("date:..last-"));
+        assert_ne!(bar.value(), "date:..las");
+        assert!(!bar.value().ends_with("las"));
+    }
+
+    #[test]
+    fn test_date_autocomplete_appears_for_empty_value() {
+        let mut bar = SearchBar::new(test_config());
+        bar.set_value("date:");
+
+        assert!(bar.autocomplete_active());
+        let ac = bar.autocomplete().unwrap();
+        assert_eq!(ac.anchor_offset, "date:".chars().count());
+        assert!(ac.suggestions.iter().any(|s| s == "yesterday"));
+    }
+
+    #[test]
+    fn test_date_autocomplete_replaces_left_side_of_range() {
+        let mut bar = SearchBar::new(test_config());
+        bar.set_value("date:las..2026");
+        bar.set_cursor("date:las".chars().count());
+        bar.reparse();
+        bar.update_autocomplete();
+
+        assert!(bar.autocomplete_active());
+        assert!(bar.autocomplete_select());
+
+        assert!(bar.value().starts_with("date:last-"));
+        assert!(bar.value().ends_with("..2026"));
+    }
+
+    #[test]
+    fn test_sort_autocomplete_appears_for_empty_value() {
+        let mut bar = SearchBar::new(test_config());
+        bar.set_value("sort:");
+
+        assert!(bar.autocomplete_active());
+        let ac = bar.autocomplete().unwrap();
+        assert_eq!(ac.anchor_offset, "sort:".chars().count());
+        assert_eq!(
+            ac.suggestions,
+            vec![
+                "date",
+                "description",
+                "amount",
+                "balance",
+                "account",
+                "bank",
+                "category",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_sort_autocomplete_preserves_descending_prefix() {
+        let mut bar = SearchBar::new(test_config());
+        bar.set_value("sort:-am");
+
+        assert!(bar.autocomplete_active());
+        assert_eq!(bar.autocomplete().unwrap().suggestions[0], "-amount");
+        assert!(bar.autocomplete_select());
+        assert_eq!(bar.value(), "sort:-amount");
+    }
+
+    #[test]
+    fn test_sort_autocomplete_replaces_comma_segment_and_excludes_used() {
+        let mut bar = SearchBar::new(test_config());
+        bar.set_value("sort:date,am");
+
+        assert!(bar.autocomplete_active());
+        let ac = bar.autocomplete().unwrap();
+        assert_eq!(ac.anchor_offset, "sort:date,".chars().count());
+        assert!(!ac.suggestions.iter().any(|suggestion| suggestion == "date"));
+        assert!(bar.autocomplete_select());
+        assert_eq!(bar.value(), "sort:date,amount");
     }
 
     #[test]

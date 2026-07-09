@@ -1,13 +1,13 @@
 //! Shared test fixtures and DB round-trip assertion helpers for the store
 //! submodule tests.
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Weekday};
 use rusqlite::params;
 use std::collections::HashMap;
 use std::fs;
 use tempfile::TempDir;
 
-use crate::search::{ParsedQuery, SearchConfig, parse};
+use crate::search::{ParsedQuery, SearchConfig, SearchOptions, parse};
 use crate::{
     Category, CategorySource, Transaction, TransactionEnrichment, Transfer, TransferSource,
 };
@@ -16,7 +16,15 @@ use super::{TransactionStore, parse_datetime};
 
 /// Build a SearchConfig with all standard filters and no completion options.
 fn search_config() -> SearchConfig {
-    SearchConfig::standard(vec![], Some(vec![]))
+    SearchConfig::standard(
+        vec![],
+        Some(vec![]),
+        SearchOptions::new(
+            NaiveDate::from_ymd_opt(2026, 7, 9).unwrap(),
+            Weekday::Mon,
+            (6, 30),
+        ),
+    )
 }
 
 /// Convenience: parse a query string with the standard search config.
