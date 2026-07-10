@@ -185,6 +185,7 @@ fn push_limit(sql: &mut String, params: &mut Vec<Value>, limit: Option<usize>) {
 
 pub struct TransactionStore {
     conn: Connection,
+    db_path: Option<PathBuf>,
     exports_dir: PathBuf,
     search_options: SearchOptions,
 }
@@ -198,6 +199,7 @@ impl TransactionStore {
         init_db(&conn)?;
         Ok(Self {
             conn,
+            db_path: Some(db_path.to_path_buf()),
             exports_dir: exports_dir.to_path_buf(),
             search_options: Config::default().search_options(),
         })
@@ -209,6 +211,7 @@ impl TransactionStore {
         init_db(&conn)?;
         Ok(Self {
             conn,
+            db_path: None,
             exports_dir: exports_dir.to_path_buf(),
             search_options: Config::default().search_options(),
         })
@@ -216,6 +219,16 @@ impl TransactionStore {
 
     pub fn set_search_options(&mut self, search_options: SearchOptions) {
         self.search_options = search_options;
+    }
+
+    /// Path of the backing database file; `None` for in-memory stores. Lets
+    /// callers open a second connection (e.g. background work) on the same DB.
+    pub fn db_path(&self) -> Option<&Path> {
+        self.db_path.as_deref()
+    }
+
+    pub fn exports_dir(&self) -> &Path {
+        &self.exports_dir
     }
 }
 

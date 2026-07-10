@@ -249,8 +249,6 @@ fn overlay_open(app: &App) -> bool {
             | InputMode::TransferNoMatch
     ) || app.error_message.is_some()
         || app.keybind_help_open
-        || app.classifying
-        || app.classify_report.is_some()
 }
 
 fn draw_overlays(
@@ -305,14 +303,6 @@ fn draw_overlays(
 
     if app.keybind_help_open {
         draw_keybind_popup(f, app);
-    }
-
-    if app.classifying {
-        draw_classifying_popup(f);
-    }
-
-    if let Some(report) = &app.classify_report {
-        draw_classify_report_popup(f, report);
     }
 }
 
@@ -477,18 +467,41 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(tabs, area);
 
-    if app.refreshing {
-        let label = "Refreshing...";
-        let width = label.len() as u16;
-        if area.width > width {
-            let indicator_area = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
-            f.render_widget(
-                Paragraph::new(Span::styled(label, Style::default().fg(Color::DarkGray)))
-                    .alignment(Alignment::Right),
-                indicator_area,
-            );
-        }
+    // Transient status, right-aligned in the tab row: the latest result
+    // message (green) and any background-work indicators (DarkGray). Skipped
+    // entirely when it wouldn't fit.
+    let mut parts: Vec<(String, Color)> = Vec::new();
+    if let Some(message) = app.active_status() {
+        parts.push((message.to_string(), Color::Green));
     }
+    if app.refreshing {
+        parts.push(("Refreshing...".to_string(), Color::DarkGray));
+    }
+    if app.classifying {
+        parts.push(("Classifying...".to_string(), Color::DarkGray));
+    }
+    if parts.is_empty() {
+        return;
+    }
+
+    let width = (parts
+        .iter()
+        .map(|(text, _)| text.chars().count())
+        .sum::<usize>()
+        + 2 * (parts.len() - 1)) as u16;
+    if area.width <= width {
+        return;
+    }
+
+    let mut spans = Vec::new();
+    for (i, (text, color)) in parts.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(text, Style::default().fg(color)));
+    }
+    let status_area = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
+    f.render_widget(Paragraph::new(Line::from(spans)), status_area);
 }
 
 fn draw_key_hints(f: &mut Frame, app: &App, area: Rect) {
@@ -1630,44 +1643,6 @@ fn draw_no_match_popup(f: &mut Frame, app: &App) {
 fn draw_error_popup(f: &mut Frame, msg: &str) {
     let hints = [("Esc", "dismiss")];
     let body = message_modal(f, "Error", Color::Red, msg, &hints, 40);
-
-    let paragraph = Paragraph::new(msg)
-        .style(Style::default().fg(Color::White))
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(paragraph, body);
-}
-
-/// Blocking-run loading modal shown while `classify` is in progress. It carries
-/// no hints because the run holds the UI thread until it finishes.
-fn draw_classifying_popup(f: &mut Frame) {
-    let msg = "Classifying transactions…";
-    let body = message_modal(f, "Classifying", Color::Cyan, msg, &[], 40);
-
-    let paragraph = Paragraph::new(msg)
-        .style(Style::default().fg(Color::White))
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(paragraph, body);
-}
-
-/// Summary modal shown when a classification run finishes, mirroring the CLI's
-/// `classify` report.
-fn draw_classify_report_popup(f: &mut Frame, report: &crate::classify::ClassifyReport) {
-    let msg = format!(
-        "Filter auto-categorised: {}\n\
-         Transfers detected: {}\n\
-         Exact-amount suggestions: {}\n\
-         Recurring-biller suggestions: {}\n\
-         Model suggestions: {}\n\
-         Unclassified: {}",
-        report.filtered,
-        report.transfers,
-        report.exact,
-        report.recurring,
-        report.model,
-        report.unclassified,
-    );
-    let hints = [("Esc/Enter", "close")];
-    let body = message_modal(f, "Classification complete", Color::Green, &msg, &hints, 50);
 
     let paragraph = Paragraph::new(msg)
         .style(Style::default().fg(Color::White))

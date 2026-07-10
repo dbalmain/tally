@@ -1,8 +1,11 @@
 //! Category actions: the category-assignment popup, AI-review confirmation,
 //! and rename/merge on the Categories tab.
 
-use crate::classify::{SIMILARITY_THRESHOLD, normalise};
-use crate::{Category, CategorySource, Transaction};
+use std::path::Path;
+use std::sync::mpsc::TryRecvError;
+
+use crate::classify::{ClassifyReport, SIMILARITY_THRESHOLD, normalise};
+use crate::{Category, CategorySource, Transaction, TransactionStore};
 
 use super::{
     App, BulkApplyState, BulkRow, CategoryTarget, ConfirmAction, InputMode, Tab, TextPromptTarget,
@@ -14,30 +17,71 @@ const BULK_APPLY_MATCH_LIMIT: usize = 200;
 impl App {
     // ==================== Auto Classification ====================
 
-    /// Flag a classification run. The blocking work happens in the event loop
-    /// (`run_classification`) once the loading modal has been drawn, so the
-    /// user sees feedback before the UI freezes for the run's duration.
+    /// Kick off a local classification run on a background thread (with its
+    /// own store connection, like the startup refresh), keeping the UI live;
+    /// the event loop polls [`Self::poll_classification`] for the result,
+    /// which lands as a toast. In-memory stores (tests) have no path to open
+    /// a second connection on, so they run inline instead.
     pub fn request_classify(&mut self) {
+        if self.classifying {
+            return;
+        }
+
+        let Some(db_path) = self.store.db_path().map(Path::to_path_buf) else {
+            let result = crate::classify::classify(&mut self.store);
+            self.finish_classification(result);
+            return;
+        };
+
+        let exports_dir = self.store.exports_dir().to_path_buf();
+        let search_options = self.search_options;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = TransactionStore::open(&db_path, &exports_dir).and_then(|mut store| {
+                store.set_search_options(search_options);
+                crate::classify::classify(&mut store)
+            });
+            let _ = tx.send(result);
+        });
+        self.classify_rx = Some(rx);
         self.classifying = true;
-        self.classify_requested = true;
     }
 
-    /// Run the local classification pipeline, refresh the lists, then surface a
-    /// summary modal (or an error popup on failure). `refresh_data` runs before
-    /// the report is stored because a successful tab reload clears
+    /// Collect a finished background classification, if any. Called every
+    /// event-loop iteration; cheap no-op while the run is still going.
+    pub fn poll_classification(&mut self) {
+        let Some(rx) = &self.classify_rx else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.classify_rx = None;
+                self.classifying = false;
+                self.error_message = Some("Classification stopped unexpectedly".to_string());
+                return;
+            }
+        };
+        self.classify_rx = None;
+        self.finish_classification(result);
+    }
+
+    /// Refresh the lists, then surface the run's outcome: a summary toast on
+    /// success, the error popup on failure. `refresh_data` runs before the
+    /// outcome is stored because a successful tab reload clears
     /// `error_message`.
-    pub fn run_classification(&mut self) {
-        let result = crate::classify::classify(&mut self.store);
+    fn finish_classification(&mut self, result: crate::Result<ClassifyReport>) {
         self.classifying = false;
         self.refresh_data();
         match result {
-            Ok(report) => self.classify_report = Some(report),
+            Ok(report) => self.show_status(format!(
+                "Classified — filters: {}, transfers: {}, suggested: {}, unclassified: {}",
+                report.filtered,
+                report.transfers,
+                report.exact + report.recurring + report.model,
+                report.unclassified,
+            )),
             Err(e) => self.error_message = Some(format!("Failed to classify: {e}")),
         }
-    }
-
-    pub fn dismiss_classify_report(&mut self) {
-        self.classify_report = None;
     }
 
     // ==================== Category Popup ====================

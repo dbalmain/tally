@@ -8,8 +8,8 @@ modify conventions, update this document before committing.
 
 **This file is a router, not a mirror.** Detailed reference docs live in module
 doc comments (single source of truth); this file tells you where to look and
-what conventions to follow. When you find a discrepancy, the code is right —
-fix this file.
+what conventions to follow. When you find a discrepancy, the code is right — fix
+this file.
 
 ## Commands
 
@@ -44,8 +44,8 @@ cargo run -- ai install-claude-skill
 
 At startup, Tally loads `<vault>/tally.toml` if it exists. Missing file means
 defaults; malformed TOML or invalid consumed values fail startup with an error.
-Unknown keys/sections are ignored so users can keep future/local settings in
-the same file.
+Unknown keys/sections are ignored so users can keep future/local settings in the
+same file.
 
 ```toml
 [dates]
@@ -62,35 +62,37 @@ module itself.
 
 ## Project Goals
 
-Tally is a personal finance tool for aggregating bank transactions. Key principles:
+Tally is a personal finance tool for aggregating bank transactions. Key
+principles:
 
 - **Privacy first** — All data stays local in SQLite, no cloud sync
 - **Bank agnostic** — Import scripts adapt to any bank's CSV format
 - **Minimal UI** — TUI uses whitespace over borders, context over labels
-- **AI-assisted** — Categories and transfers can be suggested by AI, confirmed by user
+- **AI-assisted** — Categories and transfers can be suggested by AI, confirmed
+  by user
 
 ## Where to Make Changes
 
-| You want to change… | Look in |
-|---|---|
-| Colors, layout, table columns, details panels, popups | `src/tui/ui.rs` |
-| Scrollable table component / inline detail panel / column geometry | `src/tui/table.rs` |
-| Normal-mode key dispatch / footer hints / `?` popover | `src/tui/keymap.rs` (`normal_binds` is the single source of truth) |
-| Modal-mode key dispatch | `src/tui/mod.rs` (one match per modal `InputMode`; update curated hints in `src/tui/keymap.rs` too) |
-| App state, actions, data loading, caches | `src/tui/app/mod.rs` |
-| Tab definitions / per-tab data & dispatch | `src/tui/app/tabs.rs` |
-| DB-search / fuzzy-search behaviour in the app | `src/tui/app/search.rs`; Categories search is applied in memory by `src/tui/app/tabs.rs` (`/` path boundary-prefix, `~` path fuzzy) |
-| Category actions (assign, rename, merge, delete, AI review) | `src/tui/app/categories.rs` |
-| Account actions (rename/move, delete, view transactions) | `src/tui/app/accounts.rs` |
-| Filter actions (create, rename, categorise, override/review/delete) | `src/tui/app/filters.rs` |
-| Transfer actions (mark, confirm, delete) | `src/tui/app/transfers.rs` |
-| Search-bar widget (rendering, cursor-context keys, autocomplete) | `src/tui/search_bar.rs` |
-| SQL queries / store methods | `src/store/` (column consts + row parsers in `mod.rs`; methods per submodule) |
-| Schema, FTS index, `transactions_view` | `src/db.rs` |
-| Search syntax, parsing, SQL rendering | `src/search/` (syntax reference: `src/search/mod.rs` doc comment) |
-| A single filter's behaviour (date, amount, account, category) | `src/search/filters/<name>.rs` |
-| Import script discovery/execution | `src/import.rs` |
-| Core data structures | `src/types.rs` |
+| You want to change…                                                 | Look in                                                                                                                             |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Colors, layout, table columns, details panels, popups               | `src/tui/ui.rs`                                                                                                                     |
+| Scrollable table component / inline detail panel / column geometry  | `src/tui/table.rs`                                                                                                                  |
+| Normal-mode key dispatch / footer hints / `?` popover               | `src/tui/keymap.rs` (`normal_binds` is the single source of truth)                                                                  |
+| Modal-mode key dispatch                                             | `src/tui/mod.rs` (one match per modal `InputMode`; update curated hints in `src/tui/keymap.rs` too)                                 |
+| App state, actions, data loading, caches                            | `src/tui/app/mod.rs`                                                                                                                |
+| Tab definitions / per-tab data & dispatch                           | `src/tui/app/tabs.rs`                                                                                                               |
+| DB-search / fuzzy-search behaviour in the app                       | `src/tui/app/search.rs`; Categories search is applied in memory by `src/tui/app/tabs.rs` (`/` path boundary-prefix, `~` path fuzzy) |
+| Category actions (assign, rename, merge, delete, AI review)         | `src/tui/app/categories.rs`                                                                                                         |
+| Account actions (rename/move, delete, view transactions)            | `src/tui/app/accounts.rs`                                                                                                           |
+| Filter actions (create, rename, categorise, override/review/delete) | `src/tui/app/filters.rs`                                                                                                            |
+| Transfer actions (mark, confirm, delete)                            | `src/tui/app/transfers.rs`                                                                                                          |
+| Search-bar widget (rendering, cursor-context keys, autocomplete)    | `src/tui/search_bar.rs`                                                                                                             |
+| SQL queries / store methods                                         | `src/store/` (column consts + row parsers in `mod.rs`; methods per submodule)                                                       |
+| Schema, FTS index, `transactions_view`                              | `src/db.rs`                                                                                                                         |
+| Search syntax, parsing, SQL rendering                               | `src/search/` (syntax reference: `src/search/mod.rs` doc comment)                                                                   |
+| A single filter's behaviour (date, amount, account, category)       | `src/search/filters/<name>.rs`                                                                                                      |
+| Import script discovery/execution                                   | `src/import.rs`                                                                                                                     |
+| Core data structures                                                | `src/types.rs`                                                                                                                      |
 
 ## Architecture
 
@@ -159,6 +161,7 @@ tally.db                    # SQLite database (gitignored)
 ## Key Types
 
 ### Transaction
+
 ```rust
 Transaction {
     id: i64,
@@ -176,37 +179,51 @@ Transaction {
 ```
 
 ### Category & Enrichment
+
 - `Category { id, path, created_at }` — Hierarchical paths like "Food/Groceries"
-- `TransactionEnrichment` — Links transaction to category, tracks source (manual/ai/rule) and confirmation status
+- `TransactionEnrichment` — Links transaction to category, tracks source
+  (manual/ai/rule) and confirmation status
 - `TransactionWithEnrichment` — Transaction + enrichment + resolved category
-- `Filter { name, query, category_id, override_mode, review_required }` — Saved search that can apply rule-sourced categories via `store.apply_filters()`
+- `Filter { name, query, category_id, override_mode, review_required }` — Saved
+  search that can apply rule-sourced categories via `store.apply_filters()`
 
 ### Transfer
-- `Transfer { from_transaction_id, to_transaction_id, source, confirmed, ai_confidence }` — Links two transactions as a transfer
+
+- `Transfer { from_transaction_id, to_transaction_id, source, confirmed, ai_confidence }`
+  — Links two transactions as a transfer
 - `TransferWithTransactions` — Transfer + both resolved transactions
 
 ## Database Schema
 
 **Core tables:**
+
 - `banks` — `id, name, deleted_at`
 - `accounts` — `id, bank_id, name, deleted_at`
-- `transactions` — `id, account_id, date, description, amount_cents, balance_cents, hash, metadata, source_file, import_batch_id`
+- `transactions` —
+  `id, account_id, date, description, amount_cents, balance_cents, hash, metadata, source_file, import_batch_id`
 
 **Enrichment tables:**
+
 - `categories` — `id, path, created_at`
-- `transaction_enrichments` — `id, transaction_id, category_id, category_source, category_confirmed, ai_confidence, created_at, updated_at`
-- `transfers` — `id, from_transaction_id, to_transaction_id, source, confirmed, ai_confidence, created_at`
-- `filters` — `id, name, query, category_id, override_mode, review_required, position, created_at`
+- `transaction_enrichments` —
+  `id, transaction_id, category_id, category_source, category_confirmed, ai_confidence, created_at, updated_at`
+- `transfers` —
+  `id, from_transaction_id, to_transaction_id, source, confirmed, ai_confidence, created_at`
+- `filters` —
+  `id, name, query, category_id, override_mode, review_required, position, created_at`
 
 **Import tracking:**
-- `imported_files` — `id, account_id, path, content_hash, imported_at, import_batch_id`
+
+- `imported_files` —
+  `id, account_id, path, content_hash, imported_at, import_batch_id`
 - `import_batches` — `id, started_at, completed_at`
 
 **Read-side view:**
+
 - `transactions_view` — a transaction joined to its account and bank
   (`bank_id, bank_name, account_name, account_deleted_at` extra columns). All
-  store read queries go through this view so the join exists in one place.
-  It's dropped and recreated on every open, so changing it in `db.rs` needs no
+  store read queries go through this view so the join exists in one place. It's
+  dropped and recreated on every open, so changing it in `db.rs` needs no
   migration.
 
 ## Design Decisions
@@ -218,15 +235,14 @@ transactions without a user-confirmed category: same-day opposite amounts in
 different accounts, paired greedily with history-aware confidence. Detected
 transfers use source `auto`, remain unconfirmed, and are excluded from category
 suggestions. Saved filters apply only after detection, so a filter can never
-claim a transfer leg (the store additionally skips existing transfer legs
-during apply, regardless of override mode).
-It then trains only from confirmed category enrichments, first reusing the most
-recent prior same-biller category and preferring an exact amount; novel billers
-fall back to word/character TF-IDF plus a one-vs-rest linear SVM. The pure
-`train`/`predict` and transfer-detection pipeline lives under `src/classify/`,
-with storage isolated in `adapter.rs`. Category suggestions use source `ai`,
-remain unconfirmed, and never replace an existing enrichment. No configuration
-or external service is required.
+claim a transfer leg (the store additionally skips existing transfer legs during
+apply, regardless of override mode). It then trains only from confirmed category
+enrichments, first reusing the most recent prior same-biller category and
+preferring an exact amount; novel billers fall back to word/character TF-IDF
+plus a one-vs-rest linear SVM. The pure `train`/`predict` and transfer-detection
+pipeline lives under `src/classify/`, with storage isolated in `adapter.rs`.
+Category suggestions use source `ai`, remain unconfirmed, and never replace an
+existing enrichment. No configuration or external service is required.
 
 When the category popup manually assigns a category, the TUI can offer to apply
 the same category to other unconfirmed transactions whose normalised
@@ -244,25 +260,25 @@ currently a transfer leg with `Error::TransactionInTransfer` — so no path
 unlinking it. The TUI guards the inverse ahead of that error for a friendlier
 flow: categorising a transfer (`c`) prompts to unlink it first (the
 `BreakTransferForCategory` confirm deletes the transfer before calling
-`set_category`), and marking a transfer (`t`) whose chosen endpoint is already linked
-prompts to break the existing transfer(s). Both prompts run through the generic
-`InputMode::Confirm` / `ConfirmAction` flow (`App::confirm_proceed`). Transfer
-candidate search (`store.transfer_candidates`) therefore no longer hides
-already-linked transactions — it offers them and the caller confirms.
+`set_category`), and marking a transfer (`t`) whose chosen endpoint is already
+linked prompts to break the existing transfer(s). Both prompts run through the
+generic `InputMode::Confirm` / `ConfirmAction` flow (`App::confirm_proceed`).
+Transfer candidate search (`store.transfer_candidates`) therefore no longer
+hides already-linked transactions — it offers them and the caller confirms.
 
 ### Integrity invariants
 
-SQLite foreign keys are **not** enforced — there is no `PRAGMA foreign_keys`,
-so the `REFERENCES` clauses in the schema are documentation only. Store methods
-are therefore the only safe mutation path: raw SQL bypasses every invariant
+SQLite foreign keys are **not** enforced — there is no `PRAGMA foreign_keys`, so
+the `REFERENCES` clauses in the schema are documentation only. Store methods are
+therefore the only safe mutation path: raw SQL bypasses every invariant
 silently, so agents must never mutate via ad-hoc SQL. The invariants the store
 maintains:
 
 - A transaction is either categorised or in a transfer, never both
   (`create_transfer` clears enrichments; `set_category` rejects a transfer leg
   with `Error::TransactionInTransfer`; the TUI guards the inverse first).
-- `filters.category_id` never dangles — rename preserves it, merge repoints
-  it, delete clears it to NULL (`apply_filters` skips NULL-category filters).
+- `filters.category_id` never dangles — rename preserves it, merge repoints it,
+  delete clears it to NULL (`apply_filters` skips NULL-category filters).
 - Deleting a category deletes its enrichments and reports the count.
 - Account rename/move and delete keep the `exports/` folder in sync: rename
   moves `exports/{Bank}/{Account}` (creating the target bank folder, never
@@ -271,42 +287,47 @@ maintains:
 
 ### Saved filters
 
-Filters are saved searches. When a filter has a category, `store.apply_filters()`
-re-derives rule-sourced categories from the saved filter set.
-`store.preview_filters()` is the dry-run: it runs the real apply body inside a
-SQLite savepoint and rolls back, returning the transactions that *would* be
-(re)categorised without persisting anything.
-On Transactions, `Ctrl-S` saves the active DB search as a new filter and opens
-the filter edit screen for it. Applying filter categories (`a` on the Filters
-tab, `Ctrl-A` on the Filter Edit screen) opens a scrollable confirmation modal
-listing the affected transactions (date/description/amount) before applying.
-Toggling a filter's override mode (`o`/`Ctrl-O`) or review requirement
-(`v`/`Ctrl-V`) persists the setting and refreshes the display but must NOT call
+Filters are saved searches. When a filter has a category,
+`store.apply_filters()` re-derives rule-sourced categories from the saved filter
+set. `store.preview_filters()` is the dry-run: it runs the real apply body
+inside a SQLite savepoint and rolls back, returning the transactions that
+_would_ be (re)categorised without persisting anything. On Transactions,
+`Ctrl-S` saves the active DB search as a new filter and opens the filter edit
+screen for it. Applying filter categories (`a` on the Filters tab, `Ctrl-A` on
+the Filter Edit screen) opens a scrollable confirmation modal listing the
+affected transactions (date/description/amount) before applying. Toggling a
+filter's override mode (`o`/`Ctrl-O`) or review requirement (`v`/`Ctrl-V`)
+persists the setting and refreshes the display but must NOT call
 `apply_filters`: a setting change is not an apply, and eager-applying it would
 bypass the confirmation summary and, for the `all` override, silently overwrite
 existing categories. Categories change only when the user applies explicitly.
-Deleting a filter (`d`/`Delete`) and
-leaving the edit screen with unsaved query edits (`Esc`) both prompt for
-confirmation first.
+Deleting a filter (`d`/`Delete`) and leaving the edit screen with unsaved query
+edits (`Esc`) both prompt for confirmation first.
 
 ### Money as Cents (i64)
+
 All monetary values are integers in cents to avoid floating-point errors.
+
 - $123.45 → `12345`
 - -$50.00 → `-5000`
 
 ### Deduplication
+
 - Transactions deduplicated by `(account_id, hash)`
 - Hash computed from: `date|description|amount_cents|balance_cents`
 - Files tracked by content hash to skip re-importing unchanged files
 
 ### Soft Deletes
-Banks/accounts that disappear from `exports/` are soft-deleted (`deleted_at` timestamp) to preserve historical data.
+
+Banks/accounts that disappear from `exports/` are soft-deleted (`deleted_at`
+timestamp) to preserve historical data.
 
 ### No Migrations
+
 Schema changes require deleting `tally.db` and re-importing. This keeps the
-codebase simple for a personal tool. Views and additive cache tables are
-exempt: views are recreated on every open, and caches use
-`CREATE TABLE IF NOT EXISTS` because they do not change core stored data.
+codebase simple for a personal tool. Views and additive cache tables are exempt:
+views are recreated on every open, and caches use `CREATE TABLE IF NOT EXISTS`
+because they do not change core stored data.
 
 ## TUI Conventions
 
@@ -318,15 +339,15 @@ handling and data flow stay uniform:
   success. Never call a mutating store method directly and ignore the result.
 - **Mid-flight loads go through `App::load_or_show`** — same error surfacing,
   returns `T::default()` on failure.
-- **After any mutation, call `app.refresh_data()`** — reloads the current
-  tab, rebuilds caches and category counts.
+- **After any mutation, call `app.refresh_data()`** — reloads the current tab,
+  rebuilds caches and category counts.
 - **Lists are `FilteredList<T>`** — the DB query result is the item set; the
-  fuzzy filter is a view over it (`refilter`/`show_all`). Indices the user
-  sees are *visible* indices.
+  fuzzy filter is a view over it (`refilter`/`show_all`). Indices the user sees
+  are _visible_ indices.
 - **Per-tab anything goes through `TabLists`** (`app/tabs.rs`) — don't add
   `match app.current_tab` to other files; add a method to `TabLists` instead.
-- **Rendering never queries the DB** — `ui.rs` reads `App` state and the
-  caches (`get_cached_transaction/category/transfer`).
+- **Rendering never queries the DB** — `ui.rs` reads `App` state and the caches
+  (`get_cached_transaction/category/transfer`).
 - **Overlay modals use shared chrome** — use `src/tui/modal.rs` `Modal`; modal
   keybind hints render inside the modal and hide the global hint bar. `Modal`
   enforces the house spacing for every modal: a blank line under the title, one
@@ -334,6 +355,13 @@ handling and data flow stay uniform:
   and the bottom hint row. Size text modals to `MODAL_CHROME_HEIGHT + lines`
   (the `message_modal` helper in `ui.rs` does this for short message popups) so
   that spacing lands exactly; table/list modals just fill the body rect.
+- **Non-blocking outcomes use the tab-bar status, not modals** — the tab bar's
+  right side is a transient status area (`draw_tabs` in `ui.rs`): DarkGray
+  indicators while background work is in flight ("Refreshing..." /
+  "Classifying...") and, via `app.show_status(msg)`, a green one-line result
+  message shown for 5 s. It never captures input and needs no dismissal. Use it
+  for fire-and-forget results (e.g. the `C` classification summary); reserve
+  modals for flows that need a decision or acknowledgement.
 - **Tables use `ScrollTable`** (`src/tui/table.rs`) — it owns scroll-offset
   math, inline detail placement, and column geometry; per-view closures own row
   content, styling, and optional detail rendering.
@@ -345,7 +373,8 @@ handling and data flow stay uniform:
 
 - **Whitespace over borders** — No box borders on tables or panels
 - **Context over labels** — Tab names provide context, no redundant headers
-- **Row-level styling** — Use `Row::style()` for backgrounds, not per-cell `.bg()`
+- **Row-level styling** — Use `Row::style()` for backgrounds, not per-cell
+  `.bg()`
 - **Color coding:** Red = negative amounts / transfer "from"; Green = positive
   amounts / transfer "to"; Yellow = categories, pending items; Cyan = transfer
   indicators, confidence scores; DarkGray = labels, disabled items
@@ -375,18 +404,19 @@ background connection writes; WAL sidecar files (`-wal`/`-shm`) are expected.
 2. There is no `requires()` declaration. A filter applies in whatever context
    supplies its placeholders: `render_template` substitutes each `{name}` from
    the active `SqlContext`, and drops the whole clause if any referenced
-   placeholder is missing — so a filter is automatically inert in contexts
-   that don't provide its columns.
+   placeholder is missing — so a filter is automatically inert in contexts that
+   don't provide its columns.
 3. Register in `src/search/filters/mod.rs` and in `SearchConfig::standard`
    (`src/search/parse.rs`) — the single registration point; every search bar
    picks it up from there. Filters that depend on runtime date/config state
    should take it from `SearchOptions`; do not make `src/search` depend on
    `src/config.rs`.
 4. If the filter needs a column not yet in the standard contexts, add it to
-   `transactions_view` in `src/db.rs` and to the `SEARCHABLE_TRANSACTION_COLUMNS`
-   table (or the `transaction_ctx()` / `transfer_side_ctx()` extras for
-   non-per-side placeholders) in `src/store/mod.rs`. If the placeholder requires a
-   JOIN, extend `transaction_joins()` to splice it in when
+   `transactions_view` in `src/db.rs` and to the
+   `SEARCHABLE_TRANSACTION_COLUMNS` table (or the `transaction_ctx()` /
+   `transfer_side_ctx()` extras for non-per-side placeholders) in
+   `src/store/mod.rs`. If the placeholder requires a JOIN, extend
+   `transaction_joins()` to splice it in when
    `parsed.uses_placeholder(ph::YOUR_PLACEHOLDER)`.
 5. Document the syntax in the `src/search/mod.rs` doc comment.
 
@@ -396,12 +426,11 @@ Store query methods don't change; the search bar UI is filter-agnostic.
 
 1. `src/tui/app/tabs.rs` — add the enum variant (+ `all()`/`title()`), add a
    `FilteredList` field to `TabLists`, and extend each `TabLists` method:
-   `load`, `reload`, `len`, `apply_fuzzy`, and (only if the tab's rows are
-   plain transactions) `transaction_at` / `position_of_tx`.
-2. `src/tui/app/search.rs` — decide the tab's filters in
-   `build_search_config`.
-3. `src/tui/ui.rs` — add a `draw_…` function (use `ScrollTable`) and dispatch
-   to it from `draw()`.
+   `load`, `reload`, `len`, `apply_fuzzy`, and (only if the tab's rows are plain
+   transactions) `transaction_at` / `position_of_tx`.
+2. `src/tui/app/search.rs` — decide the tab's filters in `build_search_config`.
+3. `src/tui/ui.rs` — add a `draw_…` function (use `ScrollTable`) and dispatch to
+   it from `draw()`.
 4. If new data feeds the caches, extend `rebuild_tx_caches` in
    `src/tui/app/mod.rs`.
 5. Update the key-binding/tab docs in this file.
@@ -413,8 +442,8 @@ Store query methods don't change; the search bar UI is filter-agnostic.
    `parse_transaction_at_offset` order).
 2. `src/types.rs` — add the field to `Transaction`.
 3. `src/store/mod.rs` — add the column name to `tx_cols()` and parse it in
-   `parse_transaction_at_offset` (order matters); extend `insert_transaction`
-   in `src/store/import.rs`.
+   `parse_transaction_at_offset` (order matters); extend `insert_transaction` in
+   `src/store/import.rs`.
 4. Delete `tally.db` and re-import (no migrations).
 
 ### Adding a Key Binding
@@ -424,8 +453,8 @@ Store query methods don't change; the search bar UI is filter-agnostic.
 2. For Normal mode, add one `Bind` row to `normal_binds` in `src/tui/keymap.rs`
    (plus an `Act` variant and `run_normal` arm if needed). Footer and popover
    text come from that same row.
-3. For a modal mode, update the matching `InputMode` arm in `src/tui/mod.rs`
-   and its curated `footer_hints` / `help_lines` arm in `src/tui/keymap.rs`.
+3. For a modal mode, update the matching `InputMode` arm in `src/tui/mod.rs` and
+   its curated `footer_hints` / `help_lines` arm in `src/tui/keymap.rs`.
    Text-editing keys are shared via `text_edit_request`; only add mode-specific
    keys.
 4. Update the key-binding tables below.
@@ -436,126 +465,131 @@ These tables document intent. Normal mode is implemented by `src/tui/keymap.rs`;
 modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 
 ### Global (Normal Mode)
-| Key | Action |
-|-----|--------|
-| `q` | Quit |
-| `j` / `↓` | Next item |
-| `k` / `↑` | Previous item |
-| `Tab` / `Shift+Tab` | Next/previous tab |
-| `[` / `]` | Previous/next subtab (Todo) |
-| `/` | Start DB search |
-| `~` | Start fuzzy search |
-| `Ctrl-S` | Save current Transactions DB search as a filter |
-| `n` | Create filter (Filters tab) |
-| `a` | Apply filter categories (Filters tab) — opens a scrollable confirmation modal listing the affected transactions (date/description/amount) before applying. On the Filter Edit screen this is `Ctrl-A` |
-| `c` | Set category on transaction (including Todo → AI Review), or set/clear filter category (Filters tab); categorising a transfer prompts to unlink it first |
-| `r` | Rename category (Categories tab), rename/move account (Accounts tab; full `Bank/Account` path, moves the exports folder), or rename filter (Filters tab) |
-| `o` | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`) |
-| `v` | Toggle filter review requirement (Filters tab); toggle "view transactions?" — a side panel listing the selected category's transactions (Transactions-view format, no category column) to the right of the category list (Categories tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised); or toggle a side panel of the selected account's transactions (Accounts tab) |
-| `t` | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer |
-| `m` | Manage transactions: jump to the Transactions tab with its DB search set to `category:<path>` (Categories tab) or `account:<path>` (Accounts tab) and focus on the first transaction |
-| `C` | Apply a category to **all** transactions matching the current DB search (Transactions tab and Todo → AI Review) — opens the category popup, then a confirmation stating how many transactions will be updated; unlike `c` it does not offer the similar-transactions bulk-apply, and transfer legs are skipped (they can't be categorised). Hidden while a fuzzy (`~`) search is active, since that only narrows the visible rows |
-| `C` | Run local auto-classification (Todo → Uncategorised) — shows a loading modal while it runs, then a summary modal (filter/transfer/suggestion counts) |
-| `d` / `Delete` | Delete transfer (Transfers tab), delete filter (Filters tab; prompts to confirm), delete category (Categories tab; prompts to confirm, noting how many transactions will be left uncategorised), or delete account (Accounts tab; prompts to confirm, noting the exports-folder removal and retained-transaction count) |
-| `u` | Transactions tab: unlink the selected transfer, else uncategorise the transaction (prompts to confirm). The hint reads "unlink" on a linked transfer and "uncategorise" otherwise, and is hidden when the row has neither |
-| `Delete` | AI Review: remove category. Transfer Review: unlink transfer |
-| `Enter` | Confirm (AI review, transfer review), or open filter edit (Filters tab) |
-| `Esc` | Clear active search (fuzzy first, then DB) |
-| `?` | Show keybind popover |
-| `Alt-?` | Toggle bottom key-hint bar |
+
+| Key                 | Action                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `q`                 | Quit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `j` / `↓`           | Next item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `k` / `↑`           | Previous item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `Tab` / `Shift+Tab` | Next/previous tab                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `[` / `]`           | Previous/next subtab (Todo)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `/`                 | Start DB search                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `~`                 | Start fuzzy search                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `Ctrl-S`            | Save current Transactions DB search as a filter                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `n`                 | Create filter (Filters tab)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `a`                 | Apply filter categories (Filters tab) — opens a scrollable confirmation modal listing the affected transactions (date/description/amount) before applying. On the Filter Edit screen this is `Ctrl-A`                                                                                                                                                                                                                                                                                                                                            |
+| `c`                 | Set category on transaction (including Todo → AI Review), or set/clear filter category (Filters tab); categorising a transfer prompts to unlink it first                                                                                                                                                                                                                                                                                                                                                                                         |
+| `r`                 | Rename category (Categories tab), rename/move account (Accounts tab; full `Bank/Account` path, moves the exports folder), or rename filter (Filters tab)                                                                                                                                                                                                                                                                                                                                                                                         |
+| `o`                 | Cycle filter override mode (Filters tab: `new` → `+ai` → `all`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `v`                 | Toggle filter review requirement (Filters tab); toggle "view transactions?" — a side panel listing the selected category's transactions (Transactions-view format, no category column) to the right of the category list (Categories tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised); or toggle a side panel of the selected account's transactions (Accounts tab) |
+| `t`                 | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `m`                 | Manage transactions: jump to the Transactions tab with its DB search set to `category:<path>` (Categories tab) or `account:<path>` (Accounts tab) and focus on the first transaction                                                                                                                                                                                                                                                                                                                                                             |
+| `C`                 | Apply a category to **all** transactions matching the current DB search (Transactions tab and Todo → AI Review) — opens the category popup, then a confirmation stating how many transactions will be updated; unlike `c` it does not offer the similar-transactions bulk-apply, and transfer legs are skipped (they can't be categorised). Hidden while a fuzzy (`~`) search is active, since that only narrows the visible rows                                                                                                                |
+| `C`                 | Run local auto-classification (Todo → Uncategorised) — runs on a background thread (its own store connection, like the startup refresh); a "Classifying..." indicator shows in the tab bar (like "Refreshing...") while it runs, replaced by a green summary (filter/transfer/suggestion counts) in the same tab-bar status area for a few seconds on completion. The UI stays fully interactive throughout                                                                                                                                      |
+| `d` / `Delete`      | Delete transfer (Transfers tab), delete filter (Filters tab; prompts to confirm), delete category (Categories tab; prompts to confirm, noting how many transactions will be left uncategorised), or delete account (Accounts tab; prompts to confirm, noting the exports-folder removal and retained-transaction count)                                                                                                                                                                                                                          |
+| `u`                 | Transactions tab: unlink the selected transfer, else uncategorise the transaction (prompts to confirm). The hint reads "unlink" on a linked transfer and "uncategorise" otherwise, and is hidden when the row has neither                                                                                                                                                                                                                                                                                                                        |
+| `Delete`            | AI Review: remove category. Transfer Review: unlink transfer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `Enter`             | Confirm (AI review, transfer review), or open filter edit (Filters tab)                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `Esc`               | Clear active search (fuzzy first, then DB)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `?`                 | Show keybind popover                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `Alt-?`             | Toggle bottom key-hint bar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 ### Search Modes (DB and Fuzzy)
-| Key | Action |
-|-----|--------|
-| `Esc` | Clear search and exit |
-| `Enter` | Confirm search |
-| `Ctrl-S` | Save current Transactions DB search as a filter |
-| `↑` / `↓` | Navigate results |
-| `Tab` | Switch tabs (keeps search active) |
+
+| Key                   | Action                                                   |
+| --------------------- | -------------------------------------------------------- |
+| `Esc`                 | Clear search and exit                                    |
+| `Enter`               | Confirm search                                           |
+| `Ctrl-S`              | Save current Transactions DB search as a filter          |
+| `↑` / `↓`             | Navigate results                                         |
+| `Tab`                 | Switch tabs (keeps search active)                        |
 | Standard text editing | Left/Right, Ctrl+Left/Right, Home/End, Backspace, Delete |
-| `Alt-?` | Toggle bottom key-hint bar |
+| `Alt-?`               | Toggle bottom key-hint bar                               |
 
 ### Filter Edit
+
 Opened with `Enter` on a Filters-tab row. Full-screen DB-query editor with a
 live read-only transaction preview. The heading shows the filter's category,
 override mode, and review state so the `Ctrl-O` / `Ctrl-V` toggles give
 feedback.
 
-| Key | Action |
-|-----|--------|
-| `Enter` | When the autocomplete popup is open, accept the suggestion (like `Tab`); otherwise save the query, reapply filters, and return to the Filters table |
-| `Ctrl-R` | Rename filter |
-| `Ctrl-C` | Set or clear filter category |
-| `Ctrl-O` | Cycle filter override mode (only when a category is set) |
-| `Ctrl-V` | Toggle filter review requirement (only when a category is set) |
-| `Ctrl-A` | Apply filter categories — opens a confirmation modal listing the affected transactions before applying |
-| `Tab` | Accept autocomplete suggestion when the popup is open |
-| `↑` / `↓` | Scroll preview; search cursor stays in the bar (no hint shown) |
-| `Esc` | Return to the Filters table; prompts to confirm if the query has unsaved edits |
-| `?` | Show keybind popover |
+| Key       | Action                                                                                                                                              |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Enter`   | When the autocomplete popup is open, accept the suggestion (like `Tab`); otherwise save the query, reapply filters, and return to the Filters table |
+| `Ctrl-R`  | Rename filter                                                                                                                                       |
+| `Ctrl-C`  | Set or clear filter category                                                                                                                        |
+| `Ctrl-O`  | Cycle filter override mode (only when a category is set)                                                                                            |
+| `Ctrl-V`  | Toggle filter review requirement (only when a category is set)                                                                                      |
+| `Ctrl-A`  | Apply filter categories — opens a confirmation modal listing the affected transactions before applying                                              |
+| `Tab`     | Accept autocomplete suggestion when the popup is open                                                                                               |
+| `↑` / `↓` | Scroll preview; search cursor stays in the bar (no hint shown)                                                                                      |
+| `Esc`     | Return to the Filters table; prompts to confirm if the query has unsaved edits                                                                      |
+| `?`       | Show keybind popover                                                                                                                                |
 
 ### Category Popup
-| Key | Action |
-|-----|--------|
-| `Esc` | Cancel |
-| `Enter` | Confirm selection |
-| `↑` / `↓` | Navigate suggestions |
-| Type | Filter categories |
-| `Alt-?` | Toggle bottom key-hint bar |
+
+| Key       | Action                     |
+| --------- | -------------------------- |
+| `Esc`     | Cancel                     |
+| `Enter`   | Confirm selection          |
+| `↑` / `↓` | Navigate suggestions       |
+| Type      | Filter categories          |
+| `Alt-?`   | Toggle bottom key-hint bar |
 
 ### Bulk Apply Popup
-| Key | Action |
-|-----|--------|
-| `Space` | Toggle selected row |
-| `a` | Toggle all rows |
-| `Enter` | Apply to selected rows |
-| `Esc` | Cancel |
-| `↑` / `↓` | Navigate rows |
-| `?` | Show keybind popover |
-| `Alt-?` | Toggle bottom key-hint bar |
+
+| Key       | Action                     |
+| --------- | -------------------------- |
+| `Space`   | Toggle selected row        |
+| `a`       | Toggle all rows            |
+| `Enter`   | Apply to selected rows     |
+| `Esc`     | Cancel                     |
+| `↑` / `↓` | Navigate rows              |
+| `?`       | Show keybind popover       |
+| `Alt-?`   | Toggle bottom key-hint bar |
 
 ### Confirmation Popups
-| Key | Action |
-|-----|--------|
-| `y` / `Enter` | Confirm |
-| `n` / `Esc` | Cancel |
-| `?` | Show keybind popover |
-| `Alt-?` | Toggle bottom key-hint bar |
+
+| Key           | Action                     |
+| ------------- | -------------------------- |
+| `y` / `Enter` | Confirm                    |
+| `n` / `Esc`   | Cancel                     |
+| `?`           | Show keybind popover       |
+| `Alt-?`       | Toggle bottom key-hint bar |
 
 ### Transfer Popups
-| Key | Action |
-|-----|--------|
-| `↑` / `↓` | Navigate candidates |
-| `T` / `Enter` | Link selected transfer candidate |
-| `t` | Re-search from the selected transaction |
-| `Esc` | Cancel or dismiss |
-| `?` | Show keybind popover |
-| `Alt-?` | Toggle bottom key-hint bar |
+
+| Key           | Action                                  |
+| ------------- | --------------------------------------- |
+| `↑` / `↓`     | Navigate candidates                     |
+| `T` / `Enter` | Link selected transfer candidate        |
+| `t`           | Re-search from the selected transaction |
+| `Esc`         | Cancel or dismiss                       |
+| `?`           | Show keybind popover                    |
+| `Alt-?`       | Toggle bottom key-hint bar              |
 
 ## Search Syntax (summary)
 
 Full reference: the `src/search/mod.rs` doc comment (canonical).
 
 - **DB search (`/`)** pushes filters to SQL: `date:2024-01..2024-06`,
-  `date:last-month`, `date:this-financial-year`,
-  `date:last-3-months`, `date:last-quarter..yesterday`,
-  `amount:>100` (precision-aware for bare values; matches either sign
-  unless a `+`/`-` sign or a zero range/comparison endpoint makes it
-  signed, e.g. `amount:0..` = credits, `amount:-100..-50` = debits),
-  `account:ING/Orange`
-  (Bank/Account prefixes, `|` for OR), `category:Food` (start-anchored path
-  prefix; a leading `/` matches after any `/`, e.g. `category:/Groceries`;
-  `|` for OR), `sort:category,-amount` (ORDER BY; columns: `date`,
-  `description`, `amount`, `balance`, `account`, `bank`, `category`; last
-  `sort:` wins; uncategorised rows sort last for `category`). Bare words
-  are FTS5 full-text search (`coffee OR tea`, `"exact phrase"`, `coff*`);
-  `/pattern/i` is regex. End with ` ~` to switch to fuzzy mode keeping the
-  DB filters.
+  `date:last-month`, `date:this-financial-year`, `date:last-3-months`,
+  `date:last-quarter..yesterday`, `amount:>100` (precision-aware for bare
+  values; matches either sign unless a `+`/`-` sign or a zero range/comparison
+  endpoint makes it signed, e.g. `amount:0..` = credits, `amount:-100..-50` =
+  debits), `account:ING/Orange` (Bank/Account prefixes, `|` for OR),
+  `category:Food` (start-anchored path prefix; a leading `/` matches after any
+  `/`, e.g. `category:/Groceries`; `|` for OR), `sort:category,-amount` (ORDER
+  BY; columns: `date`, `description`, `amount`, `balance`, `account`, `bank`,
+  `category`; last `sort:` wins; uncategorised rows sort last for `category`).
+  Bare words are FTS5 full-text search (`coffee OR tea`, `"exact phrase"`,
+  `coff*`); `/pattern/i` is regex. End with `~` to switch to fuzzy mode keeping
+  the DB filters.
 - **Negation (`-`)**: a leading `-` at a word boundary excludes matches —
   `-coffee` / `-"asdf"` (FTS), `-category:Food` (keeps uncategorised rows),
   `-account:ING`, `-amount:>100`, `-/regex/`. A lone `-`, or a `-` inside a
-  value (`amount:-50`), is literal. `-sort:...` is invalid. Ignored on
-  Transfers searches.
+  value (`amount:-50`), is literal. `-sort:...` is invalid. Ignored on Transfers
+  searches.
 - **Fuzzy search (`~`)** is in-memory nucleo scoring over the loaded rows.
 - On the Categories tab, **DB search (`/`)** is not SQL-backed: it is an
   in-memory, case-insensitive boundary-prefix filter over the category path
@@ -568,9 +602,9 @@ Full reference: the `src/search/mod.rs` doc comment (canonical).
 
 All read methods take a `ParsedQuery` plus an optional `limit`. Build a query
 with `search::parse(&config, input, cursor).0`, or pass `ParsedQuery::empty()`
-for "no filters". Read queries run against `transactions_view`; the column
-lists come from `tx_cols(alias)` / `enrichment_cols(alias)` / `TRANSFER_COLS`,
-whose order must match the `parse_*_at_offset` row parsers.
+for "no filters". Read queries run against `transactions_view`; the column lists
+come from `tx_cols(alias)` / `enrichment_cols(alias)` / `TRANSFER_COLS`, whose
+order must match the `parse_*_at_offset` row parsers.
 
 ```rust
 // Querying (all take &ParsedQuery + Option<usize> limit)
@@ -602,35 +636,37 @@ store.delete_account(id) -> usize                         // removes folder, sof
 
 ## Import Sources
 
-An account folder under `exports/` is fed by either (or both) of two
-mechanisms, both discovered and run by `refresh()` in `src/store/import.rs`
+An account folder under `exports/` is fed by either (or both) of two mechanisms,
+both discovered and run by `refresh()` in `src/store/import.rs`
 (`import_account_transactions`). Both emit the same JSON; dedup is by
 `(account_id, hash)`, so re-runs are idempotent.
 
 ### CSV-drop (`import` script)
 
-`import` receives a CSV path as its argument and outputs a JSON array on
-stdout. Each CSV is content-hashed and skipped once imported
-(`imported_files`). Account-level scripts override bank-level.
+`import` receives a CSV path as its argument and outputs a JSON array on stdout.
+Each CSV is content-hashed and skipped once imported (`imported_files`).
+Account-level scripts override bank-level.
 
 ```json
-[{
-  "date": "2025-01-15",
-  "description": "Payment",
-  "amount_cents": -15000,
-  "balance_cents": 123456,
-  "hash": "optional",
-  "metadata": {}
-}]
+[
+  {
+    "date": "2025-01-15",
+    "description": "Payment",
+    "amount_cents": -15000,
+    "balance_cents": 123456,
+    "hash": "optional",
+    "metadata": {}
+  }
+]
 ```
 
 ### API-pull (`pull` script)
 
 `pull` takes **no argument** and outputs the same JSON array on stdout. It runs
-with the account folder as its working directory, so it owns its own
-incremental state. There is no file-hash skip — overlap is expected and deduped
-by `hash`, so pulls should set a stable `hash` (e.g. the source row's id).
-Account-level overrides bank-level (`find_pull_script` / `run_pull_script` in
+with the account folder as its working directory, so it owns its own incremental
+state. There is no file-hash skip — overlap is expected and deduped by `hash`,
+so pulls should set a stable `hash` (e.g. the source row's id). Account-level
+overrides bank-level (`find_pull_script` / `run_pull_script` in
 `src/import.rs`).
 
 **PocketSmith** is wired up via `tools/pocketsmith-pull` (generic, checked-in,
@@ -640,8 +676,8 @@ no account data — safe to publish; needs `POCKETSMITH_KEY`):
   `exports/<Bank>/<Account>/` folders, each with a generated `pull` shim that
   calls `pocketsmith-pull account <id>`. Folders can be freely renamed
   afterwards: the shim keys off the account id, not the folder name, and
-  re-running `sync` skips any account whose id already has a shim anywhere
-  under `exports/` (so renames survive a re-sync).
+  re-running `sync` skips any account whose id already has a shim anywhere under
+  `exports/` (so renames survive a re-sync).
 - `pull account <id>` — fetches transactions, emits Tally JSON, and appends a
   `<timestamp>\t<from>\t<to>\t<count>` line to `pull.log`. The next pull reads
   the last `to` date and re-fetches from `to − 14 days` (overlap for
@@ -652,6 +688,7 @@ no account data — safe to publish; needs `POCKETSMITH_KEY`):
 ## Planned Features
 
 ### Agent-facing CLI (implemented)
+
 Category/transaction management for AI agents is exposed as `tally` subcommands
 (`categories list|rename|merge|delete`, `transactions list`, `categorise`) with
 `--json`/`--csv` output — see Commands above. A vault-scoped skill at
@@ -660,8 +697,10 @@ replaces an MCP server for local, single-agent use: the skill adds ~no standing
 context until invoked, and the binary is callable from any shell.
 
 ### MCP Server (deferred)
+
 An MCP server is only worth building if the vault needs to be driven by
 non-Claude-Code MCP clients, or wants strongly-typed tool contracts:
+
 - Transaction categorization suggestions
 - Transfer detection
 - Rule creation assistance

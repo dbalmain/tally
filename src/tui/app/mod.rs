@@ -21,6 +21,8 @@ pub use search::TabSearchState;
 pub use tabs::{Tab, TabKey, TabLists, TodoSubTab};
 
 use std::collections::HashMap;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use tui_input::Input;
 
@@ -200,12 +202,13 @@ pub struct App {
     // Confirmation popup state
     pub confirm_message: Option<String>,
     pub confirm_action: Option<ConfirmAction>,
-    // Local classification run: `classify_requested` is set on keypress so the
-    // event loop can draw the `classifying` loading modal before the blocking
-    // run; `classify_report` holds the summary modal shown when it finishes.
+    // Local classification run: it happens on a background thread with its
+    // own store connection; `classify_rx` carries the result back to the
+    // event loop (`poll_classification`), which surfaces it as a toast.
     pub classifying: bool,
-    pub classify_requested: bool,
-    pub classify_report: Option<crate::classify::ClassifyReport>,
+    classify_rx: Option<Receiver<Result<crate::classify::ClassifyReport>>>,
+    // Transient tab-bar status message + its expiry instant.
+    status: Option<(String, Instant)>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
     search_options: SearchOptions,
@@ -308,8 +311,8 @@ impl App {
             confirm_message: None,
             confirm_action: None,
             classifying: false,
-            classify_requested: false,
-            classify_report: None,
+            classify_rx: None,
+            status: None,
             tab_search_state: HashMap::new(),
             search_options,
         };
@@ -317,6 +320,24 @@ impl App {
         app.rebuild_category_counts();
         app.rebuild_account_counts();
         Ok(app)
+    }
+
+    /// How long a transient status message stays on screen.
+    const STATUS_DURATION: Duration = Duration::from_secs(5);
+
+    /// Show a transient message in the tab bar's right-aligned status area
+    /// for [`Self::STATUS_DURATION`]. It never captures input; it just
+    /// disappears on a later redraw.
+    pub fn show_status(&mut self, message: String) {
+        self.status = Some((message, Instant::now() + Self::STATUS_DURATION));
+    }
+
+    /// The status message to display, if one is active and hasn't expired.
+    pub fn active_status(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .filter(|(_, expires_at)| Instant::now() < *expires_at)
+            .map(|(message, _)| message.as_str())
     }
 
     /// Run a store load whose failure shouldn't tear down the UI: on error,

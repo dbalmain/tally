@@ -176,27 +176,16 @@ fn run_app(
             }
         }
 
-        terminal.draw(|f| ui::draw(f, app))?;
+        // Collect a finished background classification (result lands as a
+        // toast; the redraw cadence below also expires toasts).
+        app.poll_classification();
 
-        // The draw above shows the loading modal (`classifying` is set); run the
-        // blocking pipeline now, then loop to draw the result modal.
-        if app.classify_requested {
-            app.classify_requested = false;
-            app.run_classification();
-            continue;
-        }
+        terminal.draw(|f| ui::draw(f, app))?;
 
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
         {
             if key.kind != KeyEventKind::Press {
-                continue;
-            }
-
-            if app.classify_report.is_some() {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-                    app.dismiss_classify_report();
-                }
                 continue;
             }
 
