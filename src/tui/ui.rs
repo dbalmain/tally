@@ -71,6 +71,28 @@ fn row_bg(selected: bool) -> Color {
     }
 }
 
+/// Base style for a table row: the selection background plus bold, so the
+/// highlighted row's text pops against the background instead of washing out.
+fn row_style(selected: bool) -> Style {
+    let style = Style::default().bg(row_bg(selected));
+    if selected {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+/// Colour for dimmed contextual text (accounts, queries, counts): DarkGray
+/// normally, lifted to Gray on the selected row, where DarkGray would vanish
+/// against the DarkGray selection background.
+fn dim_fg(selected: bool) -> Color {
+    if selected {
+        Color::Gray
+    } else {
+        Color::DarkGray
+    }
+}
+
 fn bank_account(app: &App, bank_id: i64, account_id: i64, separator: &str) -> String {
     format!(
         "{}{}{}",
@@ -492,7 +514,6 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
         })
         .render(f, area, |i, twt| {
             let is_selected = i == app.selected_index;
-            let bg = row_bg(is_selected);
 
             let from = &twt.from_transaction;
             let to = &twt.to_transaction;
@@ -507,7 +528,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(Line::from(format_cents(to.amount_cents)).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Green)),
             ])
-            .style(Style::default().bg(bg))
+            .style(row_style(is_selected))
         });
 }
 
@@ -578,66 +599,111 @@ enum TxColumn {
     Balance,
 }
 
+/// Widest visible value, in columns, for each content-sized column.
+#[derive(Debug, Clone, Copy, Default)]
+struct ColumnNeeds {
+    description: u16,
+    category: u16,
+    account: u16,
+}
+
 /// Decide which transaction columns fit into `width` and how wide each is.
 ///
-/// Columns are included greedily in priority order (Date, Description, Amount,
-/// Category, Account, Balance), each at a minimum width; the first that does
-/// not fit hides itself and every lower-priority column. Leftover width then
-/// grows Category and Account up to a comfortable cap, and Description takes
-/// whatever remains. The result is returned in display order. When
-/// `include_category` is false the Category column is dropped entirely (the
-/// side panel on the Categories tab already knows the category).
-fn plan_transaction_columns(width: u16, include_category: bool) -> Vec<(TxColumn, u16)> {
+/// With room to spare, every content-sized column (`needs` carries the widest
+/// visible value of each) shows in full and Description absorbs the rest. As
+/// width runs short, space is reclaimed in this order: Account and Category
+/// shrink to their floors (20 and 24), then Description shrinks to its floor
+/// (50), then whole columns drop — Balance, then Account, then Category — and
+/// only once those are gone may Description shrink further (to 20) before
+/// Amount and Description themselves drop. Spare width flows back in the
+/// opposite order: Description grows to its content first, then Category and
+/// Account, and any remainder pads Description. The result is in display
+/// order. When `include_category` is false the Category column is dropped
+/// entirely (the side panel on the Categories tab already knows the category).
+fn plan_transaction_columns(
+    width: u16,
+    include_category: bool,
+    needs: ColumnNeeds,
+) -> Vec<(TxColumn, u16)> {
     use TxColumn::*;
 
-    // (column, minimum width) in priority order, highest priority first.
-    let priority: Vec<(TxColumn, u16)> = [
-        (Date, 10u16),
-        (Description, 20),
-        (Amount, 12),
-        (Category, 10),
-        (Account, 10),
-        (Balance, 12),
-    ]
-    .into_iter()
-    .filter(|(col, _)| include_category || *col != Category)
-    .collect();
+    const DATE_WIDTH: u16 = 10;
+    const AMOUNT_WIDTH: u16 = 12;
+    const BALANCE_WIDTH: u16 = 12;
+    // Truncation floors: how narrow a column may get before the layout starts
+    // dropping columns instead.
+    const ACCOUNT_FLOOR: u16 = 20;
+    const CATEGORY_FLOOR: u16 = 24;
+    const DESCRIPTION_FLOOR: u16 = 50;
+    // Hard minimum once every column droppable ahead of Description is gone.
+    const DESCRIPTION_MIN: u16 = 20;
 
-    let mut included: Vec<(TxColumn, u16)> = Vec::new();
-    let mut used = 0u16;
-    for (col, min) in priority {
-        let need = if included.is_empty() {
-            min
-        } else {
-            min + COLUMN_SPACING
-        };
-        if used + need <= width {
-            used += need;
-            included.push((col, min));
-        } else {
-            break;
-        }
-    }
-
-    // Grow the truncatable columns up to a cap, then give the rest to the
-    // description (the elastic, highest-priority text column).
-    let mut leftover = width.saturating_sub(used);
-    for (col, cap) in [(Category, 24u16), (Account, 20u16)] {
-        if let Some(entry) = included.iter_mut().find(|(c, _)| *c == col) {
-            let grow = cap.saturating_sub(entry.1).min(leftover);
-            entry.1 += grow;
-            leftover -= grow;
-        }
-    }
-    if let Some(entry) = included.iter_mut().find(|(c, _)| *c == Description) {
-        entry.1 += leftover;
-    }
-
-    let display = [Date, Description, Account, Category, Amount, Balance];
-    display
+    // Candidate column sets in display order, widest first; each next set
+    // drops one more column (Balance, then Account, then Category, then
+    // Amount), with Date alone as the last resort.
+    let mut candidates: Vec<Vec<TxColumn>> = Vec::new();
+    let mut current: Vec<TxColumn> = [Date, Description, Account, Category, Amount, Balance]
         .into_iter()
-        .filter_map(|col| included.iter().find(|(c, _)| *c == col).copied())
-        .collect()
+        .filter(|col| include_category || *col != Category)
+        .collect();
+    candidates.push(current.clone());
+    for dropped in [Balance, Account, Category, Amount] {
+        if let Some(pos) = current.iter().position(|col| *col == dropped) {
+            current.remove(pos);
+            candidates.push(current.clone());
+        }
+    }
+    candidates.push(vec![Date]);
+
+    for cols in candidates {
+        // Description holds its floor while a droppable column remains; those
+        // drop before it shrinks further.
+        let description_lo = if cols
+            .iter()
+            .any(|c| matches!(c, Account | Category | Balance))
+        {
+            needs.description.clamp(DESCRIPTION_MIN, DESCRIPTION_FLOOR)
+        } else {
+            DESCRIPTION_MIN
+        };
+        let lo = |col: TxColumn| match col {
+            Date => DATE_WIDTH,
+            Description => description_lo,
+            Account => needs.account.min(ACCOUNT_FLOOR),
+            Category => needs.category.min(CATEGORY_FLOOR),
+            Amount => AMOUNT_WIDTH,
+            Balance => BALANCE_WIDTH,
+        };
+
+        let spacing = COLUMN_SPACING * (cols.len() as u16 - 1);
+        let floor_total = cols.iter().map(|&col| lo(col)).sum::<u16>() + spacing;
+        if floor_total > width {
+            continue;
+        }
+
+        // This set fits at its floors: grow the content columns back toward
+        // their full content, the description (the column the eye reads)
+        // first, and let any remainder pad the description.
+        let mut planned: Vec<(TxColumn, u16)> = cols.iter().map(|&col| (col, lo(col))).collect();
+        let mut leftover = width - floor_total;
+        for (col, need) in [
+            (Description, needs.description),
+            (Category, needs.category),
+            (Account, needs.account),
+        ] {
+            if let Some(entry) = planned.iter_mut().find(|(c, _)| *c == col) {
+                let grow = need.saturating_sub(entry.1).min(leftover);
+                entry.1 += grow;
+                leftover -= grow;
+            }
+        }
+        if let Some(entry) = planned.iter_mut().find(|(c, _)| *c == Description) {
+            entry.1 += leftover;
+        }
+        return planned;
+    }
+
+    Vec::new()
 }
 
 fn draw_transaction_table(
@@ -649,7 +715,32 @@ fn draw_transaction_table(
     focused: bool,
     include_category: bool,
 ) {
-    let cols = plan_transaction_columns(area.width, include_category);
+    // Measure the widest visible values so the content-sized columns truncate
+    // only when the width genuinely runs out.
+    let needs = ColumnNeeds {
+        description: transactions
+            .iter()
+            .map(|tx| tx.description.chars().count() as u16)
+            .max()
+            .unwrap_or(0),
+        category: if include_category {
+            transactions
+                .iter()
+                .filter_map(|tx| category_cell_text(app, tx, usize::MAX))
+                .map(|(text, _)| text.chars().count() as u16)
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        account: transactions
+            .iter()
+            .map(|tx| compact_account_label(app, tx).chars().count() as u16)
+            .max()
+            .unwrap_or(0),
+    };
+
+    let cols = plan_transaction_columns(area.width, include_category, needs);
     let constraints: Vec<Constraint> = cols.iter().map(|&(_, w)| Constraint::Length(w)).collect();
 
     // When "view details" (`v`) is on, prebuild the wrapped two-column detail
@@ -680,12 +771,12 @@ fn draw_transaction_table(
         let is_disabled =
             app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
 
-        let bg = if is_pending {
-            Color::Blue
+        let base_style = if is_pending {
+            Style::default().bg(Color::Blue)
         } else if is_selected && app.input_mode == InputMode::TransferPending {
-            Color::Green
+            Style::default().bg(Color::Green)
         } else {
-            row_bg(is_selected)
+            row_style(is_selected)
         };
 
         let fg = if is_disabled {
@@ -716,7 +807,7 @@ fn draw_transaction_table(
                         // The account is contextual, so dim it whether or not
                         // the row is disabled.
                         Cell::from(fit_path(&account, w))
-                            .style(Style::default().fg(Color::DarkGray))
+                            .style(Style::default().fg(dim_fg(is_selected)))
                     }
                     TxColumn::Category => match category_cell_text(app, tx, w) {
                         Some((text, color)) => {
@@ -737,7 +828,7 @@ fn draw_transaction_table(
             })
             .collect::<Vec<_>>();
 
-        Row::new(cells).style(Style::default().bg(bg))
+        Row::new(cells).style(base_style)
     });
 }
 
@@ -968,7 +1059,6 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
     })
     .render(f, area, |i, review| {
         let is_selected = i == app.selected_index;
-        let bg = row_bg(is_selected);
 
         let tx = &review.transaction;
         let category_path = review
@@ -991,7 +1081,7 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
             Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
             Cell::from(confidence).style(Style::default().fg(Color::Cyan)),
         ])
-        .style(Style::default().bg(bg))
+        .style(row_style(is_selected))
     });
 }
 
@@ -1008,7 +1098,7 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
             draw_pending_transfer_details(f, app, transfer, area);
         })
         .render(f, area, |i, transfer| {
-            let bg = row_bg(i == app.selected_index);
+            let is_selected = i == app.selected_index;
 
             let from = app.get_cached_transaction(transfer.from_transaction_id);
             let to = app.get_cached_transaction(transfer.to_transaction_id);
@@ -1038,7 +1128,7 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(Line::from(confidence).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Cyan)),
             ])
-            .style(Style::default().bg(bg))
+            .style(row_style(is_selected))
         });
 }
 
@@ -1108,21 +1198,15 @@ fn draw_categories_list(f: &mut Frame, app: &App, area: Rect) {
     )
     .render(f, area, |i, cat| {
         let is_selected = i == app.selected_index;
-        let bg = row_bg(is_selected);
-        let count_fg = if is_selected {
-            Color::Gray
-        } else {
-            Color::DarkGray
-        };
 
         let tx_count = app.category_transaction_count(cat.id);
 
         Row::new(vec![
             Cell::from(Line::from(format!("{}", tx_count)).alignment(Alignment::Right))
-                .style(Style::default().fg(count_fg)),
+                .style(Style::default().fg(dim_fg(is_selected))),
             Cell::from(cat.path.as_str()).style(Style::default().fg(Color::Yellow)),
         ])
-        .style(Style::default().bg(bg))
+        .style(row_style(is_selected))
     });
 }
 
@@ -1183,21 +1267,15 @@ fn draw_accounts_list(f: &mut Frame, app: &App, area: Rect) {
     )
     .render(f, area, |i, account| {
         let is_selected = i == app.selected_index;
-        let bg = row_bg(is_selected);
-        let count_fg = if is_selected {
-            Color::Gray
-        } else {
-            Color::DarkGray
-        };
 
         let tx_count = app.account_transaction_count(account.id);
 
         Row::new(vec![
             Cell::from(Line::from(format!("{}", tx_count)).alignment(Alignment::Right))
-                .style(Style::default().fg(count_fg)),
+                .style(Style::default().fg(dim_fg(is_selected))),
             Cell::from(fit_path(&account.path, path_width)),
         ])
-        .style(Style::default().bg(bg))
+        .style(row_style(is_selected))
     });
 }
 
@@ -1210,13 +1288,13 @@ fn draw_filters(f: &mut Frame, app: &App, area: Rect) {
     }
 
     ScrollTable::new(&filters, app.selected_index, &FILTER_COLS).render(f, area, |i, filter| {
-        let bg = row_bg(i == app.selected_index);
+        let is_selected = i == app.selected_index;
 
         let category = filter
             .category_id
             .and_then(|id| app.category_path(id))
             .map(|path| Cell::from(path.to_string()).style(Style::default().fg(Color::Yellow)))
-            .unwrap_or_else(dim_dash_cell);
+            .unwrap_or_else(|| dim_dash_cell(is_selected));
 
         let override_mode = if filter.category_id.is_some() {
             let label = match filter.override_mode {
@@ -1226,32 +1304,32 @@ fn draw_filters(f: &mut Frame, app: &App, area: Rect) {
             };
             Cell::from(label).style(Style::default().fg(Color::Cyan))
         } else {
-            dim_dash_cell()
+            dim_dash_cell(is_selected)
         };
 
         let review = if filter.category_id.is_some() {
             if filter.review_required {
                 Cell::from("review").style(Style::default().fg(Color::Yellow))
             } else {
-                Cell::from("auto").style(Style::default().fg(Color::DarkGray))
+                Cell::from("auto").style(Style::default().fg(dim_fg(is_selected)))
             }
         } else {
-            dim_dash_cell()
+            dim_dash_cell(is_selected)
         };
 
         Row::new(vec![
             Cell::from(filter.name.as_str()),
-            Cell::from(filter.query.as_str()).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(filter.query.as_str()).style(Style::default().fg(dim_fg(is_selected))),
             category,
             override_mode,
             review,
         ])
-        .style(Style::default().bg(bg))
+        .style(row_style(is_selected))
     });
 }
 
-fn dim_dash_cell() -> Cell<'static> {
-    Cell::from("—").style(Style::default().fg(Color::DarkGray))
+fn dim_dash_cell(selected: bool) -> Cell<'static> {
+    Cell::from("—").style(Style::default().fg(dim_fg(selected)))
 }
 
 fn draw_keybind_popup(f: &mut Frame, app: &App) {
@@ -1369,7 +1447,7 @@ fn draw_category_popup(f: &mut Frame, app: &App) {
                 // The synthetic "what you typed" entry: a new category.
                 Line::from(vec![
                     Span::styled(&cat.path, Style::default().fg(Color::Green).bg(bg)),
-                    Span::styled(" (new)", Style::default().fg(Color::DarkGray).bg(bg)),
+                    Span::styled(" (new)", Style::default().fg(dim_fg(selected)).bg(bg)),
                 ])
             } else {
                 let fg = if selected { Color::White } else { Color::Gray };
@@ -1416,12 +1494,12 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
         ],
     )
     .render(f, body, |i, row| {
-        let bg = row_bg(i == state.cursor);
+        let is_cursor = i == state.cursor;
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
         let checkbox_color = if row.selected {
             Color::Green
         } else {
-            Color::DarkGray
+            dim_fg(is_cursor)
         };
 
         Row::new(vec![
@@ -1433,7 +1511,7 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
             Cell::from(format_confidence_percent(f64::from(row.score)))
                 .style(Style::default().fg(Color::Cyan)),
         ])
-        .style(Style::default().bg(bg))
+        .style(row_style(is_cursor))
     });
 }
 
@@ -1457,17 +1535,17 @@ fn draw_apply_filters_popup(f: &mut Frame, app: &App) {
 
     let selected = app.apply_filters_preview_scroll();
     ScrollTable::new(rows, selected, &APPLY_FILTERS_COLS).render(f, body, |i, tx| {
-        let bg = row_bg(i == selected);
+        let is_selected = i == selected;
         let account = account_label(app, tx);
 
         Row::new(vec![
             Cell::from(tx.date.to_string()),
             Cell::from(tx.description.as_str()),
-            Cell::from(account).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(account).style(Style::default().fg(dim_fg(is_selected))),
             Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
                 .style(Style::default().fg(amount_color(tx.amount_cents))),
         ])
-        .style(Style::default().bg(bg))
+        .style(row_style(is_selected))
     });
 }
 
@@ -1816,6 +1894,19 @@ mod tests {
     }
 
     #[test]
+    fn row_style_bolds_only_the_selected_row() {
+        assert!(row_style(true).add_modifier.contains(Modifier::BOLD));
+        assert!(!row_style(false).add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn dim_fg_lifts_dimmed_text_on_the_selected_row() {
+        // DarkGray text would vanish on the DarkGray selection background.
+        assert_eq!(dim_fg(true), Color::Gray);
+        assert_eq!(dim_fg(false), Color::DarkGray);
+    }
+
+    #[test]
     fn center_clamps_to_screen_and_centers() {
         let screen = Rect::new(10, 20, 100, 40);
         assert_eq!(center(50, 10, screen), Rect::new(35, 35, 50, 10));
@@ -1878,10 +1969,21 @@ mod tests {
         assert_eq!(wrap_text("", 10), vec![""]);
     }
 
+    /// Widths of the planned columns keyed by column, for assertions.
+    fn width_of(cols: &[(TxColumn, u16)], col: TxColumn) -> Option<u16> {
+        cols.iter().find(|&&(c, _)| c == col).map(|&(_, w)| w)
+    }
+
     #[test]
-    fn plan_columns_hides_lowest_priority_first() {
-        // Wide enough for everything: all six, in display order.
-        let cols: Vec<_> = plan_transaction_columns(120, true)
+    fn plan_columns_drops_columns_rather_than_squeeze_description() {
+        let needs = ColumnNeeds {
+            description: 60,
+            category: 24,
+            account: 20,
+        };
+
+        // The full set at its floors needs 10+50+20+24+12+12 + 5 spacing = 133.
+        let cols: Vec<_> = plan_transaction_columns(140, true, needs)
             .into_iter()
             .map(|(c, _)| c)
             .collect();
@@ -1897,17 +1999,30 @@ mod tests {
             ]
         );
 
-        // Balance is the lowest priority, so it is the first to be dropped.
-        let cols: Vec<_> = plan_transaction_columns(70, true)
-            .into_iter()
-            .map(|(c, _)| c)
-            .collect();
-        assert!(!cols.contains(&TxColumn::Balance));
-        assert!(cols.contains(&TxColumn::Account));
+        // One short of the full set's floor total: Balance drops rather than
+        // Description shrinking below its 50-column floor.
+        let cols = plan_transaction_columns(132, true, needs);
+        assert!(width_of(&cols, TxColumn::Balance).is_none());
+        assert!(width_of(&cols, TxColumn::Description).unwrap() >= 50);
 
-        // Very narrow: only Date and Description survive (Description is second
-        // priority), and Amount/Category/Account/Balance are all gone.
-        let cols: Vec<_> = plan_transaction_columns(31, true)
+        // Narrower still: Account goes next, then Category — Description holds
+        // its floor throughout.
+        let cols = plan_transaction_columns(110, true, needs);
+        assert!(width_of(&cols, TxColumn::Account).is_none());
+        assert!(width_of(&cols, TxColumn::Category).is_some());
+        assert!(width_of(&cols, TxColumn::Description).unwrap() >= 50);
+
+        // Once only Date/Description/Amount remain, Description may shrink
+        // below 50 (down to 20) before anything else gives way.
+        let cols = plan_transaction_columns(60, true, needs);
+        assert_eq!(
+            cols.iter().map(|&(c, _)| c).collect::<Vec<_>>(),
+            vec![TxColumn::Date, TxColumn::Description, TxColumn::Amount]
+        );
+        assert_eq!(width_of(&cols, TxColumn::Description), Some(36));
+
+        // Very narrow: only Date and Description survive.
+        let cols: Vec<_> = plan_transaction_columns(31, true, needs)
             .into_iter()
             .map(|(c, _)| c)
             .collect();
@@ -1915,10 +2030,61 @@ mod tests {
     }
 
     #[test]
+    fn plan_columns_sizes_category_and_account_to_content() {
+        // Plenty of width: Category and Account grow to exactly their widest
+        // value on screen (not a fixed cap), and Description absorbs the rest.
+        let needs = ColumnNeeds {
+            description: 50,
+            category: 37,
+            account: 29,
+        };
+        let cols = plan_transaction_columns(200, true, needs);
+        assert_eq!(width_of(&cols, TxColumn::Category), Some(37));
+        assert_eq!(width_of(&cols, TxColumn::Account), Some(29));
+
+        // Content narrower than the floor keeps the column at its content.
+        let needs = ColumnNeeds {
+            description: 50,
+            category: 4,
+            account: 4,
+        };
+        let cols = plan_transaction_columns(200, true, needs);
+        assert_eq!(width_of(&cols, TxColumn::Account), Some(4));
+        assert_eq!(width_of(&cols, TxColumn::Category), Some(4));
+    }
+
+    #[test]
+    fn plan_columns_grows_description_before_category_and_account() {
+        // 7 columns of slack over the floor total (133): all of it goes to the
+        // Description, while Category and Account stay at their floors.
+        let needs = ColumnNeeds {
+            description: 80,
+            category: 37,
+            account: 29,
+        };
+        let cols = plan_transaction_columns(140, true, needs);
+        assert_eq!(width_of(&cols, TxColumn::Description), Some(57));
+        assert_eq!(width_of(&cols, TxColumn::Category), Some(24));
+        assert_eq!(width_of(&cols, TxColumn::Account), Some(20));
+
+        // With the description content fully shown, further slack grows
+        // Category (then Account) toward their content.
+        let cols = plan_transaction_columns(170, true, needs);
+        assert_eq!(width_of(&cols, TxColumn::Description), Some(80));
+        assert_eq!(width_of(&cols, TxColumn::Category), Some(31));
+        assert_eq!(width_of(&cols, TxColumn::Account), Some(20));
+    }
+
+    #[test]
     fn plan_columns_excludes_category_when_requested() {
         // With the Category column suppressed it never appears, but the rest of
         // the layout is unaffected (Account still shows at a wide width).
-        let cols: Vec<_> = plan_transaction_columns(120, false)
+        let needs = ColumnNeeds {
+            description: 60,
+            category: 0,
+            account: 20,
+        };
+        let cols: Vec<_> = plan_transaction_columns(140, false, needs)
             .into_iter()
             .map(|(c, _)| c)
             .collect();
@@ -1936,8 +2102,13 @@ mod tests {
 
     #[test]
     fn plan_columns_widths_fit_within_area() {
-        for width in [10u16, 31, 44, 55, 66, 79, 100, 200] {
-            let cols = plan_transaction_columns(width, true);
+        let needs = ColumnNeeds {
+            description: 60,
+            category: 24,
+            account: 20,
+        };
+        for width in [10u16, 31, 44, 55, 66, 79, 100, 133, 200] {
+            let cols = plan_transaction_columns(width, true, needs);
             if cols.is_empty() {
                 continue;
             }
