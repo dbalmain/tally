@@ -27,16 +27,17 @@
 //! - `amount:100` — precision-aware: any $100-something ($100.00–$100.99);
 //!   `amount:7.5` — any $7.5x; `amount:7.50` — exactly $7.50 (two decimals =
 //!   exact cents). Matches either sign.
-//! - `amount:>100` / `amount:<100` — cent-exact comparison;
+//! - `amount:>100` / `amount:<100` — cent-exact comparison, always signed
+//!   (an ordering on the number line: `>100` never matches a -$101 debit;
+//!   `amount:>0` — credits, `amount:<0` — debits);
 //!   `amount:50..200` — range with cent-exact endpoints
-//! - Signed matching: an explicit `+`/`-` on any value matches
-//!   `amount_cents` directly instead of its absolute value —
-//!   `amount:-100..-50` (debits only), `amount:>-5`, `amount:-7` (any
-//!   $7-something debit), `amount:-7.50` (exactly -$7.50). A zero endpoint in
-//!   a range or comparison is also signed (it is degenerate under ABS):
-//!   `amount:0..` / `amount:>0` — credits; `amount:..0` / `amount:<0` —
-//!   debits. A bare exact `amount:0` keeps its ABS bucket (under $1, either
-//!   sign).
+//! - Signed matching: exact matches and ranges match the absolute value by
+//!   default (either sign); an explicit `+`/`-` on any value matches
+//!   `amount_cents` directly instead — `amount:-100..-50` (debits only),
+//!   `amount:-7` (any $7-something debit), `amount:-7.50` (exactly -$7.50).
+//!   A zero range endpoint is also signed (it is degenerate under ABS):
+//!   `amount:0..` — credits; `amount:..0` — debits. A bare exact `amount:0`
+//!   keeps its ABS bucket (under $1, either sign).
 //! - `account:St` — bank prefix; `account:ING/` — all accounts in a bank;
 //!   `account:ING/Orange` — bank + account prefix; `account:/Savings` — any
 //!   bank, account prefix; `account:"ING/Orange"|"St George/Sav"` — OR

@@ -6,16 +6,20 @@ use crate::search::{Filter, FilterResult, placeholders as ph};
 
 /// Filter for amount ranges.
 ///
-/// Amounts are entered in dollars but stored as cents. By default matching is
-/// on the absolute value, so the same query catches both debits and credits of
-/// that magnitude.
+/// Amounts are entered in dollars but stored as cents. For exact matches and
+/// ranges, matching is on the absolute value by default, so the same query
+/// catches both debits and credits of that magnitude.
 ///
-/// Matching switches from ABS to *signed* (`{amount_cents}` directly) when
-/// either:
+/// Comparisons (`>`/`<`) are always *signed* (`{amount_cents}` directly):
+/// they express an ordering on the number line, so `>100` means "greater than
+/// $100", never "greater in magnitude" — `-101` must not match. Use a range
+/// (`100..`, `..100`) for a magnitude query.
+///
+/// Exact matches and ranges switch from ABS to signed when either:
 /// - any value carries an explicit `+` or `-` sign, or
-/// - (ranges and comparisons only) an endpoint is zero — zero endpoints are
-///   meaningless under ABS (`ABS(x) >= 0` matches everything), so they are
-///   reinterpreted as signed rather than degenerate.
+/// - (ranges only) an endpoint is zero — zero endpoints are meaningless under
+///   ABS (`ABS(x) >= 0` matches everything), so they are reinterpreted as
+///   signed rather than degenerate.
 ///
 /// Exact-match queries are *precision-aware*: the granularity of the input
 /// determines the granularity of the match. Typing `7` is a query for "any
@@ -31,11 +35,11 @@ use crate::search::{Filter, FilterResult, placeholders as ph};
 /// - `7` → any amount in `[$7.00, $8.00)` (whole-dollar precision)
 /// - `7.5` → any amount in `[$7.50, $7.60)` (10¢ precision)
 /// - `7.50` → exactly $7.50 (cent precision)
-/// - `100..500` → range $100.00 to $500.00 inclusive (endpoints exact)
-/// - `..100` → up to $100.00 inclusive
-/// - `100..` → $100.00 and above
-/// - `>100` → strictly greater than $100.00
-/// - `<100` → strictly less than $100.00
+/// - `100..500` → range $100.00 to $500.00 inclusive (endpoints exact, ABS)
+/// - `..100` → magnitude up to $100.00 inclusive
+/// - `100..` → magnitude $100.00 and above
+/// - `>100` → strictly greater than $100.00 (signed; excludes all debits)
+/// - `<100` → strictly less than $100.00 (signed; includes all debits)
 /// - `0..` / `>0` → credits (signed); `..0` / `<0` → debits (signed)
 /// - `-100..-50` → debits between -$100.00 and -$50.00 (signed)
 /// - `-7` → any $7-something debit; `-7.50` → exactly -$7.50; `>-5` →
@@ -137,13 +141,12 @@ fn amount_column(signed: bool) -> String {
 impl AmountFilter {
     fn parse_comparison(&self, value: &str, op: &str) -> FilterResult {
         match parse_signed_amount(value) {
-            Some(amount) => {
-                let column = amount_column(amount.sign != Sign::Unsigned || amount.cents == 0);
-                FilterResult::Valid {
-                    sql: format!("{column} {op} ?"),
-                    params: vec![Value::Integer(amount.cents)],
-                }
-            }
+            // Comparisons are an ordering, so they are always signed: `>100`
+            // must not match a -$101 debit.
+            Some(amount) => FilterResult::Valid {
+                sql: format!("{} {op} ?", amount_column(true)),
+                params: vec![Value::Integer(amount.cents)],
+            },
             None => FilterResult::Invalid(format!("Invalid amount: {}", value)),
         }
     }
@@ -338,25 +341,10 @@ mod tests {
     }
 
     #[test]
-    fn test_greater_than() {
-        match parse(">100") {
-            FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS({amount_cents}) > ?");
-                assert_eq!(params, vec![Value::Integer(10000)]);
-            }
-            _ => panic!("Expected Valid"),
-        }
-    }
-
-    #[test]
-    fn test_less_than() {
-        match parse("<50") {
-            FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "ABS({amount_cents}) < ?");
-                assert_eq!(params, vec![Value::Integer(5000)]);
-            }
-            _ => panic!("Expected Valid"),
-        }
+    fn test_comparisons_are_signed() {
+        // `>100` is an ordering, not a magnitude test: -$101 must not match.
+        assert_sql(">100", "{amount_cents} > ?", &[10000]);
+        assert_sql("<50", "{amount_cents} < ?", &[5000]);
     }
 
     #[test]

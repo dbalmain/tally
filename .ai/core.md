@@ -574,17 +574,18 @@ Full reference: the `src/search/mod.rs` doc comment (canonical).
 
 - **DB search (`/`)** pushes filters to SQL: `date:2024-01..2024-06`,
   `date:last-month`, `date:this-financial-year`, `date:last-3-months`,
-  `date:last-quarter..yesterday`, `amount:>100` (precision-aware for bare
-  values; matches either sign unless a `+`/`-` sign or a zero range/comparison
-  endpoint makes it signed, e.g. `amount:0..` = credits, `amount:-100..-50` =
-  debits), `account:ING/Orange` (Bank/Account prefixes, `|` for OR),
-  `category:Food` (start-anchored path prefix; a leading `/` matches after any
-  `/`, e.g. `category:/Groceries`; `|` for OR), `sort:category,-amount` (ORDER
-  BY; columns: `date`, `description`, `amount`, `balance`, `account`, `bank`,
-  `category`; last `sort:` wins; uncategorised rows sort last for `category`).
-  Bare words are FTS5 full-text search (`coffee OR tea`, `"exact phrase"`,
-  `coff*`); `/pattern/i` is regex. End with `~` to switch to fuzzy mode keeping
-  the DB filters.
+  `date:last-quarter..yesterday`, `amount:>100` (comparisons are always signed —
+  `>100` never matches a -$101 debit, `>0` = credits, `<0` = debits; bare exact
+  values and ranges are precision-aware and match either sign unless a `+`/`-`
+  sign or a zero range endpoint makes them signed, e.g. `amount:0..` = credits,
+  `amount:-100..-50` = debits), `account:ING/Orange` (Bank/Account prefixes, `|`
+  for OR), `category:Food` (start-anchored path prefix; a leading `/` matches
+  after any `/`, e.g. `category:/Groceries`; `|` for OR),
+  `sort:category,-amount` (ORDER BY; columns: `date`, `description`, `amount`,
+  `balance`, `account`, `bank`, `category`; last `sort:` wins; uncategorised
+  rows sort last for `category`). Bare words are FTS5 full-text search
+  (`coffee OR tea`, `"exact phrase"`, `coff*`); `/pattern/i` is regex. End with
+  `~` to switch to fuzzy mode keeping the DB filters.
 - **Negation (`-`)**: a leading `-` at a word boundary excludes matches —
   `-coffee` / `-"asdf"` (FTS), `-category:Food` (keeps uncategorised rows),
   `-account:ING`, `-amount:>100`, `-/regex/`. A lone `-`, or a `-` inside a

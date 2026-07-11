@@ -259,12 +259,13 @@ mod tests {
     }
 
     #[test]
-    fn query_amount_greater_than() {
+    fn query_amount_greater_than_is_signed() {
         let (_t, store) = setup_rich_fixture();
         let txs = store.query_transactions(&q("amount:>50"), None).unwrap();
-        // Anything with |amount| > $50: Grocery Store (-85), Salary (250),
-        // Transfer Out (-100), Transfer In (100) — 4 rows
-        assert_eq!(txs.len(), 4);
+        // Signed comparison: amount > $50, so debits like Grocery Store (-85)
+        // and Transfer Out (-100) don't match. Salary (250), Transfer In
+        // (100) — 2 rows
+        assert_eq!(txs.len(), 2);
     }
 
     #[test]
@@ -441,7 +442,7 @@ mod tests {
         // amount range AND date AND account — narrows to a single tx
         let (_t, store) = setup_rich_fixture();
         let txs = store
-            .query_transactions(&q("date:2024-01..2024-02 amount:>50 account:ING/"), None)
+            .query_transactions(&q("date:2024-01..2024-02 amount:50.. account:ING/"), None)
             .unwrap();
         // Jan 15 Coffee Shop ($5, too small), Feb 20 Grocery ($85, matches)
         assert_eq!(txs.len(), 1);
