@@ -209,6 +209,9 @@ pub struct App {
     classify_rx: Option<Receiver<Result<crate::classify::ClassifyReport>>>,
     // Transient tab-bar status message + its expiry instant.
     status: Option<(String, Instant)>,
+    // Import refreshes use a background store connection so the UI remains
+    // responsive while pull/import scripts run.
+    refresh_rx: Option<Receiver<Result<crate::RefreshReport>>>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
     search_options: SearchOptions,
@@ -313,6 +316,7 @@ impl App {
             classifying: false,
             classify_rx: None,
             status: None,
+            refresh_rx: None,
             tab_search_state: HashMap::new(),
             search_options,
         };
@@ -338,6 +342,63 @@ impl App {
             .as_ref()
             .filter(|(_, expires_at)| Instant::now() < *expires_at)
             .map(|(message, _)| message.as_str())
+    }
+
+    /// Start importing new bank exports on a background store connection.
+    /// This is intentionally available to the Todo → Uncategorised view,
+    /// where newly imported transactions are immediately visible.
+    pub fn request_refresh(&mut self) {
+        if self.refreshing {
+            return;
+        }
+
+        let Some(db_path) = self.store.db_path().map(std::path::Path::to_path_buf) else {
+            let result = self.store.refresh();
+            self.finish_refresh(result);
+            return;
+        };
+
+        let exports_dir = self.store.exports_dir().to_path_buf();
+        let search_options = self.search_options;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = TransactionStore::open(&db_path, &exports_dir).and_then(|mut store| {
+                store.set_search_options(search_options);
+                store.refresh()
+            });
+            let _ = tx.send(result);
+        });
+        self.refresh_rx = Some(rx);
+        self.refreshing = true;
+    }
+
+    /// Collect a finished import refresh, if any.
+    pub fn poll_refresh(&mut self) {
+        let Some(rx) = &self.refresh_rx else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.refresh_rx = None;
+                self.refreshing = false;
+                self.error_message = Some("Refresh stopped unexpectedly".to_string());
+                return;
+            }
+        };
+        self.refresh_rx = None;
+        self.finish_refresh(result);
+    }
+
+    fn finish_refresh(&mut self, result: Result<crate::RefreshReport>) {
+        self.refreshing = false;
+        self.refresh_data();
+        match result {
+            Ok(report) => self.show_status(format!(
+                "Refreshed — added: {}, skipped: {}, files: {}",
+                report.transactions_added, report.transactions_skipped, report.files_processed,
+            )),
+            Err(e) => self.error_message = Some(format!("Refresh failed: {e}")),
+        }
     }
 
     /// Run a store load whose failure shouldn't tear down the UI: on error,

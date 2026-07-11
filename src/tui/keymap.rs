@@ -74,6 +74,7 @@ pub enum Act {
     ToggleSum,
     CategoriseMatching,
     Classify,
+    Refresh,
 }
 
 #[derive(Debug)]
@@ -425,6 +426,7 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
     }
 
     if app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::Uncategorised {
+        out.push(b(&[Char('R')], "R", "refresh", true, true, Refresh));
         out.push(b(&[Char('C')], "C", "classify", true, true, Classify));
     }
 
@@ -631,6 +633,7 @@ fn run_normal(app: &mut App, act: Act) {
         Act::ToggleSum => app.toggle_sum(),
         Act::CategoriseMatching => app.start_bulk_categorise_matching(),
         Act::Classify => app.request_classify(),
+        Act::Refresh => app.request_refresh(),
     }
 }
 
@@ -991,12 +994,19 @@ mod tests {
             Act::Classify,
             Trigger::Char('C')
         ));
+        assert!(has_act_trigger(
+            &normal_binds(&app),
+            Act::Refresh,
+            Trigger::Char('R')
+        ));
 
         app.todo_subtab = TodoSubTab::AiReview;
         assert!(!has_act(&normal_binds(&app), Act::Classify));
+        assert!(!has_act(&normal_binds(&app), Act::Refresh));
 
         app.current_tab = Tab::Transactions;
         assert!(!has_act(&normal_binds(&app), Act::Classify));
+        assert!(!has_act(&normal_binds(&app), Act::Refresh));
     }
 
     #[test]

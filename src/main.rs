@@ -196,19 +196,7 @@ fn run_tui(db_path: &Path, exports_dir: &Path, search_options: SearchOptions) {
         TransactionStore::open(db_path, exports_dir).expect("Failed to open transaction store");
     store.set_search_options(search_options);
 
-    let (refresh_tx, refresh_rx) = std::sync::mpsc::channel();
-    let refresh_db_path = db_path.to_path_buf();
-    let refresh_exports_dir = exports_dir.to_path_buf();
-    std::thread::spawn(move || {
-        let result =
-            TransactionStore::open(&refresh_db_path, &refresh_exports_dir).and_then(|mut store| {
-                store.set_search_options(search_options);
-                store.refresh()
-            });
-        let _ = refresh_tx.send(result);
-    });
-
-    if let Err(e) = tally::tui::run(store, refresh_rx, search_options) {
+    if let Err(e) = tally::tui::run(store, search_options) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
     }

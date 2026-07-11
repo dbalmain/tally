@@ -19,29 +19,25 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
-use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 use tui_input::InputRequest;
 
 use crate::search::SearchOptions;
-use crate::{RefreshReport, Result, TransactionStore};
+use crate::{Result, TransactionStore};
 
 use app::InputMode;
 
 /// Launch the interactive TUI application.
-pub fn run(
-    store: TransactionStore,
-    refresh_rx: Receiver<Result<RefreshReport>>,
-    search_options: SearchOptions,
-) -> Result<()> {
+pub fn run(store: TransactionStore, search_options: SearchOptions) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new_with_refreshing_and_search_options(store, true, search_options)?;
-    let res = run_app(&mut terminal, &mut app, &refresh_rx);
+    let mut app = App::new_with_refreshing_and_search_options(store, false, search_options)?;
+    app.request_refresh();
+    let res = run_app(&mut terminal, &mut app);
 
     disable_raw_mode()?;
     execute!(
@@ -151,30 +147,13 @@ fn handle_yes_no(app: &mut App, key: &KeyEvent, on_yes: fn(&mut App), on_no: fn(
     false
 }
 
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-    refresh_rx: &Receiver<Result<RefreshReport>>,
-) -> Result<()> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         if app.should_quit {
             return Ok(());
         }
 
-        match refresh_rx.try_recv() {
-            Ok(Ok(_report)) => {
-                app.refreshing = false;
-                app.refresh_data();
-            }
-            Ok(Err(e)) => {
-                app.refreshing = false;
-                app.error_message = Some(format!("Refresh failed: {e}"));
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                app.refreshing = false;
-            }
-        }
+        app.poll_refresh();
 
         // Collect a finished background classification (result lands as a
         // toast; the redraw cadence below also expires toasts).
