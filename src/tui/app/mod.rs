@@ -745,9 +745,23 @@ impl App {
     }
 
     /// Rebuild `transactions_fts` from the transactions table (Ctrl-G).
+    ///
+    /// Skipped while a background refresh or classification holds the write
+    /// lock — those share the DB via WAL and only one writer is allowed.
     /// Surfaces DB errors via the error popup; on success reloads tab data and
     /// reports the reindexed row count on the green tab-bar status line.
     pub fn reindex_fts(&mut self) {
+        // Foreground DROP+re-insert collides with an in-flight background
+        // writer (refresh or classification). Guard like `request_refresh`.
+        if self.refreshing {
+            self.show_status("Reindex skipped — refresh in progress".to_string());
+            return;
+        }
+        if self.classifying {
+            self.show_status("Reindex skipped — classification in progress".to_string());
+            return;
+        }
+
         let mut count = 0usize;
         if self.try_mutation("reindex full-text search", |s| {
             count = s.rebuild_fts()?;
@@ -756,6 +770,13 @@ impl App {
             self.refresh_data();
             self.show_status(format!("Reindexed {count} transactions"));
         }
+    }
+
+    /// Dismiss the error popup if one is showing. Returns whether an error was
+    /// present and cleared. Callers (the Esc/Enter interceptor in `run_app`)
+    /// use the bool so the path is unit-testable without a terminal.
+    pub fn dismiss_error(&mut self) -> bool {
+        self.error_message.take().is_some()
     }
 
     // ==================== Data Loading ====================
@@ -1646,5 +1667,83 @@ mod tests {
 
         #[cfg(not(unix))]
         let _ = path;
+    }
+
+    #[test]
+    fn reindex_fts_skipped_while_refreshing() {
+        let (_temp, store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let mut app = App::new_with_refreshing(store, true).unwrap();
+
+        app.reindex_fts();
+
+        assert!(app.error_message.is_none());
+        assert_eq!(
+            app.active_status(),
+            Some("Reindex skipped — refresh in progress")
+        );
+    }
+
+    #[test]
+    fn reindex_fts_skipped_while_classifying() {
+        let (_temp, store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let mut app = App::new(store).unwrap();
+        app.classifying = true;
+
+        app.reindex_fts();
+
+        assert!(app.error_message.is_none());
+        assert_eq!(
+            app.active_status(),
+            Some("Reindex skipped — classification in progress")
+        );
+    }
+
+    #[test]
+    fn reindex_fts_rebuilds_when_idle() {
+        let (_temp, store) = store_with_transactions(&[
+            FixtureTx {
+                description: "Coffee",
+                amount_cents: -450,
+            },
+            FixtureTx {
+                description: "Rent",
+                amount_cents: -120000,
+            },
+        ]);
+        let mut app = App::new(store).unwrap();
+        assert!(!app.refreshing);
+        assert!(!app.classifying);
+
+        app.reindex_fts();
+
+        assert!(app.error_message.is_none());
+        assert_eq!(app.active_status(), Some("Reindexed 2 transactions"));
+    }
+
+    #[test]
+    fn dismiss_error_clears_message_when_present() {
+        let (_temp, store) = store_with_transactions(&[]);
+        let mut app = App::new(store).unwrap();
+        app.error_message = Some("Database is locked".to_string());
+
+        assert!(app.dismiss_error());
+        assert!(app.error_message.is_none());
+        // Second dismiss is a no-op.
+        assert!(!app.dismiss_error());
+        assert!(app.error_message.is_none());
+    }
+
+    #[test]
+    fn dismiss_error_returns_false_when_none() {
+        let (_temp, store) = store_with_transactions(&[]);
+        let mut app = App::new(store).unwrap();
+        assert!(app.error_message.is_none());
+        assert!(!app.dismiss_error());
     }
 }

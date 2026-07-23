@@ -347,6 +347,10 @@ handling and data flow stay uniform:
 - **Mutations go through `App::try_mutation`** — it surfaces DB errors via the
   error popup and returns `bool` so callers can gate `refresh_data()` on
   success. Never call a mutating store method directly and ignore the result.
+- **Error popup is dismissable with Esc/Enter** — `app.error_message` is cleared
+  by `App::dismiss_error` (also auto-cleared on a successful tab reload). The
+  `run_app` key loop intercepts Esc/Enter while an error is showing, before the
+  `?` keybind-help handler, so the popup's "Esc dismiss" hint is honoured.
 - **Mid-flight loads go through `App::load_or_show`** — same error surfacing,
   returns `T::default()` on failure.
 - **After any mutation, call `app.refresh_data()`** — reloads the current tab,
@@ -504,7 +508,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `Esc`               | Clear active search (fuzzy first, then DB)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `?`                 | Show keybind popover                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `Alt-?`             | Toggle bottom key-hint bar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `Ctrl-G`            | Reindex full-text search (rebuild `transactions_fts` from every transaction via `build_searchable_text`). Global on every tab; **hidden from the footer**, listed in the `?` keybind popover. Synchronous single-pass rebuild; result reported on the green tab-bar status line (e.g. "Reindexed 7474 transactions"). Ctrl-G (not Ctrl-I) because legacy terminals and tmux deliver Ctrl-I as the bare Tab byte                                                                                                                                  |
+| `Ctrl-G`            | Reindex full-text search (rebuild `transactions_fts` from every transaction via `build_searchable_text`). Global on every tab; **hidden from the footer**, listed in the `?` keybind popover. Synchronous single-pass rebuild; result reported on the green tab-bar status line (e.g. "Reindexed 7474 transactions"). **Skipped** (with a status toast) while a background refresh or classification is in flight, so the foreground DROP+re-insert does not collide with that writer. Ctrl-G (not Ctrl-I) because legacy terminals and tmux deliver Ctrl-I as the bare Tab byte                                          |
 
 ### Search Modes (DB and Fuzzy)
 

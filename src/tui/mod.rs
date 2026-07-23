@@ -168,6 +168,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 continue;
             }
 
+            // Error popup is modal for dismissal and takes Esc/Enter before the
+            // `?` keybind popover, so a showing error is always dismissable.
+            // Other keys fall through so the UI stays usable under the popup.
+            if app.error_message.is_some() && matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                app.dismiss_error();
+                continue;
+            }
+
             if app.keybind_help_open {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?')) {
                     app.keybind_help_open = false;
