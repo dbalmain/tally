@@ -94,15 +94,6 @@ CREATE INDEX IF NOT EXISTS idx_enrichments_category ON transaction_enrichments(c
 CREATE INDEX IF NOT EXISTS idx_enrichments_confirmed ON transaction_enrichments(category_confirmed);
 CREATE INDEX IF NOT EXISTS idx_transfers_confirmed ON transfers(confirmed);
 
--- FTS5 virtual table for full-text search on transactions
--- contentless: we don't duplicate data, just index it
--- contentless_delete=1: allows DELETE operations
-CREATE VIRTUAL TABLE IF NOT EXISTS transactions_fts USING fts5(
-    searchable_text,
-    content='',
-    contentless_delete=1
-);
-
 -- Read-side view: a transaction joined to its account and bank. All store
 -- read queries go through this view so the join (and the bank/account name
 -- columns search filters rely on) is defined in exactly one place.
@@ -123,8 +114,22 @@ JOIN accounts a ON t.account_id = a.id
 JOIN banks b ON a.bank_id = b.id;
 "#;
 
+/// DDL for the contentless FTS5 index over transactions.
+///
+/// Single definition shared by [`init_db`] and
+/// [`crate::TransactionStore::rebuild_fts`]. Contentless (`content=''`) so we
+/// do not duplicate row text; `contentless_delete=1` so rowid-targeted DELETE
+/// purges postings (required for idempotent FTS writes).
+pub(crate) const TRANSACTIONS_FTS_DDL: &str = "\
+CREATE VIRTUAL TABLE IF NOT EXISTS transactions_fts USING fts5(
+    searchable_text,
+    content='',
+    contentless_delete=1
+)";
+
 pub(crate) fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(TRANSACTIONS_FTS_DDL)?;
     register_regexp_function(conn)?;
     Ok(())
 }

@@ -744,6 +744,20 @@ impl App {
         self.show_sum = !self.show_sum;
     }
 
+    /// Rebuild `transactions_fts` from the transactions table (Ctrl-G).
+    /// Surfaces DB errors via the error popup; on success reloads tab data and
+    /// reports the reindexed row count on the green tab-bar status line.
+    pub fn reindex_fts(&mut self) {
+        let mut count = 0usize;
+        if self.try_mutation("reindex full-text search", |s| {
+            count = s.rebuild_fts()?;
+            Ok(())
+        }) {
+            self.refresh_data();
+            self.show_status(format!("Reindexed {count} transactions"));
+        }
+    }
+
     // ==================== Data Loading ====================
 
     /// Reload only the current tab's data from DB based on its search query.
