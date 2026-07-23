@@ -7,8 +7,8 @@ edition = "2024"
 chrono = { version = "0.4.43", features = ["serde"] }
 crossterm = "0.29"
 hex = "0.4.3"
-ratatui = "0.29"
-rusqlite = { version = "0.38.0", features = ["bundled", "functions"] }
+ratatui = "0.30"
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
@@ -16,7 +16,7 @@ thiserror = "2.0.18"
 toml = "1.0.3"
 nucleo-matcher = "0.3"
 regex = "1"
-tui-input = "0.11"
+tui-input = "0.15"
 log = { version = "0.4", features = ["std"] }
 tracing-appender = "0.2"
 

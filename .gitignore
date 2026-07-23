@@ -3,3 +3,8 @@ tally.db*
 exports
 classified-exports
 tally.toml
+.claude/settings.local.json
+
+# Agent scratch: offload-agent prompts and run logs (.ai/core.md stays tracked)
+.ai/PROMPT.md
+.ai/*.log
