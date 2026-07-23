@@ -284,6 +284,12 @@ maintains:
   moves `exports/{Bank}/{Account}` (creating the target bank folder, never
   merging onto an existing one); delete removes the folder and soft-deletes the
   row while retaining the account's transactions. Both are store-only.
+- `transactions_fts` rowid N always holds exactly
+  `build_searchable_text(description, metadata)` of transaction N — never
+  leftover or foreign postings. Contentless FTS5 permits multiple postings per
+  rowid and never cross-checks them against the real row, so the store maintains
+  this by DELETE-then-INSERT on every FTS write (`insert_transaction`) and by
+  the full rebuild path `store.rebuild_fts()` (never ad-hoc FTS SQL).
 
 ### Saved filters
 
@@ -327,7 +333,11 @@ timestamp) to preserve historical data.
 Schema changes require deleting `tally.db` and re-importing. This keeps the
 codebase simple for a personal tool. Views and additive cache tables are exempt:
 views are recreated on every open, and caches use `CREATE TABLE IF NOT EXISTS`
-because they do not change core stored data.
+because they do not change core stored data. The contentless `transactions_fts`
+index is self-correcting on write (DELETE-then-INSERT per rowid) and can be
+fully rebuilt at any time via `store.rebuild_fts()` / TUI `Ctrl-G` without
+deleting the vault — the FTS DDL lives in one place (`db::TRANSACTIONS_FTS_DDL`)
+shared by `init_db` and the rebuild path.
 
 ## TUI Conventions
 
@@ -494,6 +504,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `Esc`               | Clear active search (fuzzy first, then DB)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `?`                 | Show keybind popover                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `Alt-?`             | Toggle bottom key-hint bar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `Ctrl-G`            | Reindex full-text search (rebuild `transactions_fts` from every transaction via `build_searchable_text`). Global on every tab; **hidden from the footer**, listed in the `?` keybind popover. Synchronous single-pass rebuild; result reported on the green tab-bar status line (e.g. "Reindexed 7474 transactions"). Ctrl-G (not Ctrl-I) because legacy terminals and tmux deliver Ctrl-I as the bare Tab byte                                                                                                                                  |
 
 ### Search Modes (DB and Fuzzy)
 
@@ -634,6 +645,9 @@ store.list_accounts_with_bank() -> Vec<AccountWithBank>   // path = "Bank/Accoun
 store.get_account_by_path(path) -> Option<AccountWithBank>
 store.rename_account(id, "Bank/Account")                  // moves the exports folder; never merges
 store.delete_account(id) -> usize                         // removes folder, soft-deletes; returns tx count
+
+// Full-text search index
+store.rebuild_fts() -> usize                              // drop+recreate transactions_fts; returns reindexed count
 ```
 
 ## Import Sources

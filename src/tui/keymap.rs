@@ -75,6 +75,7 @@ pub enum Act {
     CategoriseMatching,
     Classify,
     Refresh,
+    ReindexFts,
 }
 
 #[derive(Debug)]
@@ -406,6 +407,19 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
             ToggleSum,
         ));
     }
+    // Global reindex: hidden from footer, listed in `?`. Ctrl-G maps to
+    // Char('g')+CONTROL in every terminal — unlike Ctrl-I/Ctrl-M/Ctrl-[, which
+    // legacy terminals deliver as the bare Tab/Enter/Esc byte — so it works
+    // without the keyboard-enhancement protocol (which tmux does not forward).
+    out.push(bh(
+        &[Ctrl('g')],
+        "Ctrl-G",
+        "reindex",
+        "reindex full-text search",
+        false,
+        true,
+        ReindexFts,
+    ));
 
     // Fuzzy search narrows the visible rows in memory, but `C` applies to the
     // whole DB-search set — so hide it while a fuzzy filter is active rather
@@ -634,6 +648,7 @@ fn run_normal(app: &mut App, act: Act) {
         Act::CategoriseMatching => app.start_bulk_categorise_matching(),
         Act::Classify => app.request_classify(),
         Act::Refresh => app.request_refresh(),
+        Act::ReindexFts => app.reindex_fts(),
     }
 }
 
@@ -1007,6 +1022,29 @@ mod tests {
         app.current_tab = Tab::Transactions;
         assert!(!has_act(&normal_binds(&app), Act::Classify));
         assert!(!has_act(&normal_binds(&app), Act::Refresh));
+    }
+
+    #[test]
+    fn reindex_fts_bind_is_global_and_footer_hidden() {
+        let mut app = app_with_rows();
+        for tab in [
+            Tab::Transactions,
+            Tab::Todo,
+            Tab::Categories,
+            Tab::Accounts,
+            Tab::Filters,
+            Tab::Transfers,
+        ] {
+            app.current_tab = tab;
+            let binds = normal_binds(&app);
+            assert!(
+                has_act_trigger(&binds, Act::ReindexFts, Trigger::Ctrl('g')),
+                "Ctrl-G reindex should be available on {tab:?}"
+            );
+            let bind = find_act(&binds, Act::ReindexFts).unwrap();
+            assert!(!bind.footer, "reindex is hidden from the footer");
+            assert!(bind.help, "reindex is listed in the ? popover");
+        }
     }
 
     #[test]

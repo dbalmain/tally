@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::db::build_searchable_text;
+use crate::db::{TRANSACTIONS_FTS_DDL, build_searchable_text};
 use crate::import::{
     compute_hash, find_csv_files, find_import_script, find_pull_script, hash_file,
     run_import_script, run_pull_script,
@@ -452,16 +452,70 @@ impl TransactionStore {
         )?;
 
         if result > 0 {
-            // Insert into FTS index
             let rowid = self.conn.last_insert_rowid();
-            let searchable_text = build_searchable_text(description, metadata);
-            self.conn.execute(
-                "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
-                params![rowid, searchable_text],
-            )?;
+            self.write_transaction_fts(rowid, description, metadata)?;
         }
 
         Ok(result > 0)
+    }
+
+    /// Replace the contentless FTS posting for `rowid` with
+    /// [`build_searchable_text`] of the given description and metadata.
+    ///
+    /// Contentless FTS5 permits multiple postings per rowid and never
+    /// cross-checks them against the real row, so every write must DELETE
+    /// first — otherwise a reused or re-imported rowid leaves phantom tokens
+    /// that produce false-positive search matches.
+    fn write_transaction_fts(
+        &self,
+        rowid: i64,
+        description: &str,
+        metadata: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<()> {
+        let searchable_text = build_searchable_text(description, metadata);
+        self.conn.execute(
+            "DELETE FROM transactions_fts WHERE rowid = ?",
+            params![rowid],
+        )?;
+        self.conn.execute(
+            "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
+            params![rowid, searchable_text],
+        )?;
+        Ok(())
+    }
+
+    /// Drop and recreate `transactions_fts`, then repopulate one posting per
+    /// transaction from [`build_searchable_text`]. Returns the number of rows
+    /// reindexed. This is the only safe full-rebuild path.
+    pub fn rebuild_fts(&self) -> Result<usize> {
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS transactions_fts;")?;
+        self.conn.execute_batch(TRANSACTIONS_FTS_DDL)?;
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, description, metadata FROM transactions")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut count = 0usize;
+        for row in rows {
+            let (id, description, metadata_json) = row?;
+            let metadata: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&metadata_json).unwrap_or_default();
+            let searchable_text = build_searchable_text(&description, &metadata);
+            self.conn.execute(
+                "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
+                params![id, searchable_text],
+            )?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     fn soft_delete_missing_banks(
@@ -546,12 +600,174 @@ fn parse_date(date_str: &str) -> Result<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
 
+    use chrono::NaiveDate;
+    use rusqlite::params;
+    use tempfile::TempDir;
+
     use crate::TransactionStore;
+    use crate::db::build_searchable_text;
     use crate::search::ParsedQuery;
     use crate::store::test_support::{setup_test_exports, write_pull_script};
-    use tempfile::TempDir;
+
+    /// Token guaranteed never present in fixture searchable text.
+    const ABSENT_TOKEN: &str = "zzphantomxyz";
+
+    /// Seed a bank/account/batch and return `(store, account_id)` ready for
+    /// [`TransactionStore::insert_transaction`].
+    fn store_ready_for_insert() -> (TempDir, TransactionStore, i64) {
+        let temp = TempDir::new().unwrap();
+        let store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        store
+            .conn
+            .execute("INSERT INTO banks (name) VALUES ('TB')", [])
+            .unwrap();
+        let bank_id = store.conn.last_insert_rowid();
+        store
+            .conn
+            .execute(
+                "INSERT INTO accounts (bank_id, name) VALUES (?, 'A1')",
+                [bank_id],
+            )
+            .unwrap();
+        let account_id = store.conn.last_insert_rowid();
+        store
+            .conn
+            .execute(
+                "INSERT INTO import_batches (started_at) VALUES ('2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        (temp, store, account_id)
+    }
+
+    fn insert_tx_with_meta(
+        store: &TransactionStore,
+        account_id: i64,
+        description: &str,
+        metadata: &HashMap<String, serde_json::Value>,
+        hash: &str,
+    ) -> i64 {
+        let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let inserted = store
+            .insert_transaction(
+                account_id,
+                &date,
+                description,
+                -100,
+                0,
+                hash,
+                metadata,
+                "test.csv",
+                1,
+            )
+            .unwrap();
+        assert!(inserted);
+        store.conn.last_insert_rowid()
+    }
+
+    /// Rowids that match `token` in `transactions_fts`.
+    fn fts_match_rowids(store: &TransactionStore, token: &str) -> Vec<i64> {
+        let mut stmt = store
+            .conn
+            .prepare(
+                "SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ? ORDER BY rowid",
+            )
+            .unwrap();
+        stmt.query_map([token], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// Whitespace-separated FTS tokens of a transaction's searchable text.
+    fn tokens_of(description: &str, metadata: &HashMap<String, serde_json::Value>) -> Vec<String> {
+        build_searchable_text(description, metadata)
+            .split_whitespace()
+            .map(|t| t.to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    }
+
+    /// Assert every row's FTS posting matches exactly its own searchable-text
+    /// tokens (present) and never the guaranteed-absent token.
+    fn assert_fts_invariant(
+        store: &TransactionStore,
+        rows: &[(i64, &str, HashMap<String, serde_json::Value>)],
+    ) {
+        for &(rowid, description, ref metadata) in rows {
+            let own_tokens = tokens_of(description, metadata);
+            for token in &own_tokens {
+                let hits = fts_match_rowids(store, token);
+                assert!(
+                    hits.contains(&rowid),
+                    "rowid {rowid} should match own token {token:?}; hits={hits:?}"
+                );
+            }
+            let absent_hits = fts_match_rowids(store, ABSENT_TOKEN);
+            assert!(
+                !absent_hits.contains(&rowid),
+                "rowid {rowid} must not match absent token {ABSENT_TOKEN}"
+            );
+
+            // No token that is absent from this row's searchable text may match it.
+            // Use tokens that appear on other rows (or ABSENT_TOKEN) as negatives.
+            let own_lower: std::collections::HashSet<String> =
+                own_tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
+            for &(other_id, other_desc, ref other_meta) in rows {
+                if other_id == rowid {
+                    continue;
+                }
+                for token in tokens_of(other_desc, other_meta) {
+                    if own_lower.contains(&token.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    let hits = fts_match_rowids(store, &token);
+                    assert!(
+                        !hits.contains(&rowid),
+                        "rowid {rowid} must not match foreign token {token:?} \
+                         (from row {other_id}); hits={hits:?}"
+                    );
+                }
+            }
+        }
+        // Globally, absent token matches nothing.
+        assert!(
+            fts_match_rowids(store, ABSENT_TOKEN).is_empty(),
+            "absent token must match no rows"
+        );
+    }
+
+    fn sample_rows() -> Vec<(&'static str, HashMap<String, serde_json::Value>)> {
+        let mut shared_meta = HashMap::new();
+        shared_meta.insert(
+            "merchant".to_string(),
+            serde_json::Value::String("SharedMerchant".to_string()),
+        );
+
+        let mut youtube_meta = HashMap::new();
+        youtube_meta.insert(
+            "service".to_string(),
+            serde_json::Value::String("Premium".to_string()),
+        );
+        youtube_meta.insert("score".to_string(), serde_json::json!(42));
+
+        let mut aami_meta = HashMap::new();
+        aami_meta.insert(
+            "policy".to_string(),
+            serde_json::Value::String("CarCover".to_string()),
+        );
+
+        vec![
+            ("Google YouTubePremium", youtube_meta),
+            ("AAMI Insurance March", aami_meta),
+            ("Coffee Shop", shared_meta.clone()),
+            ("Grocery SharedMerchant Run", shared_meta),
+            ("Salary Deposit", HashMap::new()),
+        ]
+    }
 
     #[test]
     fn discover_banks_and_accounts() {
@@ -623,5 +839,105 @@ mod tests {
 
         let banks = store.list_banks().unwrap();
         assert!(banks.is_empty());
+    }
+
+    #[test]
+    fn fts_invariant_holds_after_insert() {
+        let (_temp, store, account_id) = store_ready_for_insert();
+        let samples = sample_rows();
+        let mut rows = Vec::new();
+        for (i, (desc, meta)) in samples.iter().enumerate() {
+            let id = insert_tx_with_meta(&store, account_id, desc, meta, &format!("h-{i}"));
+            rows.push((id, *desc, meta.clone()));
+        }
+        assert_fts_invariant(&store, &rows);
+    }
+
+    #[test]
+    fn fts_drift_heals_on_idempotent_rewrite() {
+        // Reproduce the live-vault bug: a contentless phantom posting at an
+        // existing rowid makes an unrelated row match a leftover token (e.g.
+        // "Google YouTubePremium" matching "aami").
+        let (_temp, store, account_id) = store_ready_for_insert();
+        let meta = HashMap::new();
+        let rowid = insert_tx_with_meta(
+            &store,
+            account_id,
+            "Google YouTubePremium",
+            &meta,
+            "yt-hash",
+        );
+
+        // Corrupt: extra posting at the same rowid (contentless permits this).
+        store
+            .conn
+            .execute(
+                "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
+                params![rowid, "AAMI Insurance leftover"],
+            )
+            .unwrap();
+        assert!(
+            fts_match_rowids(&store, "aami").contains(&rowid),
+            "precondition: phantom token must match before rewrite"
+        );
+
+        // Rewrite via the production path (DELETE-then-INSERT).
+        store
+            .write_transaction_fts(rowid, "Google YouTubePremium", &meta)
+            .unwrap();
+
+        assert!(
+            !fts_match_rowids(&store, "aami").contains(&rowid),
+            "phantom token must be gone after idempotent rewrite"
+        );
+        assert!(
+            fts_match_rowids(&store, "YouTubePremium").contains(&rowid),
+            "real tokens must still match after rewrite"
+        );
+        assert_fts_invariant(&store, &[(rowid, "Google YouTubePremium", meta)]);
+    }
+
+    #[test]
+    fn rebuild_fts_repairs_corrupted_index() {
+        let (_temp, store, account_id) = store_ready_for_insert();
+        let samples = sample_rows();
+        let mut rows = Vec::new();
+        for (i, (desc, meta)) in samples.iter().enumerate() {
+            let id = insert_tx_with_meta(&store, account_id, desc, meta, &format!("rb-{i}"));
+            rows.push((id, *desc, meta.clone()));
+        }
+
+        // Corrupt: foreign posting on an existing rowid + orphan posting.
+        let victim = rows[0].0;
+        store
+            .conn
+            .execute(
+                "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
+                params![victim, "AAMI phantom drift"],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
+                params![999_999i64, "orphan phantom row"],
+            )
+            .unwrap();
+        assert!(fts_match_rowids(&store, "aami").contains(&victim));
+        assert!(fts_match_rowids(&store, "orphan").contains(&999_999));
+
+        let count = store.rebuild_fts().unwrap();
+        assert_eq!(count, rows.len());
+
+        // Victim is YouTube; "aami" must no longer hit it (AAMI row may still).
+        assert!(
+            !fts_match_rowids(&store, "aami").contains(&victim),
+            "phantom aami posting on YouTube row must be gone after rebuild"
+        );
+        assert!(
+            fts_match_rowids(&store, "orphan").is_empty(),
+            "orphan phantom must be gone after rebuild"
+        );
+        assert_fts_invariant(&store, &rows);
     }
 }
