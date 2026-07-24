@@ -480,6 +480,9 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     if app.classifying {
         parts.push(("Classifying...".to_string(), Color::DarkGray));
     }
+    if app.reindexing {
+        parts.push(("Reindexing...".to_string(), Color::DarkGray));
+    }
     if parts.is_empty() {
         return;
     }

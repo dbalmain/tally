@@ -372,10 +372,10 @@ handling and data flow stay uniform:
 - **Non-blocking outcomes use the tab-bar status, not modals** — the tab bar's
   right side is a transient status area (`draw_tabs` in `ui.rs`): DarkGray
   indicators while background work is in flight ("Refreshing..." /
-  "Classifying...") and, via `app.show_status(msg)`, a green one-line result
-  message shown for 5 s. It never captures input and needs no dismissal. Use it
-  for fire-and-forget results (e.g. the `C` classification summary); reserve
-  modals for flows that need a decision or acknowledgement.
+  "Classifying..." / "Reindexing...") and, via `app.show_status(msg)`, a green
+  one-line result message shown for 5 s. It never captures input and needs no
+  dismissal. Use it for fire-and-forget results (e.g. the `C` classification
+  summary); reserve modals for flows that need a decision or acknowledgement.
 - **Tables use `ScrollTable`** (`src/tui/table.rs`) — it owns scroll-offset
   math, inline detail placement, and column geometry; per-view closures own row
   content, styling, and optional detail rendering.
@@ -508,7 +508,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `Esc`               | Clear active search (fuzzy first, then DB)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `?`                 | Show keybind popover                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `Alt-?`             | Toggle bottom key-hint bar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `Ctrl-G`            | Reindex full-text search (rebuild `transactions_fts` from every transaction via `build_searchable_text`). Global on every tab; **hidden from the footer**, listed in the `?` keybind popover. Synchronous single-pass rebuild; result reported on the green tab-bar status line (e.g. "Reindexed 7474 transactions"). **Skipped** (with a status toast) while a background refresh or classification is in flight, so the foreground DROP+re-insert does not collide with that writer. Ctrl-G (not Ctrl-I) because legacy terminals and tmux deliver Ctrl-I as the bare Tab byte                                          |
+| `Ctrl-G`            | Reindex full-text search (rebuild `transactions_fts` from every transaction via `build_searchable_text`). Global on every tab; **hidden from the footer**, listed in the `?` keybind popover. Runs on a background store connection (like refresh/classification); a "Reindexing..." indicator shows in the tab bar while it runs, replaced by a green "Reindexed N transactions" summary on completion. **Skipped** (with a status toast) while a background refresh or classification is in flight; refresh and classification are likewise skipped while a reindex is in flight (WAL allows only one writer). Ctrl-G (not Ctrl-I) because legacy terminals and tmux deliver Ctrl-I as the bare Tab byte |
 
 ### Search Modes (DB and Fuzzy)
 

@@ -23,7 +23,8 @@ impl App {
     /// which lands as a toast. In-memory stores (tests) have no path to open
     /// a second connection on, so they run inline instead.
     pub fn request_classify(&mut self) {
-        if self.classifying {
+        // WAL allows only one writer; reindex is a background writer too.
+        if self.classifying || self.reindexing {
             return;
         }
 

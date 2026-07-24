@@ -207,6 +207,10 @@ pub struct App {
     // event loop (`poll_classification`), which surfaces it as a toast.
     pub classifying: bool,
     classify_rx: Option<Receiver<Result<crate::classify::ClassifyReport>>>,
+    // Full-text reindex (Ctrl-G): same background-connection pattern as
+    // classification; `reindex_rx` carries the reindexed row count (or error).
+    pub reindexing: bool,
+    reindex_rx: Option<Receiver<Result<usize>>>,
     // Transient tab-bar status message + its expiry instant.
     status: Option<(String, Instant)>,
     // Import refreshes use a background store connection so the UI remains
@@ -315,6 +319,8 @@ impl App {
             confirm_action: None,
             classifying: false,
             classify_rx: None,
+            reindexing: false,
+            reindex_rx: None,
             status: None,
             refresh_rx: None,
             tab_search_state: HashMap::new(),
@@ -348,7 +354,8 @@ impl App {
     /// This is intentionally available to the Todo → Uncategorised view,
     /// where newly imported transactions are immediately visible.
     pub fn request_refresh(&mut self) {
-        if self.refreshing {
+        // WAL allows only one writer; reindex is a background writer too.
+        if self.refreshing || self.reindexing {
             return;
         }
 
@@ -746,12 +753,16 @@ impl App {
 
     /// Rebuild `transactions_fts` from the transactions table (Ctrl-G).
     ///
-    /// Skipped while a background refresh or classification holds the write
-    /// lock — those share the DB via WAL and only one writer is allowed.
-    /// Surfaces DB errors via the error popup; on success reloads tab data and
-    /// reports the reindexed row count on the green tab-bar status line.
+    /// Runs on a background store connection (like refresh/classification) so
+    /// the UI stays live and a "Reindexing..." indicator can paint. Skipped
+    /// while a background refresh or classification holds the write lock —
+    /// WAL allows only one writer. In-memory stores (tests) have no path to
+    /// open a second connection on, so they run inline instead.
     pub fn reindex_fts(&mut self) {
-        // Foreground DROP+re-insert collides with an in-flight background
+        if self.reindexing {
+            return;
+        }
+        // Background DROP+re-insert collides with an in-flight background
         // writer (refresh or classification). Guard like `request_refresh`.
         if self.refreshing {
             self.show_status("Reindex skipped — refresh in progress".to_string());
@@ -762,13 +773,51 @@ impl App {
             return;
         }
 
-        let mut count = 0usize;
-        if self.try_mutation("reindex full-text search", |s| {
-            count = s.rebuild_fts()?;
-            Ok(())
-        }) {
-            self.refresh_data();
-            self.show_status(format!("Reindexed {count} transactions"));
+        let Some(db_path) = self.store.db_path().map(std::path::Path::to_path_buf) else {
+            let result = self.store.rebuild_fts();
+            self.finish_reindex(result);
+            return;
+        };
+
+        let exports_dir = self.store.exports_dir().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = TransactionStore::open(&db_path, &exports_dir)
+                .and_then(|store| store.rebuild_fts());
+            let _ = tx.send(result);
+        });
+        self.reindex_rx = Some(rx);
+        self.reindexing = true;
+    }
+
+    /// Collect a finished background reindex, if any. Called every event-loop
+    /// iteration; cheap no-op while the rebuild is still going.
+    pub fn poll_reindex(&mut self) {
+        let Some(rx) = &self.reindex_rx else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.reindex_rx = None;
+                self.reindexing = false;
+                self.error_message = Some("Reindex stopped unexpectedly".to_string());
+                return;
+            }
+        };
+        self.reindex_rx = None;
+        self.finish_reindex(result);
+    }
+
+    /// Clear the in-flight flag, then surface the outcome: reload + green
+    /// status on success, error popup on failure.
+    fn finish_reindex(&mut self, result: Result<usize>) {
+        self.reindexing = false;
+        match result {
+            Ok(count) => {
+                self.refresh_data();
+                self.show_status(format!("Reindexed {count} transactions"));
+            }
+            Err(e) => self.error_message = Some(format!("Failed to reindex full-text search: {e}")),
         }
     }
 
@@ -1719,11 +1768,75 @@ mod tests {
         let mut app = App::new(store).unwrap();
         assert!(!app.refreshing);
         assert!(!app.classifying);
+        assert!(!app.reindexing);
 
         app.reindex_fts();
 
+        assert!(!app.reindexing);
         assert!(app.error_message.is_none());
         assert_eq!(app.active_status(), Some("Reindexed 2 transactions"));
+    }
+
+    #[test]
+    fn request_refresh_skipped_while_reindexing() {
+        let (_temp, store) = store_with_transactions(&[]);
+        let mut app = App::new(store).unwrap();
+        app.reindexing = true;
+
+        app.request_refresh();
+
+        // Guard returns early: no background thread, flags unchanged.
+        assert!(app.reindexing);
+        assert!(!app.refreshing);
+        assert!(app.refresh_rx.is_none());
+    }
+
+    #[test]
+    fn request_classify_skipped_while_reindexing() {
+        let (_temp, store) = store_with_transactions(&[]);
+        let mut app = App::new(store).unwrap();
+        app.reindexing = true;
+
+        app.request_classify();
+
+        assert!(app.reindexing);
+        assert!(!app.classifying);
+        assert!(app.classify_rx.is_none());
+    }
+
+    #[test]
+    fn finish_reindex_ok_clears_flag_and_sets_status() {
+        let (_temp, store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let mut app = App::new(store).unwrap();
+        app.reindexing = true;
+
+        app.finish_reindex(Ok(1));
+
+        assert!(!app.reindexing);
+        assert!(app.error_message.is_none());
+        assert_eq!(app.active_status(), Some("Reindexed 1 transactions"));
+    }
+
+    #[test]
+    fn finish_reindex_err_clears_flag_and_sets_error() {
+        let (_temp, store) = store_with_transactions(&[]);
+        let mut app = App::new(store).unwrap();
+        app.reindexing = true;
+
+        app.finish_reindex(Err(crate::Error::ImportFailed(
+            "simulated reindex failure".into(),
+        )));
+
+        assert!(!app.reindexing);
+        assert!(app.active_status().is_none());
+        let msg = app.error_message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("Failed to reindex full-text search"),
+            "unexpected error_message: {msg:?}"
+        );
     }
 
     #[test]

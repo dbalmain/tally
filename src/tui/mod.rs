@@ -159,6 +159,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         // toast; the redraw cadence below also expires toasts).
         app.poll_classification();
 
+        app.poll_reindex();
+
         terminal.draw(|f| ui::draw(f, app))?;
 
         if event::poll(Duration::from_millis(200))?
