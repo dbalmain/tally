@@ -10,7 +10,7 @@ use crate::{
     FilterOverride, Transaction, TransactionWithEnrichment, Transfer, TransferWithTransactions,
 };
 
-use super::app::{App, InputMode, Tab, TodoSubTab};
+use super::app::{App, BulkAction, BulkItem, InputMode, Tab, TodoSubTab};
 use super::keymap::{self, HelpLine};
 use super::modal::{MODAL_CHROME_HEIGHT, Modal, hint_line};
 use super::search_bar::SearchBar;
@@ -1095,6 +1095,49 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
     });
 }
 
+/// Display fields for a transfer-review row (date / from / amount / to /
+/// confidence), resolved via the transaction cache.
+struct TransferLegDisplay {
+    date: String,
+    from_desc: String,
+    amount: String,
+    to_desc: String,
+    confidence: String,
+}
+
+fn transfer_leg_display(app: &App, transfer: &Transfer) -> TransferLegDisplay {
+    let from = app.get_cached_transaction(transfer.from_transaction_id);
+    let to = app.get_cached_transaction(transfer.to_transaction_id);
+    // The two legs share one magnitude, so show the amount once (from side).
+    TransferLegDisplay {
+        date: from
+            .map(|tx| tx.date.to_string())
+            .unwrap_or_else(|| format!("#{}", transfer.from_transaction_id)),
+        from_desc: from.map(|tx| tx.description.clone()).unwrap_or_default(),
+        amount: from
+            .map(|tx| format_cents(tx.amount_cents))
+            .unwrap_or_default(),
+        to_desc: to.map(|tx| tx.description.clone()).unwrap_or_default(),
+        confidence: transfer
+            .ai_confidence
+            .map(format_confidence_percent)
+            .unwrap_or_default(),
+    }
+}
+
+fn transfer_review_cells(legs: TransferLegDisplay) -> Vec<Cell<'static>> {
+    vec![
+        Cell::from(legs.date),
+        Cell::from(legs.from_desc),
+        Cell::from(Line::from(legs.amount).alignment(Alignment::Right))
+            .style(Style::default().fg(Color::Red)),
+        Cell::from("→").style(Style::default().fg(Color::Cyan)),
+        Cell::from(legs.to_desc),
+        Cell::from(Line::from(legs.confidence).alignment(Alignment::Right))
+            .style(Style::default().fg(Color::Cyan)),
+    ]
+}
+
 fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
     let transfer_reviews: Vec<_> = app.lists.transfer_reviews.iter().collect();
 
@@ -1109,36 +1152,8 @@ fn draw_transfer_review_table(f: &mut Frame, app: &App, area: Rect) {
         })
         .render(f, area, |i, transfer| {
             let is_selected = i == app.selected_index;
-
-            let from = app.get_cached_transaction(transfer.from_transaction_id);
-            let to = app.get_cached_transaction(transfer.to_transaction_id);
-
-            // The two legs of a transfer share one magnitude, so show the
-            // amount once (on the "from" side) rather than duplicating it.
-            let date = from
-                .map(|tx| tx.date.to_string())
-                .unwrap_or_else(|| format!("#{}", transfer.from_transaction_id));
-            let from_desc = from.map(|tx| tx.description.clone()).unwrap_or_default();
-            let amount = from
-                .map(|tx| format_cents(tx.amount_cents))
-                .unwrap_or_default();
-            let to_desc = to.map(|tx| tx.description.clone()).unwrap_or_default();
-            let confidence = transfer
-                .ai_confidence
-                .map(format_confidence_percent)
-                .unwrap_or_default();
-
-            Row::new(vec![
-                Cell::from(date),
-                Cell::from(from_desc),
-                Cell::from(Line::from(amount).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Red)),
-                Cell::from("→").style(Style::default().fg(Color::Cyan)),
-                Cell::from(to_desc),
-                Cell::from(Line::from(confidence).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Cyan)),
-            ])
-            .style(row_style(is_selected))
+            let legs = transfer_leg_display(app, transfer);
+            Row::new(transfer_review_cells(legs)).style(row_style(is_selected))
         });
 }
 
@@ -1479,10 +1494,17 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
     let area = center(screen.width * 60 / 100, screen.height * 70 / 100, screen);
 
     let selected = state.rows.iter().filter(|row| row.selected).count();
-    let title = format!(
-        "Apply \"{}\" to similar ({} selected)",
-        state.category_path, selected
-    );
+    let title = match &state.action {
+        BulkAction::ApplyCategory { category_path } => {
+            format!("Apply \"{category_path}\" ({selected} selected)")
+        }
+        BulkAction::ConfirmCategories => {
+            format!("Accept categories ({selected} selected)")
+        }
+        BulkAction::ConfirmTransfers => {
+            format!("Accept transfers ({selected} selected)")
+        }
+    };
     let hints = keymap::footer_hints(app);
     let body = Modal {
         title: &title,
@@ -1491,19 +1513,42 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
     }
     .draw(f, area);
 
-    let rows: Vec<_> = state.rows.iter().collect();
-    ScrollTable::new(
-        &rows,
-        state.cursor,
-        &[
+    let show_score = state
+        .rows
+        .iter()
+        .any(|row| matches!(&row.item, BulkItem::Transaction { score: Some(_), .. }));
+    let is_transfer = matches!(state.action, BulkAction::ConfirmTransfers);
+
+    let columns: Vec<Constraint> = if is_transfer {
+        // checkbox + transfer-review columns
+        vec![
+            Constraint::Length(4),
+            Constraint::Length(12),
+            Constraint::Min(20),
+            Constraint::Length(12),
+            Constraint::Length(3),
+            Constraint::Min(20),
+            Constraint::Length(6),
+        ]
+    } else if show_score {
+        vec![
             Constraint::Length(4),
             Constraint::Length(12),
             Constraint::Min(20),
             Constraint::Length(12),
             Constraint::Length(6),
-        ],
-    )
-    .render(f, body, |i, row| {
+        ]
+    } else {
+        vec![
+            Constraint::Length(4),
+            Constraint::Length(12),
+            Constraint::Min(20),
+            Constraint::Length(12),
+        ]
+    };
+
+    let rows: Vec<_> = state.rows.iter().collect();
+    ScrollTable::new(&rows, state.cursor, &columns).render(f, body, |i, row| {
         let is_cursor = i == state.cursor;
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
         let checkbox_color = if row.selected {
@@ -1511,17 +1556,35 @@ fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
         } else {
             dim_fg(is_cursor)
         };
+        let checkbox_cell = Cell::from(checkbox).style(Style::default().fg(checkbox_color));
 
-        Row::new(vec![
-            Cell::from(checkbox).style(Style::default().fg(checkbox_color)),
-            Cell::from(row.tx.date.to_string()),
-            Cell::from(row.tx.description.as_str()),
-            Cell::from(Line::from(format_cents(row.tx.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(amount_color(row.tx.amount_cents))),
-            Cell::from(format_confidence_percent(f64::from(row.score)))
-                .style(Style::default().fg(Color::Cyan)),
-        ])
-        .style(row_style(is_cursor))
+        let cells = match &row.item {
+            BulkItem::Transaction { tx, score } => {
+                let mut cells = vec![
+                    checkbox_cell,
+                    Cell::from(tx.date.to_string()),
+                    Cell::from(tx.description.as_str()),
+                    Cell::from(
+                        Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right),
+                    )
+                    .style(Style::default().fg(amount_color(tx.amount_cents))),
+                ];
+                if show_score {
+                    let score_text = score
+                        .map(|s| format_confidence_percent(f64::from(s)))
+                        .unwrap_or_default();
+                    cells.push(Cell::from(score_text).style(Style::default().fg(Color::Cyan)));
+                }
+                cells
+            }
+            BulkItem::Transfer(transfer) => {
+                let mut cells = vec![checkbox_cell];
+                cells.extend(transfer_review_cells(transfer_leg_display(app, transfer)));
+                cells
+            }
+        };
+
+        Row::new(cells).style(row_style(is_cursor))
     });
 }
 

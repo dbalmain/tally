@@ -73,6 +73,7 @@ pub enum Act {
     ToggleDetails,
     ToggleSum,
     CategoriseMatching,
+    AcceptMatching,
     Classify,
     Refresh,
     ReindexFts,
@@ -421,8 +422,8 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
         ReindexFts,
     ));
 
-    // Fuzzy search narrows the visible rows in memory, but `C` applies to the
-    // whole DB-search set — so hide it while a fuzzy filter is active rather
+    // Fuzzy search narrows the visible rows in memory, but `C`/`A` apply to the
+    // whole DB-search set — so hide them while a fuzzy filter is active rather
     // than act on more rows than the user can see.
     if supports_bulk_categorise(app)
         && app.selected_transaction().is_some()
@@ -437,6 +438,25 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
             true,
             CategoriseMatching,
         ));
+    }
+
+    if supports_accept_matching(app) && !app.fuzzy_search_active() {
+        let list_nonempty = match app.todo_subtab {
+            TodoSubTab::AiReview => !app.lists.ai_reviews.is_empty(),
+            TodoSubTab::TransferReview => !app.lists.transfer_reviews.is_empty(),
+            _ => false,
+        };
+        if list_nonempty {
+            out.push(bh(
+                &[Char('A')],
+                "A",
+                "accept all",
+                "accept all matching search",
+                true,
+                true,
+                AcceptMatching,
+            ));
+        }
     }
 
     if app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::Uncategorised {
@@ -568,6 +588,15 @@ fn supports_bulk_categorise(app: &App) -> bool {
         || (app.current_tab == Tab::Todo && app.todo_subtab == TodoSubTab::AiReview)
 }
 
+/// The views where `A` accepts all matching AI categories or pending transfers.
+fn supports_accept_matching(app: &App) -> bool {
+    app.current_tab == Tab::Todo
+        && matches!(
+            app.todo_subtab,
+            TodoSubTab::AiReview | TodoSubTab::TransferReview
+        )
+}
+
 fn can_save_search_as_filter(app: &App) -> bool {
     app.current_tab == Tab::Transactions
         && app.db_search_active()
@@ -646,6 +675,7 @@ fn run_normal(app: &mut App, act: Act) {
         Act::ToggleDetails => app.toggle_view_details(),
         Act::ToggleSum => app.toggle_sum(),
         Act::CategoriseMatching => app.start_bulk_categorise_matching(),
+        Act::AcceptMatching => app.start_accept_matching(),
         Act::Classify => app.request_classify(),
         Act::Refresh => app.request_refresh(),
         Act::ReindexFts => app.reindex_fts(),
@@ -1085,6 +1115,62 @@ mod tests {
         app.start_fuzzy_search();
         assert!(app.fuzzy_search_active());
         assert!(!has_act(&normal_binds(&app), Act::CategoriseMatching));
+    }
+
+    #[test]
+    fn accept_matching_bind_is_scoped_to_ai_and_transfer_review() {
+        let mut app = app_with_rows();
+
+        // Present on AI Review and Transfer Review.
+        for subtab in [TodoSubTab::AiReview, TodoSubTab::TransferReview] {
+            app.current_tab = Tab::Todo;
+            app.todo_subtab = subtab;
+            assert!(
+                has_act_trigger(&normal_binds(&app), Act::AcceptMatching, Trigger::Char('A')),
+                "AcceptMatching should be present on {subtab:?}"
+            );
+        }
+
+        // Coexists with CategoriseMatching on AI Review (distinct keys).
+        app.todo_subtab = TodoSubTab::AiReview;
+        let binds = normal_binds(&app);
+        assert!(has_act_trigger(
+            &binds,
+            Act::CategoriseMatching,
+            Trigger::Char('C')
+        ));
+        assert!(has_act_trigger(
+            &binds,
+            Act::AcceptMatching,
+            Trigger::Char('A')
+        ));
+
+        // Absent on Transactions, Uncategorised, and unrelated tabs.
+        for (tab, subtab) in [
+            (Tab::Transactions, TodoSubTab::Uncategorised),
+            (Tab::Todo, TodoSubTab::Uncategorised),
+            (Tab::Categories, TodoSubTab::Uncategorised),
+            (Tab::Transfers, TodoSubTab::Uncategorised),
+        ] {
+            app.current_tab = tab;
+            app.todo_subtab = subtab;
+            assert!(
+                !has_act(&normal_binds(&app), Act::AcceptMatching),
+                "AcceptMatching should be absent on {tab:?}/{subtab:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_matching_bind_is_hidden_while_fuzzy_search_is_active() {
+        let mut app = app_with_rows();
+        app.current_tab = Tab::Todo;
+        app.todo_subtab = TodoSubTab::AiReview;
+        assert!(has_act(&normal_binds(&app), Act::AcceptMatching));
+
+        app.start_fuzzy_search();
+        assert!(app.fuzzy_search_active());
+        assert!(!has_act(&normal_binds(&app), Act::AcceptMatching));
     }
 
     #[test]

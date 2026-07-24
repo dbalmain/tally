@@ -52,11 +52,24 @@ impl TransactionStore {
 
     /// Mark a transfer as user-confirmed.
     pub fn confirm_transfer(&mut self, transfer_id: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE transfers SET confirmed = 1 WHERE id = ?",
-            [transfer_id],
-        )?;
-        Ok(())
+        self.confirm_transfers(&[transfer_id]).map(|_| ())
+    }
+
+    /// Confirm many transfers in one SQLite transaction. Returns the number of
+    /// rows updated.
+    pub fn confirm_transfers(&mut self, transfer_ids: &[i64]) -> Result<usize> {
+        if transfer_ids.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.transaction()?;
+        let mut stmt = tx.prepare("UPDATE transfers SET confirmed = 1 WHERE id = ?")?;
+        let mut updated = 0;
+        for &transfer_id in transfer_ids {
+            updated += stmt.execute([transfer_id])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(updated)
     }
 
     /// Delete a transfer.
@@ -481,6 +494,40 @@ mod tests {
         let ids: Vec<i64> = candidates.iter().map(|t| t.id).collect();
         assert!(ids.contains(&linked));
         assert!(ids.contains(&unlinked));
+    }
+
+    #[test]
+    fn confirm_transfers_batch_and_single_delegate() {
+        let (_tmp, mut store, a1, a2) = store_with_two_accounts();
+        let ids: Vec<i64> = [10u32, 11, 12]
+            .into_iter()
+            .map(|day| {
+                let from = insert_tx(&store, a1, &format!("2024-03-{day:02}"), -5000);
+                let to = insert_tx(&store, a2, &format!("2024-03-{day:02}"), 5000);
+                store
+                    .create_transfer(from, to, TransferSource::Auto, false, Some(0.9))
+                    .unwrap()
+            })
+            .collect();
+        let (t1, t2, t3) = (ids[0], ids[1], ids[2]);
+
+        assert_eq!(store.confirm_transfers(&[]).unwrap(), 0);
+
+        let updated = store.confirm_transfers(&[t1, t2]).unwrap();
+        assert_eq!(updated, 2);
+        let pending = store
+            .get_pending_transfer_reviews(&ParsedQuery::empty(), None)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, t3);
+
+        store.confirm_transfer(t3).unwrap();
+        assert!(
+            store
+                .get_pending_transfer_reviews(&ParsedQuery::empty(), None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

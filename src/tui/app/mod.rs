@@ -97,12 +97,6 @@ pub enum ConfirmAction {
     Uncategorise {
         tx_id: i64,
     },
-    /// Bulk-categorising every transaction matching the current search (`C` on
-    /// Transactions / AI Review). Applies `category_path` to all `tx_ids`.
-    CategoriseMatching {
-        category_path: String,
-        tx_ids: Vec<i64>,
-    },
     /// Deleting a category from the Categories tab.
     DeleteCategory(i64),
     /// Deleting an account from the Accounts tab (also removes its exports
@@ -252,17 +246,50 @@ pub struct ApplyFiltersPreview {
     pub scroll: usize,
 }
 
+/// What `Enter` does with the selected rows in the bulk-apply popup.
+#[derive(Debug, Clone)]
+pub enum BulkAction {
+    /// Apply a category to the selected transactions (similar-transactions and
+    /// `C`). The category is resolved via get_or_create at apply time.
+    ApplyCategory { category_path: String },
+    /// Confirm the selected transactions' existing AI category suggestions
+    /// (`A` on AI Review).
+    ConfirmCategories,
+    /// Confirm the selected pending transfers (`A` on Transfer Review).
+    ConfirmTransfers,
+}
+
 pub struct BulkApplyState {
-    pub category_id: i64,
-    pub category_path: String,
+    pub action: BulkAction,
     pub rows: Vec<BulkRow>,
     pub cursor: usize,
 }
 
 pub struct BulkRow {
-    pub tx: Transaction,
-    pub score: f32,
     pub selected: bool,
+    pub item: BulkItem,
+}
+
+/// A row in the bulk-apply popup: either a transaction or a transfer.
+#[derive(Debug, Clone)]
+pub enum BulkItem {
+    /// `score` is Some only for the similar-transactions flow (drives the score
+    /// column); None for `C` and `A`-on-AI-Review.
+    Transaction {
+        tx: Transaction,
+        score: Option<f32>,
+    },
+    Transfer(Transfer),
+}
+
+impl BulkRow {
+    /// Id used when applying: the transaction id, or the transfer id.
+    pub fn target_id(&self) -> i64 {
+        match &self.item {
+            BulkItem::Transaction { tx, .. } => tx.id,
+            BulkItem::Transfer(t) => t.id,
+        }
+    }
 }
 
 impl App {
@@ -1141,25 +1168,6 @@ impl App {
                     self.refresh_data();
                 }
             }
-            ConfirmAction::CategoriseMatching {
-                category_path,
-                tx_ids,
-            } => {
-                let applied = self.try_mutation("apply category", |s| {
-                    let category_id = s.get_or_create_category(&category_path)?;
-                    s.set_categories(
-                        &tx_ids,
-                        category_id,
-                        crate::CategorySource::Manual,
-                        true,
-                        None,
-                    )?;
-                    Ok(())
-                });
-                if applied {
-                    self.refresh_data();
-                }
-            }
             ConfirmAction::DeleteCategory(category_id) => {
                 if self.try_mutation("delete category", |s| {
                     s.delete_category(category_id).map(|_| ())
@@ -1444,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_categorise_matching_applies_and_excludes_transfer_legs() {
+    fn bulk_categorise_matching_opens_bulk_apply_and_excludes_transfer_legs() {
         // Four transactions share the FTS term "shop"; two are plain, two are a
         // transfer pair. The bulk apply must categorise the plain ones and skip
         // the transfer legs.
@@ -1493,23 +1501,20 @@ mod tests {
         }
         app.confirm_category();
 
-        // Lands in a confirmation whose ids exclude the transfer legs.
-        assert_eq!(app.input_mode, InputMode::Confirm);
-        let ConfirmAction::CategoriseMatching {
-            ref category_path,
-            ref tx_ids,
-        } = app.confirm_action.clone().unwrap()
-        else {
-            panic!("expected a CategoriseMatching confirm action");
-        };
-        assert_eq!(category_path, "Shopping");
-        assert!(tx_ids.contains(&plain1.id));
-        assert!(tx_ids.contains(&plain2.id));
-        assert!(!tx_ids.contains(&from.id));
-        assert!(!tx_ids.contains(&to.id));
+        // Lands in the bulk-apply checkbox modal (not a yes/no Confirm).
+        assert_eq!(app.input_mode, InputMode::BulkApply);
+        let state = app.bulk_apply.as_ref().expect("bulk apply open");
+        assert!(matches!(
+            &state.action,
+            BulkAction::ApplyCategory { category_path } if category_path == "Shopping"
+        ));
+        let ids: Vec<i64> = state.rows.iter().map(BulkRow::target_id).collect();
+        assert!(ids.contains(&plain1.id));
+        assert!(ids.contains(&plain2.id));
+        assert!(!ids.contains(&from.id));
+        assert!(!ids.contains(&to.id));
 
-        // Apply.
-        app.confirm_proceed();
+        app.bulk_apply_confirm();
 
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(
@@ -1535,6 +1540,271 @@ mod tests {
                 .is_none()
         );
         assert!(app.store.get_transaction_category(to.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn start_accept_matching_builds_rows_for_ai_and_transfer_review_only() {
+        let (_temp, mut store) = store_with_transactions(&[
+            FixtureTx {
+                description: "AI coffee",
+                amount_cents: -450,
+            },
+            FixtureTx {
+                description: "AI lunch",
+                amount_cents: -1200,
+            },
+            FixtureTx {
+                description: "Xfer out",
+                amount_cents: -5000,
+            },
+            FixtureTx {
+                description: "Xfer in",
+                amount_cents: 5000,
+            },
+        ]);
+        let coffee = tx_by_description(&store, "AI coffee");
+        let lunch = tx_by_description(&store, "AI lunch");
+        let from = tx_by_description(&store, "Xfer out");
+        let to = tx_by_description(&store, "Xfer in");
+        let cat = store.get_or_create_category("Food").unwrap();
+        for id in [coffee.id, lunch.id] {
+            store
+                .set_category(id, cat, CategorySource::Ai, false, Some(0.9))
+                .unwrap();
+        }
+        let transfer_id = store
+            .create_transfer(from.id, to.id, TransferSource::Auto, false, Some(0.8))
+            .unwrap();
+
+        let mut app = App::new(store).unwrap();
+
+        // AI Review → ConfirmCategories rows.
+        app.current_tab = Tab::Todo;
+        app.todo_subtab = TodoSubTab::AiReview;
+        app.reload_current_tab();
+        app.start_accept_matching();
+        assert_eq!(app.input_mode, InputMode::BulkApply);
+        let state = app.bulk_apply.as_ref().unwrap();
+        assert!(matches!(state.action, BulkAction::ConfirmCategories));
+        let ids: Vec<i64> = state.rows.iter().map(BulkRow::target_id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&coffee.id) && ids.contains(&lunch.id));
+        app.bulk_apply_cancel();
+
+        // Transfer Review → ConfirmTransfers rows.
+        app.todo_subtab = TodoSubTab::TransferReview;
+        app.reload_current_tab();
+        app.start_accept_matching();
+        assert_eq!(app.input_mode, InputMode::BulkApply);
+        let state = app.bulk_apply.as_ref().unwrap();
+        assert!(matches!(state.action, BulkAction::ConfirmTransfers));
+        assert_eq!(state.rows.len(), 1);
+        assert_eq!(state.rows[0].target_id(), transfer_id);
+        app.bulk_apply_cancel();
+
+        // No-op on Transactions / Uncategorised.
+        for (tab, subtab) in [
+            (Tab::Transactions, TodoSubTab::Uncategorised),
+            (Tab::Todo, TodoSubTab::Uncategorised),
+        ] {
+            app.current_tab = tab;
+            app.todo_subtab = subtab;
+            app.start_accept_matching();
+            assert!(
+                app.bulk_apply.is_none(),
+                "expected no-op on {tab:?}/{subtab:?}"
+            );
+            assert_eq!(app.input_mode, InputMode::Normal);
+        }
+    }
+
+    #[test]
+    fn bulk_apply_confirm_applies_selected_only_for_each_action() {
+        // Table-driven over the three BulkActions: deselect the middle row,
+        // confirm, and assert only selected rows are mutated.
+        #[derive(Clone, Copy)]
+        enum Flow {
+            ApplyCategory,
+            ConfirmCategories,
+            ConfirmTransfers,
+        }
+
+        for flow in [
+            Flow::ApplyCategory,
+            Flow::ConfirmCategories,
+            Flow::ConfirmTransfers,
+        ] {
+            match flow {
+                Flow::ApplyCategory | Flow::ConfirmCategories => {
+                    let (_temp, mut store) = store_with_transactions(&[
+                        FixtureTx {
+                            description: "row a",
+                            amount_cents: -100,
+                        },
+                        FixtureTx {
+                            description: "row b",
+                            amount_cents: -200,
+                        },
+                        FixtureTx {
+                            description: "row c",
+                            amount_cents: -300,
+                        },
+                    ]);
+                    let a = tx_by_description(&store, "row a");
+                    let b = tx_by_description(&store, "row b");
+                    let c = tx_by_description(&store, "row c");
+                    if matches!(flow, Flow::ConfirmCategories) {
+                        let cat = store.get_or_create_category("Food").unwrap();
+                        for id in [a.id, b.id, c.id] {
+                            store
+                                .set_category(id, cat, CategorySource::Ai, false, Some(0.7))
+                                .unwrap();
+                        }
+                    }
+
+                    let mut app = App::new(store).unwrap();
+                    match flow {
+                        Flow::ApplyCategory => {
+                            app.bulk_apply = Some(BulkApplyState {
+                                action: BulkAction::ApplyCategory {
+                                    category_path: "Food".into(),
+                                },
+                                rows: [a.clone(), b.clone(), c.clone()]
+                                    .into_iter()
+                                    .map(|tx| BulkRow {
+                                        selected: true,
+                                        item: BulkItem::Transaction { tx, score: None },
+                                    })
+                                    .collect(),
+                                cursor: 0,
+                            });
+                            app.input_mode = InputMode::BulkApply;
+                        }
+                        Flow::ConfirmCategories => {
+                            app.current_tab = Tab::Todo;
+                            app.todo_subtab = TodoSubTab::AiReview;
+                            app.reload_current_tab();
+                            app.start_accept_matching();
+                        }
+                        Flow::ConfirmTransfers => unreachable!(),
+                    }
+
+                    let state = app.bulk_apply.as_mut().unwrap();
+                    assert_eq!(state.rows.len(), 3);
+                    state.rows[1].selected = false;
+                    let skipped_id = state.rows[1].target_id();
+                    app.bulk_apply_confirm();
+
+                    match flow {
+                        Flow::ApplyCategory => {
+                            assert_eq!(
+                                app.store
+                                    .get_transaction_category(a.id)
+                                    .unwrap()
+                                    .unwrap()
+                                    .path,
+                                "Food"
+                            );
+                            assert!(
+                                app.store
+                                    .get_transaction_category(skipped_id)
+                                    .unwrap()
+                                    .is_none()
+                            );
+                            assert_eq!(
+                                app.store
+                                    .get_transaction_category(c.id)
+                                    .unwrap()
+                                    .unwrap()
+                                    .path,
+                                "Food"
+                            );
+                        }
+                        Flow::ConfirmCategories => {
+                            // Confirmed rows leave the pending-AI list; skipped stays.
+                            let pending: Vec<i64> = app
+                                .store
+                                .get_pending_ai_reviews(&ParsedQuery::empty(), None)
+                                .unwrap()
+                                .into_iter()
+                                .map(|r| r.transaction.id)
+                                .collect();
+                            assert_eq!(pending, vec![skipped_id]);
+                        }
+                        Flow::ConfirmTransfers => unreachable!(),
+                    }
+                }
+                Flow::ConfirmTransfers => {
+                    let (_temp, mut store) = store_with_transactions(&[
+                        FixtureTx {
+                            description: "out1",
+                            amount_cents: -1000,
+                        },
+                        FixtureTx {
+                            description: "in1",
+                            amount_cents: 1000,
+                        },
+                        FixtureTx {
+                            description: "out2",
+                            amount_cents: -2000,
+                        },
+                        FixtureTx {
+                            description: "in2",
+                            amount_cents: 2000,
+                        },
+                        FixtureTx {
+                            description: "out3",
+                            amount_cents: -3000,
+                        },
+                        FixtureTx {
+                            description: "in3",
+                            amount_cents: 3000,
+                        },
+                    ]);
+                    let transfer_ids: Vec<i64> = ["1", "2", "3"]
+                        .into_iter()
+                        .map(|n| {
+                            let out = tx_by_description(&store, &format!("out{n}"));
+                            let inn = tx_by_description(&store, &format!("in{n}"));
+                            store
+                                .create_transfer(
+                                    out.id,
+                                    inn.id,
+                                    TransferSource::Auto,
+                                    false,
+                                    Some(0.8),
+                                )
+                                .unwrap()
+                        })
+                        .collect();
+
+                    let mut app = App::new(store).unwrap();
+                    app.current_tab = Tab::Todo;
+                    app.todo_subtab = TodoSubTab::TransferReview;
+                    app.reload_current_tab();
+                    app.start_accept_matching();
+                    let state = app.bulk_apply.as_mut().unwrap();
+                    // Order is created_at DESC, so rows may not match insert order —
+                    // deselect by id instead.
+                    let skipped = transfer_ids[1];
+                    for row in &mut state.rows {
+                        if row.target_id() == skipped {
+                            row.selected = false;
+                        }
+                    }
+                    app.bulk_apply_confirm();
+
+                    let pending: Vec<i64> = app
+                        .store
+                        .get_pending_transfer_reviews(&ParsedQuery::empty(), None)
+                        .unwrap()
+                        .into_iter()
+                        .map(|t| t.id)
+                        .collect();
+                    assert_eq!(pending, vec![skipped]);
+                }
+            }
+        }
     }
 
     #[test]

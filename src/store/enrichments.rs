@@ -110,11 +110,27 @@ impl TransactionStore {
 
     /// Mark a category as user-confirmed.
     pub fn confirm_category(&mut self, transaction_id: i64) -> Result<()> {
-        self.conn.execute(
+        self.confirm_categories(&[transaction_id]).map(|_| ())
+    }
+
+    /// Confirm categories on many transactions in one SQLite transaction.
+    /// Returns the number of enrichments updated.
+    pub fn confirm_categories(&mut self, transaction_ids: &[i64]) -> Result<usize> {
+        if transaction_ids.is_empty() {
+            return Ok(0);
+        }
+        let now = Utc::now().to_rfc3339();
+        let tx = self.conn.transaction()?;
+        let mut stmt = tx.prepare(
             "UPDATE transaction_enrichments SET category_confirmed = 1, updated_at = ? WHERE transaction_id = ?",
-            params![Utc::now().to_rfc3339(), transaction_id],
         )?;
-        Ok(())
+        let mut updated = 0;
+        for &transaction_id in transaction_ids {
+            updated += stmt.execute(params![now, transaction_id])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(updated)
     }
 
     /// Remove a transaction's enrichment entirely (category + AI metadata).
@@ -244,6 +260,37 @@ mod tests {
             store.get_transaction_category(plain).unwrap().unwrap().id,
             cat
         );
+    }
+
+    #[test]
+    fn confirm_categories_batch_and_single_delegate() {
+        let (_tmp, mut store, a1, _a2) = store_with_two_accounts();
+        let cat = store.get_or_create_category("Food").unwrap();
+        let ids: Vec<i64> = (0..3)
+            .map(|i| {
+                let id = insert_tx(&store, a1, &format!("2024-03-1{i}"), -100 * (i + 1));
+                store
+                    .set_category(id, cat, CategorySource::Ai, false, Some(0.8))
+                    .unwrap();
+                id
+            })
+            .collect();
+
+        // Empty slice is a no-op.
+        assert_eq!(store.confirm_categories(&[]).unwrap(), 0);
+
+        // Batch confirms exactly the given ids.
+        let updated = store.confirm_categories(&[ids[0], ids[1]]).unwrap();
+        assert_eq!(updated, 2);
+        for (id, expect_confirmed) in [(ids[0], true), (ids[1], true), (ids[2], false)] {
+            let (_, confirmed, _) = store.get_enrichment_meta(id).unwrap().unwrap();
+            assert_eq!(confirmed, expect_confirmed, "id={id}");
+        }
+
+        // Single-id path still works (delegates to the batch).
+        store.confirm_category(ids[2]).unwrap();
+        let (_, confirmed, _) = store.get_enrichment_meta(ids[2]).unwrap().unwrap();
+        assert!(confirmed);
     }
 
     #[test]

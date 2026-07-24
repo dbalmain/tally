@@ -7,8 +7,9 @@ use crate::classify::{ClassifyReport, SIMILARITY_THRESHOLD, normalise};
 use crate::{Category, CategorySource, Transaction, TransactionStore};
 
 use super::{
-    App, BackgroundJob, BulkApplyState, BulkRow, CategoryTarget, ConfirmAction, InputMode,
-    JobOutcome, Tab, TextPromptTarget, TodoSubTab, next_wrapping, prev_wrapping,
+    App, BackgroundJob, BulkAction, BulkApplyState, BulkItem, BulkRow, CategoryTarget,
+    ConfirmAction, InputMode, JobOutcome, Tab, TextPromptTarget, TodoSubTab, next_wrapping,
+    prev_wrapping,
 };
 
 const BULK_APPLY_MATCH_LIMIT: usize = 200;
@@ -180,41 +181,41 @@ impl App {
         self.confirm_transaction_category();
     }
 
-    /// Resolve the chosen category, count the matching (non-transfer)
-    /// transactions, and open a confirmation before the bulk apply. Unlike the
-    /// single-transaction path, this never offers the similar-transactions
-    /// popup — it goes straight to the count confirmation.
+    /// Resolve the chosen category and open the bulk-apply checkbox list so
+    /// the user can deselect rows before applying. Unlike the single-
+    /// transaction path, this never offers the similar-transactions score list
+    /// — rows are the full matching set with no scores.
     fn confirm_bulk_categorise_matching(&mut self) {
         let Some(category_path) = self.selected_category_path() else {
             self.cancel_input();
             return;
         };
-        let ids = self.matching_transactions_for_bulk();
+        let txns = self.matching_transactions_for_bulk();
         self.clear_category_popup();
-        if ids.is_empty() {
+        if txns.is_empty() {
             self.cancel_input();
             return;
         }
 
-        let count = ids.len();
-        self.confirm(
-            format!(
-                "Apply category \"{}\" to {} transaction{}?",
-                category_path,
-                count,
-                if count == 1 { "" } else { "s" }
-            ),
-            ConfirmAction::CategoriseMatching {
-                category_path,
-                tx_ids: ids,
-            },
-        );
+        let rows = txns
+            .into_iter()
+            .map(|tx| BulkRow {
+                selected: true,
+                item: BulkItem::Transaction { tx, score: None },
+            })
+            .collect();
+        self.bulk_apply = Some(BulkApplyState {
+            action: BulkAction::ApplyCategory { category_path },
+            rows,
+            cursor: 0,
+        });
+        self.input_mode = InputMode::BulkApply;
     }
 
-    /// Transaction ids matching the current DB search on the active tab,
-    /// excluding transfer legs (which can't be categorised). Empty on tabs the
-    /// feature doesn't cover.
-    fn matching_transactions_for_bulk(&mut self) -> Vec<i64> {
+    /// Transactions matching the current DB search on the active tab, excluding
+    /// transfer legs (which can't be categorised). Empty on tabs the feature
+    /// doesn't cover.
+    fn matching_transactions_for_bulk(&mut self) -> Vec<Transaction> {
         let parsed = self
             .current_search_state()
             .map(|s| s.search_bar.parsed().clone())
@@ -227,8 +228,8 @@ impl App {
                 let ids: Vec<i64> = txns.iter().map(|tx| tx.id).collect();
                 let transfers =
                     self.load_or_show("load transfers", |s| s.get_transfers_for_transactions(&ids));
-                ids.into_iter()
-                    .filter(|id| !transfers.contains_key(id))
+                txns.into_iter()
+                    .filter(|tx| !transfers.contains_key(&tx.id))
                     .collect()
             }
             (Tab::Todo, Some(TodoSubTab::AiReview)) => self
@@ -236,10 +237,64 @@ impl App {
                     s.get_pending_ai_reviews(&parsed, None)
                 })
                 .into_iter()
-                .map(|r| r.transaction.id)
+                .map(|r| r.transaction)
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// Accept all matching AI category suggestions or pending transfers via
+    /// the bulk-apply checkbox modal. Scoped to Todo → AI Review and Todo →
+    /// Transfer Review; a no-op elsewhere or when nothing matches.
+    pub fn start_accept_matching(&mut self) {
+        if self.current_tab != Tab::Todo {
+            return;
+        }
+        let parsed = self
+            .current_search_state()
+            .map(|s| s.search_bar.parsed().clone())
+            .unwrap_or_default();
+        let (action, rows) = match self.todo_subtab {
+            TodoSubTab::AiReview => {
+                let rows: Vec<BulkRow> = self
+                    .load_or_show("load matching AI reviews", |s| {
+                        s.get_pending_ai_reviews(&parsed, None)
+                    })
+                    .into_iter()
+                    .map(|r| BulkRow {
+                        selected: true,
+                        item: BulkItem::Transaction {
+                            tx: r.transaction,
+                            score: None,
+                        },
+                    })
+                    .collect();
+                (BulkAction::ConfirmCategories, rows)
+            }
+            TodoSubTab::TransferReview => {
+                let rows: Vec<BulkRow> = self
+                    .load_or_show("load matching transfer reviews", |s| {
+                        s.get_pending_transfer_reviews(&parsed, None)
+                    })
+                    .into_iter()
+                    .map(|t| BulkRow {
+                        selected: true,
+                        item: BulkItem::Transfer(t),
+                    })
+                    .collect();
+                (BulkAction::ConfirmTransfers, rows)
+            }
+            _ => return,
+        };
+        if rows.is_empty() {
+            return;
+        }
+        self.bulk_apply = Some(BulkApplyState {
+            action,
+            rows,
+            cursor: 0,
+        });
+        self.input_mode = InputMode::BulkApply;
     }
 
     fn confirm_transaction_category(&mut self) {
@@ -334,14 +389,14 @@ impl App {
             return;
         }
 
-        let Some(category_id) = saved_category_id else {
+        if saved_category_id.is_none() {
             self.error_message = Some("Failed to set category: category was not resolved".into());
             return;
-        };
+        }
 
         self.refresh_data();
         self.cancel_input();
-        self.open_bulk_apply_for(tx, category_id, category_path);
+        self.open_bulk_apply_for(tx, category_path);
     }
 
     pub fn confirm_ai_category(&mut self) {
@@ -381,7 +436,7 @@ impl App {
         self.refresh_data();
     }
 
-    fn open_bulk_apply_for(&mut self, tx: Transaction, category_id: i64, category_path: String) {
+    fn open_bulk_apply_for(&mut self, tx: Transaction, category_path: String) {
         if self.similarity_index.is_none() {
             self.rebuild_similarity_index();
         }
@@ -400,17 +455,23 @@ impl App {
                     .get(&id)
                     .cloned()
                     .map(|tx| BulkRow {
-                        tx,
-                        score,
                         selected: true,
+                        item: BulkItem::Transaction {
+                            tx,
+                            score: Some(score),
+                        },
                     })
             })
             .collect();
-        rows.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
+        rows.sort_by(|a, b| match (&a.item, &b.item) {
+            (
+                BulkItem::Transaction { tx: ta, score: sa },
+                BulkItem::Transaction { tx: tb, score: sb },
+            ) => sb
+                .partial_cmp(sa)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.tx.date.cmp(&a.tx.date))
+                .then(tb.date.cmp(&ta.date)),
+            _ => std::cmp::Ordering::Equal,
         });
 
         if rows.is_empty() {
@@ -418,8 +479,7 @@ impl App {
         }
 
         self.bulk_apply = Some(BulkApplyState {
-            category_id,
-            category_path,
+            action: BulkAction::ApplyCategory { category_path },
             rows,
             cursor: 0,
         });
@@ -463,12 +523,12 @@ impl App {
         let Some(state) = self.bulk_apply.as_ref() else {
             return;
         };
-        let category_id = state.category_id;
+        let action = state.action.clone();
         let selected_ids: Vec<_> = state
             .rows
             .iter()
             .filter(|row| row.selected)
-            .map(|row| row.tx.id)
+            .map(BulkRow::target_id)
             .collect();
 
         if selected_ids.is_empty() {
@@ -476,16 +536,52 @@ impl App {
             return;
         }
 
-        let applied = self.try_mutation("apply category", |s| {
-            for tx_id in selected_ids {
-                s.set_category(tx_id, category_id, CategorySource::Manual, true, None)?;
+        let count = selected_ids.len();
+        let (applied, status) = match action {
+            BulkAction::ApplyCategory { category_path } => {
+                let status = format!(
+                    "Categorised {count} transaction{}",
+                    if count == 1 { "" } else { "s" }
+                );
+                let applied = self.try_mutation("apply category", |s| {
+                    let category_id = s.get_or_create_category(&category_path)?;
+                    s.set_categories(
+                        &selected_ids,
+                        category_id,
+                        CategorySource::Manual,
+                        true,
+                        None,
+                    )?;
+                    Ok(())
+                });
+                (applied, status)
             }
-            Ok(())
-        });
+            BulkAction::ConfirmCategories => {
+                let status = format!(
+                    "Accepted {count} categorisation{}",
+                    if count == 1 { "" } else { "s" }
+                );
+                let applied = self.try_mutation("confirm categories", |s| {
+                    s.confirm_categories(&selected_ids).map(|_| ())
+                });
+                (applied, status)
+            }
+            BulkAction::ConfirmTransfers => {
+                let status = format!(
+                    "Accepted {count} transfer{}",
+                    if count == 1 { "" } else { "s" }
+                );
+                let applied = self.try_mutation("confirm transfers", |s| {
+                    s.confirm_transfers(&selected_ids).map(|_| ())
+                });
+                (applied, status)
+            }
+        };
         if applied {
             self.bulk_apply = None;
             self.input_mode = InputMode::Normal;
             self.refresh_data();
+            self.show_status(status);
         }
     }
 
