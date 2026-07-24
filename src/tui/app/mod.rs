@@ -145,6 +145,35 @@ pub struct FilterEditState {
     pub(super) preview_scroll: usize,
 }
 
+/// The single background writer job the TUI can run at a time (WAL permits
+/// only one writer). Tracked by [`App::active_job`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BackgroundJob {
+    Refresh,
+    Classify,
+    Reindex,
+}
+
+impl BackgroundJob {
+    /// Present-progressive label for the tab-bar indicator and the
+    /// "<X> in progress" conflict message.
+    pub fn gerund(self) -> &'static str {
+        match self {
+            BackgroundJob::Refresh => "Refreshing",
+            BackgroundJob::Classify => "Classifying",
+            BackgroundJob::Reindex => "Reindexing",
+        }
+    }
+}
+
+/// Outcome of a finished [`BackgroundJob`], sent over [`App`]'s shared
+/// `job_rx` channel.
+enum JobOutcome {
+    Refresh(Result<crate::RefreshReport>),
+    Classify(Result<crate::classify::ClassifyReport>),
+    Reindex(Result<usize>),
+}
+
 pub struct App {
     pub store: TransactionStore,
     pub current_tab: Tab,
@@ -157,7 +186,9 @@ pub struct App {
     pub bulk_apply: Option<BulkApplyState>,
     pub apply_filters_preview: Option<ApplyFiltersPreview>,
     pub should_quit: bool,
-    pub refreshing: bool,
+    /// Which background writer (if any) is currently running. WAL allows only
+    /// one writer; all of refresh / classify / reindex share this slot.
+    pub active_job: Option<BackgroundJob>,
     pub keybind_help_open: bool,
     pub hints_visible: bool,
     /// Whether the transaction view shows the inline detail panel (full
@@ -202,20 +233,12 @@ pub struct App {
     // Confirmation popup state
     pub confirm_message: Option<String>,
     pub confirm_action: Option<ConfirmAction>,
-    // Local classification run: it happens on a background thread with its
-    // own store connection; `classify_rx` carries the result back to the
-    // event loop (`poll_classification`), which surfaces it as a toast.
-    pub classifying: bool,
-    classify_rx: Option<Receiver<Result<crate::classify::ClassifyReport>>>,
-    // Full-text reindex (Ctrl-G): same background-connection pattern as
-    // classification; `reindex_rx` carries the reindexed row count (or error).
-    pub reindexing: bool,
-    reindex_rx: Option<Receiver<Result<usize>>>,
     // Transient tab-bar status message + its expiry instant.
     status: Option<(String, Instant)>,
-    // Import refreshes use a background store connection so the UI remains
-    // responsive while pull/import scripts run.
-    refresh_rx: Option<Receiver<Result<crate::RefreshReport>>>,
+    // Shared receiver for the single background writer (refresh / classify /
+    // reindex). The worker opens its own store connection so the UI stays
+    // responsive; `poll_job` dispatches the outcome to the matching finish_*.
+    job_rx: Option<Receiver<JobOutcome>>,
     // Per-tab search state
     tab_search_state: HashMap<TabKey, TabSearchState>,
     search_options: SearchOptions,
@@ -252,6 +275,10 @@ impl App {
         Self::new_with_refreshing(store, false)
     }
 
+    /// `refreshing` seeds [`Self::active_job`] with
+    /// [`BackgroundJob::Refresh`] when a startup refresh is already claimed
+    /// (tests); production startup passes `false` and then calls
+    /// [`Self::request_refresh`].
     pub fn new_with_refreshing(store: TransactionStore, refreshing: bool) -> Result<Self> {
         Self::new_with_refreshing_and_search_options(
             store,
@@ -288,7 +315,7 @@ impl App {
             bulk_apply: None,
             apply_filters_preview: None,
             should_quit: false,
-            refreshing,
+            active_job: refreshing.then_some(BackgroundJob::Refresh),
             keybind_help_open: false,
             hints_visible: true,
             view_details: false,
@@ -317,12 +344,8 @@ impl App {
             filter_edit: None,
             confirm_message: None,
             confirm_action: None,
-            classifying: false,
-            classify_rx: None,
-            reindexing: false,
-            reindex_rx: None,
             status: None,
-            refresh_rx: None,
+            job_rx: None,
             tab_search_state: HashMap::new(),
             search_options,
         };
@@ -350,12 +373,23 @@ impl App {
             .map(|(message, _)| message.as_str())
     }
 
+    /// Claim the single background slot for `job`. If another job is already
+    /// running, show a consistent "<running> in progress" status and return
+    /// false. This is the ONLY place a background-job conflict is reported.
+    fn claim_job(&mut self, job: BackgroundJob) -> bool {
+        if let Some(running) = self.active_job {
+            self.show_status(format!("{} in progress", running.gerund()));
+            return false;
+        }
+        self.active_job = Some(job);
+        true
+    }
+
     /// Start importing new bank exports on a background store connection.
     /// This is intentionally available to the Todo → Uncategorised view,
     /// where newly imported transactions are immediately visible.
     pub fn request_refresh(&mut self) {
-        // WAL allows only one writer; reindex is a background writer too.
-        if self.refreshing || self.reindexing {
+        if !self.claim_job(BackgroundJob::Refresh) {
             return;
         }
 
@@ -373,31 +407,40 @@ impl App {
                 store.set_search_options(search_options);
                 store.refresh()
             });
-            let _ = tx.send(result);
+            let _ = tx.send(JobOutcome::Refresh(result));
         });
-        self.refresh_rx = Some(rx);
-        self.refreshing = true;
+        self.job_rx = Some(rx);
     }
 
-    /// Collect a finished import refresh, if any.
-    pub fn poll_refresh(&mut self) {
-        let Some(rx) = &self.refresh_rx else { return };
-        let result = match rx.try_recv() {
-            Ok(result) => result,
+    /// Collect a finished background job (refresh / classify / reindex), if
+    /// any. Called every event-loop iteration; cheap no-op while idle or
+    /// still running.
+    pub fn poll_job(&mut self) {
+        let Some(rx) = &self.job_rx else { return };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => outcome,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.refresh_rx = None;
-                self.refreshing = false;
-                self.error_message = Some("Refresh stopped unexpectedly".to_string());
+                self.job_rx = None;
+                let label = self
+                    .active_job
+                    .map(|j| j.gerund())
+                    .unwrap_or("Background job");
+                self.active_job = None;
+                self.error_message = Some(format!("{label} stopped unexpectedly"));
                 return;
             }
         };
-        self.refresh_rx = None;
-        self.finish_refresh(result);
+        self.job_rx = None;
+        match outcome {
+            JobOutcome::Refresh(result) => self.finish_refresh(result),
+            JobOutcome::Classify(result) => self.finish_classification(result),
+            JobOutcome::Reindex(result) => self.finish_reindex(result),
+        }
     }
 
     fn finish_refresh(&mut self, result: Result<crate::RefreshReport>) {
-        self.refreshing = false;
+        self.active_job = None;
         self.refresh_data();
         match result {
             Ok(report) => self.show_status(format!(
@@ -754,22 +797,12 @@ impl App {
     /// Rebuild `transactions_fts` from the transactions table (Ctrl-G).
     ///
     /// Runs on a background store connection (like refresh/classification) so
-    /// the UI stays live and a "Reindexing..." indicator can paint. Skipped
-    /// while a background refresh or classification holds the write lock —
-    /// WAL allows only one writer. In-memory stores (tests) have no path to
-    /// open a second connection on, so they run inline instead.
+    /// the UI stays live and a "Reindexing..." indicator can paint. Conflicts
+    /// with any other background writer are reported by [`Self::claim_job`].
+    /// In-memory stores (tests) have no path to open a second connection on,
+    /// so they run inline instead.
     pub fn reindex_fts(&mut self) {
-        if self.reindexing {
-            return;
-        }
-        // Background DROP+re-insert collides with an in-flight background
-        // writer (refresh or classification). Guard like `request_refresh`.
-        if self.refreshing {
-            self.show_status("Reindex skipped — refresh in progress".to_string());
-            return;
-        }
-        if self.classifying {
-            self.show_status("Reindex skipped — classification in progress".to_string());
+        if !self.claim_job(BackgroundJob::Reindex) {
             return;
         }
 
@@ -784,34 +817,15 @@ impl App {
         std::thread::spawn(move || {
             let result = TransactionStore::open(&db_path, &exports_dir)
                 .and_then(|store| store.rebuild_fts());
-            let _ = tx.send(result);
+            let _ = tx.send(JobOutcome::Reindex(result));
         });
-        self.reindex_rx = Some(rx);
-        self.reindexing = true;
+        self.job_rx = Some(rx);
     }
 
-    /// Collect a finished background reindex, if any. Called every event-loop
-    /// iteration; cheap no-op while the rebuild is still going.
-    pub fn poll_reindex(&mut self) {
-        let Some(rx) = &self.reindex_rx else { return };
-        let result = match rx.try_recv() {
-            Ok(result) => result,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.reindex_rx = None;
-                self.reindexing = false;
-                self.error_message = Some("Reindex stopped unexpectedly".to_string());
-                return;
-            }
-        };
-        self.reindex_rx = None;
-        self.finish_reindex(result);
-    }
-
-    /// Clear the in-flight flag, then surface the outcome: reload + green
+    /// Clear the in-flight job, then surface the outcome: reload + green
     /// status on success, error popup on failure.
     fn finish_reindex(&mut self, result: Result<usize>) {
-        self.reindexing = false;
+        self.active_job = None;
         match result {
             Ok(count) => {
                 self.refresh_data();
@@ -1719,38 +1733,41 @@ mod tests {
     }
 
     #[test]
-    fn reindex_fts_skipped_while_refreshing() {
-        let (_temp, store) = store_with_transactions(&[FixtureTx {
-            description: "Coffee",
-            amount_cents: -450,
-        }]);
-        let mut app = App::new_with_refreshing(store, true).unwrap();
+    fn background_job_request_skipped_while_another_is_active() {
+        // Every ordered pair of distinct jobs: the running one blocks the
+        // attempted one with a uniform "<running> in progress" status and
+        // leaves active_job unchanged (covers the former refresh↔classify gap).
+        let jobs = [
+            BackgroundJob::Refresh,
+            BackgroundJob::Classify,
+            BackgroundJob::Reindex,
+        ];
+        for running in jobs {
+            for attempted in jobs {
+                if running == attempted {
+                    continue;
+                }
+                let (_temp, store) = store_with_transactions(&[]);
+                let mut app = App::new(store).unwrap();
+                app.active_job = Some(running);
 
-        app.reindex_fts();
+                match attempted {
+                    BackgroundJob::Refresh => app.request_refresh(),
+                    BackgroundJob::Classify => app.request_classify(),
+                    BackgroundJob::Reindex => app.reindex_fts(),
+                }
 
-        assert!(app.error_message.is_none());
-        assert_eq!(
-            app.active_status(),
-            Some("Reindex skipped — refresh in progress")
-        );
-    }
-
-    #[test]
-    fn reindex_fts_skipped_while_classifying() {
-        let (_temp, store) = store_with_transactions(&[FixtureTx {
-            description: "Coffee",
-            amount_cents: -450,
-        }]);
-        let mut app = App::new(store).unwrap();
-        app.classifying = true;
-
-        app.reindex_fts();
-
-        assert!(app.error_message.is_none());
-        assert_eq!(
-            app.active_status(),
-            Some("Reindex skipped — classification in progress")
-        );
+                assert_eq!(app.active_job, Some(running));
+                assert!(app.job_rx.is_none());
+                assert!(app.error_message.is_none());
+                let expected = format!("{} in progress", running.gerund());
+                assert_eq!(
+                    app.active_status(),
+                    Some(expected.as_str()),
+                    "running={running:?} attempted={attempted:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1766,42 +1783,13 @@ mod tests {
             },
         ]);
         let mut app = App::new(store).unwrap();
-        assert!(!app.refreshing);
-        assert!(!app.classifying);
-        assert!(!app.reindexing);
+        assert!(app.active_job.is_none());
 
         app.reindex_fts();
 
-        assert!(!app.reindexing);
+        assert!(app.active_job.is_none());
         assert!(app.error_message.is_none());
         assert_eq!(app.active_status(), Some("Reindexed 2 transactions"));
-    }
-
-    #[test]
-    fn request_refresh_skipped_while_reindexing() {
-        let (_temp, store) = store_with_transactions(&[]);
-        let mut app = App::new(store).unwrap();
-        app.reindexing = true;
-
-        app.request_refresh();
-
-        // Guard returns early: no background thread, flags unchanged.
-        assert!(app.reindexing);
-        assert!(!app.refreshing);
-        assert!(app.refresh_rx.is_none());
-    }
-
-    #[test]
-    fn request_classify_skipped_while_reindexing() {
-        let (_temp, store) = store_with_transactions(&[]);
-        let mut app = App::new(store).unwrap();
-        app.reindexing = true;
-
-        app.request_classify();
-
-        assert!(app.reindexing);
-        assert!(!app.classifying);
-        assert!(app.classify_rx.is_none());
     }
 
     #[test]
@@ -1811,11 +1799,11 @@ mod tests {
             amount_cents: -450,
         }]);
         let mut app = App::new(store).unwrap();
-        app.reindexing = true;
+        app.active_job = Some(BackgroundJob::Reindex);
 
         app.finish_reindex(Ok(1));
 
-        assert!(!app.reindexing);
+        assert!(app.active_job.is_none());
         assert!(app.error_message.is_none());
         assert_eq!(app.active_status(), Some("Reindexed 1 transactions"));
     }
@@ -1824,13 +1812,13 @@ mod tests {
     fn finish_reindex_err_clears_flag_and_sets_error() {
         let (_temp, store) = store_with_transactions(&[]);
         let mut app = App::new(store).unwrap();
-        app.reindexing = true;
+        app.active_job = Some(BackgroundJob::Reindex);
 
         app.finish_reindex(Err(crate::Error::ImportFailed(
             "simulated reindex failure".into(),
         )));
 
-        assert!(!app.reindexing);
+        assert!(app.active_job.is_none());
         assert!(app.active_status().is_none());
         let msg = app.error_message.as_deref().unwrap_or("");
         assert!(

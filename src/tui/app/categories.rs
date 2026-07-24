@@ -2,14 +2,13 @@
 //! and rename/merge on the Categories tab.
 
 use std::path::Path;
-use std::sync::mpsc::TryRecvError;
 
 use crate::classify::{ClassifyReport, SIMILARITY_THRESHOLD, normalise};
 use crate::{Category, CategorySource, Transaction, TransactionStore};
 
 use super::{
-    App, BulkApplyState, BulkRow, CategoryTarget, ConfirmAction, InputMode, Tab, TextPromptTarget,
-    TodoSubTab, next_wrapping, prev_wrapping,
+    App, BackgroundJob, BulkApplyState, BulkRow, CategoryTarget, ConfirmAction, InputMode,
+    JobOutcome, Tab, TextPromptTarget, TodoSubTab, next_wrapping, prev_wrapping,
 };
 
 const BULK_APPLY_MATCH_LIMIT: usize = 200;
@@ -19,12 +18,11 @@ impl App {
 
     /// Kick off a local classification run on a background thread (with its
     /// own store connection, like the startup refresh), keeping the UI live;
-    /// the event loop polls [`Self::poll_classification`] for the result,
-    /// which lands as a toast. In-memory stores (tests) have no path to open
-    /// a second connection on, so they run inline instead.
+    /// the event loop polls [`Self::poll_job`] for the result, which lands as
+    /// a toast. In-memory stores (tests) have no path to open a second
+    /// connection on, so they run inline instead.
     pub fn request_classify(&mut self) {
-        // WAL allows only one writer; reindex is a background writer too.
-        if self.classifying || self.reindexing {
+        if !self.claim_job(BackgroundJob::Classify) {
             return;
         }
 
@@ -42,36 +40,17 @@ impl App {
                 store.set_search_options(search_options);
                 crate::classify::classify(&mut store)
             });
-            let _ = tx.send(result);
+            let _ = tx.send(JobOutcome::Classify(result));
         });
-        self.classify_rx = Some(rx);
-        self.classifying = true;
-    }
-
-    /// Collect a finished background classification, if any. Called every
-    /// event-loop iteration; cheap no-op while the run is still going.
-    pub fn poll_classification(&mut self) {
-        let Some(rx) = &self.classify_rx else { return };
-        let result = match rx.try_recv() {
-            Ok(result) => result,
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => {
-                self.classify_rx = None;
-                self.classifying = false;
-                self.error_message = Some("Classification stopped unexpectedly".to_string());
-                return;
-            }
-        };
-        self.classify_rx = None;
-        self.finish_classification(result);
+        self.job_rx = Some(rx);
     }
 
     /// Refresh the lists, then surface the run's outcome: a summary toast on
     /// success, the error popup on failure. `refresh_data` runs before the
     /// outcome is stored because a successful tab reload clears
     /// `error_message`.
-    fn finish_classification(&mut self, result: crate::Result<ClassifyReport>) {
-        self.classifying = false;
+    pub(super) fn finish_classification(&mut self, result: crate::Result<ClassifyReport>) {
+        self.active_job = None;
         self.refresh_data();
         match result {
             Ok(report) => self.show_status(format!(

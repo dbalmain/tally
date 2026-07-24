@@ -474,14 +474,8 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     if let Some(message) = app.active_status() {
         parts.push((message.to_string(), Color::Green));
     }
-    if app.refreshing {
-        parts.push(("Refreshing...".to_string(), Color::DarkGray));
-    }
-    if app.classifying {
-        parts.push(("Classifying...".to_string(), Color::DarkGray));
-    }
-    if app.reindexing {
-        parts.push(("Reindexing...".to_string(), Color::DarkGray));
+    if let Some(job) = app.active_job {
+        parts.push((format!("{}...", job.gerund()), Color::DarkGray));
     }
     if parts.is_empty() {
         return;

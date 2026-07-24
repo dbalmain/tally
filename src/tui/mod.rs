@@ -153,13 +153,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             return Ok(());
         }
 
-        app.poll_refresh();
-
-        // Collect a finished background classification (result lands as a
-        // toast; the redraw cadence below also expires toasts).
-        app.poll_classification();
-
-        app.poll_reindex();
+        // Collect a finished background job (refresh / classify / reindex);
+        // result lands as a toast; the redraw cadence below also expires them.
+        app.poll_job();
 
         terminal.draw(|f| ui::draw(f, app))?;
 
