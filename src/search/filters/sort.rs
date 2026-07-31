@@ -190,6 +190,7 @@ mod tests {
                 "account",
                 "bank",
                 "category",
+                "confidence",
             ]
         );
     }

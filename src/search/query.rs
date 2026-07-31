@@ -12,10 +12,11 @@ pub enum SortColumn {
     Account,
     Bank,
     Category,
+    Confidence,
 }
 
 impl SortColumn {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Date,
         Self::Description,
         Self::Amount,
@@ -23,6 +24,7 @@ impl SortColumn {
         Self::Account,
         Self::Bank,
         Self::Category,
+        Self::Confidence,
     ];
 
     pub fn name(self) -> &'static str {
@@ -34,6 +36,7 @@ impl SortColumn {
             Self::Account => "account",
             Self::Bank => "bank",
             Self::Category => "category",
+            Self::Confidence => "confidence",
         }
     }
 
@@ -46,6 +49,7 @@ impl SortColumn {
             "account" => Some(Self::Account),
             "bank" => Some(Self::Bank),
             "category" => Some(Self::Category),
+            "confidence" => Some(Self::Confidence),
             _ => None,
         }
     }

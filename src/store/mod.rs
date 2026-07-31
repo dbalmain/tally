@@ -117,6 +117,10 @@ fn aliased_transaction_ctx(alias: &str) -> SqlContext {
 fn transaction_ctx() -> SqlContext {
     aliased_transaction_ctx("t")
         .with(ph::CATEGORY_PATH, "c.path")
+        // On a transaction-rooted query the confidence in play is the category
+        // suggestion's; the transfer-side contexts bind the same placeholder to
+        // the transfer's own score.
+        .with(ph::AI_CONFIDENCE, "e.ai_confidence")
         .with(ph::FTS_MATCH, "transactions_fts MATCH ?")
         .with(
             ph::FTS_NOT_MATCH,
@@ -131,13 +135,20 @@ fn transaction_ctx() -> SqlContext {
 /// from-side, once for the to-side). The FTS clause uses a side-scoped
 /// subquery rather than a top-level JOIN, because each transfer pair has two
 /// transactions and we want a match on either side to qualify the row.
+///
+/// `{ai_confidence}` is a property of the transfer, not of either side, so both
+/// side contexts bind it to the same `tr.ai_confidence`. It therefore renders
+/// identically on both arms of the OR — redundant but correct, since a clause
+/// OR'd with itself is itself.
 fn transfer_side_ctx(alias: &str) -> SqlContext {
-    aliased_transaction_ctx(alias).with(
-        ph::FTS_MATCH,
-        format!(
-            "{alias}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)"
-        ),
-    )
+    aliased_transaction_ctx(alias)
+        .with(ph::AI_CONFIDENCE, "tr.ai_confidence")
+        .with(
+            ph::FTS_MATCH,
+            format!(
+                "{alias}.id IN (SELECT rowid FROM transactions_fts WHERE transactions_fts MATCH ?)"
+            ),
+        )
 }
 
 /// Enrichment/transfer joins backing the Todo-tab queries (uncategorised and
@@ -153,25 +164,29 @@ fn transaction_fts_join(parsed: &ParsedQuery) -> &'static str {
     }
 }
 
-fn transaction_category_join(parsed: &ParsedQuery, enrichment_joined: bool) -> String {
-    if !parsed.uses_placeholder(ph::CATEGORY_PATH) {
-        return String::new();
-    }
+/// Enrichment-dependent joins: `transaction_enrichments e` whenever the query
+/// touches an enrichment column, plus `categories c` when it needs the category
+/// path. `enrichment_joined` says the caller already joined `e` itself (the
+/// Todo-tab queries do, to filter on it).
+fn transaction_enrichment_joins(parsed: &ParsedQuery, enrichment_joined: bool) -> String {
+    let needs_category = parsed.uses_placeholder(ph::CATEGORY_PATH);
+    let needs_enrichment = needs_category || parsed.uses_placeholder(ph::AI_CONFIDENCE);
 
-    if enrichment_joined {
-        " LEFT JOIN categories c ON e.category_id = c.id".to_string()
-    } else {
-        " LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id\
-         \n LEFT JOIN categories c ON e.category_id = c.id"
-            .to_string()
+    let mut joins = String::new();
+    if needs_enrichment && !enrichment_joined {
+        joins.push_str(" LEFT JOIN transaction_enrichments e ON t.id = e.transaction_id");
     }
+    if needs_category {
+        joins.push_str("\n LEFT JOIN categories c ON e.category_id = c.id");
+    }
+    joins
 }
 
 /// Joins to splice into a transaction query based on what the parsed query needs.
 fn transaction_joins(parsed: &ParsedQuery) -> String {
     let mut joins = String::new();
     joins.push_str(transaction_fts_join(parsed));
-    joins.push_str(&transaction_category_join(parsed, false));
+    joins.push_str(&transaction_enrichment_joins(parsed, false));
     joins
 }
 

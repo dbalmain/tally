@@ -9,7 +9,7 @@ use crate::{Result, Transaction, TransactionWithEnrichment};
 use super::{
     ENRICHMENT_COL_COUNT, TODO_TAB_JOINS, TX_COL_COUNT, TransactionStore, category_cols,
     enrichment_cols, parse_category_at_offset, parse_enrichment_at_offset, parse_transaction,
-    push_limit, transaction_category_join, transaction_ctx, transaction_fts_join,
+    push_limit, transaction_ctx, transaction_enrichment_joins, transaction_fts_join,
     transaction_joins, tx_cols,
 };
 
@@ -40,7 +40,7 @@ impl TransactionStore {
         } else {
             sql.push_str(transaction_fts_join(query));
             sql.push_str(extra_joins);
-            sql.push_str(&transaction_category_join(
+            sql.push_str(&transaction_enrichment_joins(
                 query,
                 extra_joins_include_enrichment,
             ));
@@ -278,6 +278,44 @@ mod tests {
     }
 
     #[test]
+    fn query_confidence_filters_on_the_enrichment_score() {
+        // The enrichment join is spliced in on demand, so this also covers
+        // `confidence:` working on a query that has no `category:` term.
+        let (_t, store) = setup_rich_fixture();
+
+        // Coffee Bean is the one AI suggestion, at 0.85.
+        let txs = store
+            .query_transactions(&q("confidence:>80"), None)
+            .unwrap();
+        let descs: Vec<&str> = txs.iter().map(|tx| tx.description.as_str()).collect();
+        assert_eq!(descs, vec!["Coffee Bean"]);
+
+        // Everything else is manual (NULL score) or unenriched, so a
+        // comparison excludes it rather than treating NULL as zero.
+        assert!(
+            store
+                .query_transactions(&q("confidence:<60"), None)
+                .unwrap()
+                .is_empty()
+        );
+
+        // The displayed "85%" is queryable as written.
+        let txs = store.query_transactions(&q("confidence:85"), None).unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].description, "Coffee Bean");
+
+        // `any` / `none` split scored rows from the rest.
+        let scored = store
+            .query_transactions(&q("confidence:any"), None)
+            .unwrap();
+        assert_eq!(scored.len(), 1);
+        let unscored = store
+            .query_transactions(&q("confidence:none"), None)
+            .unwrap();
+        assert_eq!(unscored.len(), 6);
+    }
+
+    #[test]
     fn query_date_year() {
         let (_t, store) = setup_rich_fixture();
         let txs = store.query_transactions(&q("date:2024"), None).unwrap();
@@ -462,6 +500,58 @@ mod tests {
     }
 
     #[test]
+    fn query_sort_confidence_orders_least_certain_first_and_unscored_last() {
+        let (_tmp, mut store, account, _other) = store_with_two_accounts();
+        let category = store.get_or_create_category("Food").unwrap();
+        let mut add = |day: u32, confidence: Option<f64>| {
+            let id = insert_tx(&store, account, &format!("2024-03-{day:02}"), -1000);
+            let source = if confidence.is_some() {
+                CategorySource::Ai
+            } else {
+                CategorySource::Manual
+            };
+            store
+                .set_category(id, category, source, confidence.is_none(), confidence)
+                .unwrap();
+            id
+        };
+        let unsure = add(10, Some(0.30));
+        let middling = add(11, Some(0.65));
+        let confident = add(12, Some(0.95));
+        // Manually categorised, so no score at all.
+        let unscored = add(13, None);
+
+        // Ascending: lowest score first, the unscored row last rather than
+        // leading the way SQLite would order a NULL.
+        let ids: Vec<i64> = store
+            .query_transactions(&q("sort:confidence"), None)
+            .unwrap()
+            .iter()
+            .map(|tx| tx.id)
+            .collect();
+        assert_eq!(ids, vec![unsure, middling, confident, unscored]);
+
+        // Descending flips the scored rows but keeps the unscored one last.
+        let ids: Vec<i64> = store
+            .query_transactions(&q("sort:-confidence"), None)
+            .unwrap()
+            .iter()
+            .map(|tx| tx.id)
+            .collect();
+        assert_eq!(ids, vec![confident, middling, unsure, unscored]);
+
+        // Combining with the filter is the real triage query: "show me the
+        // shakiest suggestions, worst first".
+        let ids: Vec<i64> = store
+            .query_transactions(&q("confidence:<70 sort:confidence"), None)
+            .unwrap()
+            .iter()
+            .map(|tx| tx.id)
+            .collect();
+        assert_eq!(ids, vec![unsure, middling]);
+    }
+
+    #[test]
     fn query_sort_category_amount_groups_categories_and_nulls_last() {
         let (_t, store) = setup_rich_fixture();
         let txs = store
@@ -604,6 +694,24 @@ mod tests {
             .unwrap();
         // Coffee Bean is on NAB → filtered out
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn pending_ai_reviews_filtered_by_confidence() {
+        let (_t, store) = setup_rich_fixture();
+        // Coffee Bean's suggestion sits at 0.85.
+        assert_eq!(
+            store
+                .get_pending_ai_reviews(&q("confidence:<60"), None)
+                .unwrap()
+                .len(),
+            0
+        );
+        let pending = store
+            .get_pending_ai_reviews(&q("confidence:80..90"), None)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].transaction.description, "Coffee Bean");
     }
 
     #[test]

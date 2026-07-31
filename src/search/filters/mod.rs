@@ -3,6 +3,7 @@
 mod account;
 mod amount;
 mod category;
+mod confidence;
 mod date;
 mod list;
 mod sort;
@@ -10,5 +11,6 @@ mod sort;
 pub use account::AccountFilter;
 pub use amount::AmountFilter;
 pub use category::CategoryFilter;
+pub use confidence::ConfidenceFilter;
 pub use date::DateFilter;
 pub use sort::SortFilter;

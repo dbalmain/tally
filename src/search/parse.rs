@@ -52,12 +52,15 @@ impl SearchConfig {
         category_options: Option<Vec<String>>,
         options: SearchOptions,
     ) -> Self {
-        use super::filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, SortFilter};
+        use super::filters::{
+            AccountFilter, AmountFilter, CategoryFilter, ConfidenceFilter, DateFilter, SortFilter,
+        };
 
         let mut filters: Vec<Box<dyn Filter>> = vec![
             Box::new(DateFilter::new(options)),
             Box::new(AmountFilter),
             Box::new(AccountFilter::new(account_options)),
+            Box::new(ConfidenceFilter),
             Box::new(SortFilter),
         ];
         if let Some(options) = category_options {

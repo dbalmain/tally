@@ -340,26 +340,29 @@ impl ParsedQuery {
 
 fn render_sort_key(key: SortKey, ctx: &SqlContext) -> Vec<String> {
     let direction = if key.descending { "DESC" } else { "ASC" };
-    match key.column {
-        SortColumn::Category => {
-            let nulls_last_template = format!("{} IS NULL ASC", ph::reference(ph::CATEGORY_PATH));
-            let value_template = format!("{} {direction}", ph::reference(ph::CATEGORY_PATH));
-            let Some(nulls_last) = ctx.render_template(&nulls_last_template) else {
-                return Vec::new();
-            };
-            let Some(value) = ctx.render_template(&value_template) else {
-                return Vec::new();
-            };
-            vec![nulls_last, value]
-        }
-        column => {
-            let template = format!(
-                "{} {direction}",
-                ph::reference(sort_column_placeholder(column))
-            );
-            ctx.render_template(&template).into_iter().collect()
-        }
+    let placeholder = ph::reference(sort_column_placeholder(key.column));
+    let mut clauses = Vec::new();
+
+    if sorts_nulls_last(key.column) {
+        let Some(nulls_last) = ctx.render_template(&format!("{placeholder} IS NULL ASC")) else {
+            return Vec::new();
+        };
+        clauses.push(nulls_last);
     }
+
+    let Some(value) = ctx.render_template(&format!("{placeholder} {direction}")) else {
+        return Vec::new();
+    };
+    clauses.push(value);
+    clauses
+}
+
+/// Columns that can be NULL and whose empty rows belong at the end whichever
+/// way the user sorted: an uncategorised row is not "before Food", and an
+/// unscored row is not the least confident one. SQLite would otherwise lead
+/// with them on an ascending sort.
+fn sorts_nulls_last(column: SortColumn) -> bool {
+    matches!(column, SortColumn::Category | SortColumn::Confidence)
 }
 
 fn sort_key_placeholders(key: SortKey) -> &'static [&'static str] {
@@ -371,6 +374,7 @@ fn sort_key_placeholders(key: SortKey) -> &'static [&'static str] {
         SortColumn::Account => &[ph::ACCOUNT_NAME],
         SortColumn::Bank => &[ph::BANK_NAME],
         SortColumn::Category => &[ph::CATEGORY_PATH],
+        SortColumn::Confidence => &[ph::AI_CONFIDENCE],
     }
 }
 
@@ -383,6 +387,7 @@ fn sort_column_placeholder(column: SortColumn) -> &'static str {
         SortColumn::Account => ph::ACCOUNT_NAME,
         SortColumn::Bank => ph::BANK_NAME,
         SortColumn::Category => ph::CATEGORY_PATH,
+        SortColumn::Confidence => ph::AI_CONFIDENCE,
     }
 }
 
@@ -751,6 +756,52 @@ mod tests {
             query.order_by(&ctx_full()).as_deref(),
             Some("c.path IS NULL ASC, c.path ASC, t.amount_cents DESC, t.id DESC")
         );
+    }
+
+    #[test]
+    fn order_by_sorts_unscored_rows_last_in_both_directions() {
+        // Ascending confidence means "least confident first", which is only
+        // useful if the rows with no score at all stay out of the way.
+        let ctx = ctx_full().with(ph::AI_CONFIDENCE, "e.ai_confidence");
+
+        let ascending = parsed_with_sort(vec![SortKey {
+            column: SortColumn::Confidence,
+            descending: false,
+        }]);
+        assert_eq!(
+            ascending.order_by(&ctx).as_deref(),
+            Some("e.ai_confidence IS NULL ASC, e.ai_confidence ASC, t.id DESC")
+        );
+
+        let descending = parsed_with_sort(vec![SortKey {
+            column: SortColumn::Confidence,
+            descending: true,
+        }]);
+        assert_eq!(
+            descending.order_by(&ctx).as_deref(),
+            Some("e.ai_confidence IS NULL ASC, e.ai_confidence DESC, t.id DESC")
+        );
+    }
+
+    #[test]
+    fn order_by_drops_confidence_key_without_the_placeholder() {
+        // Transfer-side contexts and any future context that can't reach a
+        // confidence column drop the key rather than failing the query.
+        let query = parsed_with_sort(vec![SortKey {
+            column: SortColumn::Confidence,
+            descending: false,
+        }]);
+        assert_eq!(query.order_by(&ctx_full()), None);
+    }
+
+    #[test]
+    fn uses_placeholder_detects_confidence_sort_key() {
+        // This is what splices the enrichment join in for `sort:confidence`.
+        let query = parsed_with_sort(vec![SortKey {
+            column: SortColumn::Confidence,
+            descending: false,
+        }]);
+        assert!(query.uses_placeholder(ph::AI_CONFIDENCE));
     }
 
     #[test]

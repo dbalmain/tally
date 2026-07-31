@@ -433,6 +433,51 @@ mod tests {
     }
 
     #[test]
+    fn transfers_filter_by_confidence() {
+        let (_tmp, mut store, a1, a2) = store_with_two_accounts();
+        let mut make = |day: u32, confidence: Option<f64>| {
+            let from = insert_tx(&store, a1, &format!("2024-03-{day:02}"), -5000);
+            let to = insert_tx(&store, a2, &format!("2024-03-{day:02}"), 5000);
+            store
+                .create_transfer(from, to, TransferSource::Auto, false, confidence)
+                .unwrap()
+        };
+        let unsure = make(10, Some(0.45));
+        let confident = make(11, Some(0.95));
+        let manual = make(12, None);
+
+        // `{ai_confidence}` is a transfer property, not a per-side one, so it
+        // survives the "either side matches" OR intact.
+        let pending = store
+            .get_pending_transfer_reviews(&q("confidence:<60"), None)
+            .unwrap();
+        let ids: Vec<i64> = pending.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![unsure]);
+
+        let pending = store
+            .get_pending_transfer_reviews(&q("confidence:>90"), None)
+            .unwrap();
+        let ids: Vec<i64> = pending.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![confident]);
+
+        // A hand-marked transfer has no score at all; `none` is the only way to
+        // reach it.
+        let pending = store
+            .get_pending_transfer_reviews(&q("confidence:none"), None)
+            .unwrap();
+        let ids: Vec<i64> = pending.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![manual]);
+
+        // Same filter on the Transfers tab query.
+        store.confirm_transfer(unsure).unwrap();
+        let listed = store
+            .list_transfers_with_transactions(true, &q("confidence:..50"), None)
+            .unwrap();
+        let ids: Vec<i64> = listed.iter().map(|t| t.transfer.id).collect();
+        assert_eq!(ids, vec![unsure]);
+    }
+
+    #[test]
     fn pending_transfer_reviews_empty_when_all_confirmed() {
         let (_t, store) = setup_rich_fixture();
         let pending = store

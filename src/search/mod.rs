@@ -44,12 +44,27 @@
 //! - `category:Food` — path starts with "Food"; `category:/Groceries` — a
 //!   "Groceries…" segment under any parent (matches after any `/`);
 //!   `category:Food|Transport` — OR
+//! - `confidence:<60` — AI confidence below 60%. Percentages throughout (a
+//!   `%` suffix is allowed and means the same), matching how the score is
+//!   displayed: `confidence:>80`, `confidence:40..60` (inclusive endpoints),
+//!   `confidence:..60` / `confidence:40..`. A bare value matches the rounding
+//!   bucket around it, so `confidence:85` is "anything that displays as 85%".
+//!   Values above 100 are rejected — note that `confidence:0.6` means 0.6%,
+//!   not 60%. Which score is filtered follows the search: on transaction
+//!   searches it is the category suggestion's confidence, on transfer searches
+//!   the transfer's. Rows with no score (manual categorisations, hand-marked
+//!   transfers) hold NULL and so match neither comparisons nor ranges;
+//!   `confidence:none` selects exactly those, `confidence:any` the scored ones.
+//!   Aliased as `conf:`.
 //! - `sort:category,amount` — transaction DB searches only: order by the listed
 //!   columns in order. Columns are `date`, `description`, `amount`, `balance`,
-//!   `account`, `bank`, and `category`. Prefix a column with `-` for descending,
-//!   e.g. `sort:-amount`. Ascending is the default for every column. Category
-//!   sorting keeps uncategorised rows last. Multiple `sort:` terms are allowed;
-//!   the last one wins.
+//!   `account`, `bank`, `category`, and `confidence`. Prefix a column with `-`
+//!   for descending, e.g. `sort:-amount`. Ascending is the default for every
+//!   column. The two nullable columns keep their empty rows last in both
+//!   directions: `category` sorting keeps uncategorised rows at the end, and
+//!   `confidence` keeps unscored ones there — so `sort:confidence` reads as
+//!   "shakiest suggestions first". Multiple `sort:` terms are allowed; the last
+//!   one wins.
 //! - Quoting for values with spaces: `account:"ING/Orange Everyday"` or
 //!   `account:ING/Orange\ Everyday`
 //!
@@ -96,7 +111,9 @@ mod tokenize;
 
 pub use context::CursorContext;
 pub use filter::{Filter, FilterResult};
-pub use filters::{AccountFilter, AmountFilter, CategoryFilter, DateFilter, SortFilter};
+pub use filters::{
+    AccountFilter, AmountFilter, CategoryFilter, ConfidenceFilter, DateFilter, SortFilter,
+};
 pub use parse::{SearchConfig, SearchOptions, parse};
 pub use query::{ParsedQuery, QueryPart, SortColumn, SortKey, Span};
 pub use render::SqlContext;
