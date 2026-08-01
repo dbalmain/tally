@@ -172,6 +172,7 @@ fn run_refresh(db_path: &Path, exports_dir: &Path, search_options: SearchOptions
         ("Accounts added", report.accounts_added),
         ("Accounts deleted", report.accounts_deleted),
         ("Transactions added", report.transactions_added),
+        ("Transactions updated", report.transactions_updated),
     ] {
         if count > 0 {
             println!("  {label}: {count}");

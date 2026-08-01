@@ -19,6 +19,20 @@ const PULL_CONCURRENCY: usize = 6;
 
 type PullResults = HashMap<(String, String), Result<Vec<RawTransaction>>>;
 
+type Metadata = HashMap<String, serde_json::Value>;
+
+/// What one raw transaction did to the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportOutcome {
+    /// A new row.
+    Added,
+    /// An existing `(account_id, hash)` row whose description or metadata the
+    /// source has since refined.
+    Updated,
+    /// An existing row the source re-sent unchanged.
+    Unchanged,
+}
+
 struct PullJob {
     bank_name: String,
     account_name: String,
@@ -354,7 +368,7 @@ impl TransactionStore {
     }
 
     /// Insert a batch of raw transactions, computing a fallback hash and
-    /// tallying added/skipped counts in `report`.
+    /// tallying added/updated/skipped counts in `report`.
     fn insert_raw_transactions(
         &self,
         account_id: i64,
@@ -374,7 +388,7 @@ impl TransactionStore {
                 )
             });
 
-            let inserted = self.insert_transaction(
+            let outcome = self.insert_transaction(
                 account_id,
                 &date,
                 &raw_tx.description,
@@ -386,10 +400,10 @@ impl TransactionStore {
                 batch_id,
             )?;
 
-            if inserted {
-                report.transactions_added += 1;
-            } else {
-                report.transactions_skipped += 1;
+            match outcome {
+                ImportOutcome::Added => report.transactions_added += 1,
+                ImportOutcome::Updated => report.transactions_updated += 1,
+                ImportOutcome::Unchanged => report.transactions_skipped += 1,
             }
         }
 
@@ -429,10 +443,10 @@ impl TransactionStore {
         amount_cents: i64,
         balance_cents: i64,
         hash: &str,
-        metadata: &std::collections::HashMap<String, serde_json::Value>,
+        metadata: &Metadata,
         source_file: &str,
         batch_id: i64,
-    ) -> Result<bool> {
+    ) -> Result<ImportOutcome> {
         let metadata_json = serde_json::to_string(metadata)?;
         let result = self.conn.execute(
             "INSERT OR IGNORE INTO transactions
@@ -456,9 +470,80 @@ impl TransactionStore {
             // A row that was just inserted has no note yet, so there is nothing
             // to fold in; `set_note` rewrites the posting when one is added.
             self.write_transaction_fts(rowid, description, metadata, None)?;
+            return Ok(ImportOutcome::Added);
         }
 
-        Ok(result > 0)
+        self.refine_existing_transaction(account_id, hash, description, metadata)
+    }
+
+    /// The row already exists under `(account_id, hash)`. Feeds refine text
+    /// after first posting — a card BPAY lands as `BPAY SALES PARRAMATTA AUS`
+    /// and only later becomes `BPAYN ACT REVENUE OFFICE BPAY, Camp Rates Aug26`
+    /// — so a re-pull carrying better text should apply it rather than being
+    /// discarded as a duplicate.
+    ///
+    /// Only description and metadata move. The hash asserts this is the same
+    /// real-world transaction, so identity and economic fields (`date`,
+    /// `amount_cents`, `balance_cents`, `account_id`) are never touched: a feed
+    /// that changed those is reporting a different transaction, not a
+    /// refinement of this one. The row id is preserved, so categories, notes,
+    /// tags and transfer links all survive.
+    fn refine_existing_transaction(
+        &self,
+        account_id: i64,
+        hash: &str,
+        description: &str,
+        metadata: &Metadata,
+    ) -> Result<ImportOutcome> {
+        let existing: Option<(i64, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, description, metadata FROM transactions
+                 WHERE account_id = ? AND hash = ?",
+                params![account_id, hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        // Defensive: the INSERT was ignored, so a row must exist. If some other
+        // constraint swallowed it, leave the store alone.
+        let Some((id, stored_description, stored_metadata_json)) = existing else {
+            return Ok(ImportOutcome::Unchanged);
+        };
+
+        let stored_metadata: Metadata =
+            serde_json::from_str(&stored_metadata_json).unwrap_or_default();
+        let merged_metadata = merge_metadata(&stored_metadata, metadata);
+
+        // A feed that drops the payee entirely is a regression, not a
+        // refinement, and the stored text is unrecoverable — so never blank it.
+        let new_description = if description.trim().is_empty() {
+            stored_description.as_str()
+        } else {
+            description
+        };
+
+        if new_description == stored_description && merged_metadata == stored_metadata {
+            return Ok(ImportOutcome::Unchanged);
+        }
+
+        // Keep the stored JSON verbatim when the map is unchanged: re-encoding
+        // a HashMap reorders its keys, which would churn the column on every
+        // description-only refinement.
+        let new_metadata_json = if merged_metadata == stored_metadata {
+            stored_metadata_json
+        } else {
+            serde_json::to_string(&merged_metadata)?
+        };
+
+        self.conn.execute(
+            "UPDATE transactions SET description = ?, metadata = ? WHERE id = ?",
+            params![new_description, new_metadata_json, id],
+        )?;
+        // Note-aware: the row may carry a note that is part of its indexed text.
+        self.refresh_transaction_fts(id)?;
+
+        Ok(ImportOutcome::Updated)
     }
 
     /// Replace the contentless FTS posting for `rowid` with
@@ -624,6 +709,18 @@ impl TransactionStore {
     }
 }
 
+/// Later pulls enrich a transaction's metadata (labels, memo, category hints,
+/// `original_payee`), so incoming keys win. Keys the newer payload omits are
+/// kept rather than dropped: a pull script that narrows what it emits should
+/// not silently delete data already imported.
+fn merge_metadata(stored: &Metadata, incoming: &Metadata) -> Metadata {
+    let mut merged = stored.clone();
+    for (key, value) in incoming {
+        merged.insert(key.clone(), value.clone());
+    }
+    merged
+}
+
 fn parse_date(date_str: &str) -> Result<NaiveDate> {
     if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
         return Ok(date);
@@ -643,6 +740,7 @@ mod tests {
     use rusqlite::params;
     use tempfile::TempDir;
 
+    use super::ImportOutcome;
     use crate::TransactionStore;
     use crate::db::build_searchable_text;
     use crate::search::ParsedQuery;
@@ -686,8 +784,22 @@ mod tests {
         metadata: &HashMap<String, serde_json::Value>,
         hash: &str,
     ) -> i64 {
+        let outcome = reimport(store, account_id, description, metadata, hash);
+        assert_eq!(outcome, ImportOutcome::Added);
+        store.conn.last_insert_rowid()
+    }
+
+    /// Feed one raw transaction through the production insert path, as a
+    /// re-pull of the same `(account_id, hash)` would.
+    fn reimport(
+        store: &TransactionStore,
+        account_id: i64,
+        description: &str,
+        metadata: &HashMap<String, serde_json::Value>,
+        hash: &str,
+    ) -> ImportOutcome {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let inserted = store
+        store
             .insert_transaction(
                 account_id,
                 &date,
@@ -699,9 +811,37 @@ mod tests {
                 "test.csv",
                 1,
             )
-            .unwrap();
-        assert!(inserted);
-        store.conn.last_insert_rowid()
+            .unwrap()
+    }
+
+    /// The stored `(description, amount_cents, date, metadata)` of one row.
+    fn stored_row(
+        store: &TransactionStore,
+        id: i64,
+    ) -> (String, i64, String, HashMap<String, serde_json::Value>) {
+        store
+            .conn
+            .query_row(
+                "SELECT description, amount_cents, date, metadata FROM transactions WHERE id = ?",
+                [id],
+                |row| {
+                    let metadata_json: String = row.get(3)?;
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        serde_json::from_str(&metadata_json).unwrap(),
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
+    fn meta(pairs: &[(&str, &str)]) -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+            .collect()
     }
 
     /// Rowids that match `token` in `transactions_fts`.
@@ -975,5 +1115,184 @@ mod tests {
             "orphan phantom must be gone after rebuild"
         );
         assert_fts_invariant(&store, &rows);
+    }
+
+    #[test]
+    fn reimport_applies_a_refined_description() {
+        // The card-BPAY case: the feed first posts a generic merchant string
+        // and only later resolves the biller and the user's own description.
+        let (_temp, store, account_id) = store_ready_for_insert();
+        let empty = HashMap::new();
+        let id = insert_tx_with_meta(
+            &store,
+            account_id,
+            "BPAY SALES PARRAMATTA AUS",
+            &empty,
+            "ps-1955648710",
+        );
+
+        let refined = "BPAYN ACT REVENUE OFFICE BPAY, Camp Rates Aug26";
+        let outcome = reimport(&store, account_id, refined, &empty, "ps-1955648710");
+        assert_eq!(outcome, ImportOutcome::Updated);
+
+        // One row, same id — so categories, notes, tags and transfers survive.
+        let count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let (description, amount, date, _) = stored_row(&store, id);
+        assert_eq!(description, refined);
+        assert_eq!(amount, -100, "economic fields must not move");
+        assert_eq!(date, "2024-01-15", "the date must not move");
+
+        assert_eq!(fts_match_rowids(&store, "revenue"), vec![id]);
+        assert!(
+            fts_match_rowids(&store, "parramatta").is_empty(),
+            "the superseded text must leave no phantom posting"
+        );
+    }
+
+    #[test]
+    fn reimport_of_an_unchanged_row_is_skipped() {
+        let (_temp, store, account_id) = store_ready_for_insert();
+        let metadata = meta(&[("pocketsmith_id", "42")]);
+        insert_tx_with_meta(&store, account_id, "Coffee Shop", &metadata, "ps-42");
+
+        let outcome = reimport(&store, account_id, "Coffee Shop", &metadata, "ps-42");
+        assert_eq!(outcome, ImportOutcome::Unchanged);
+    }
+
+    #[test]
+    fn reimport_merges_metadata_without_dropping_keys() {
+        let (_temp, store, account_id) = store_ready_for_insert();
+        let id = insert_tx_with_meta(
+            &store,
+            account_id,
+            "Coffee Shop",
+            &meta(&[("pocketsmith_id", "42"), ("original_payee", "COFFEE SHP")]),
+            "ps-42",
+        );
+
+        // A later pull adds a label and revises the category hint, but no
+        // longer emits original_payee.
+        let outcome = reimport(
+            &store,
+            account_id,
+            "Coffee Shop",
+            &meta(&[("pocketsmith_id", "42"), ("pocketsmith_category", "Dining")]),
+            "ps-42",
+        );
+        assert_eq!(outcome, ImportOutcome::Updated);
+
+        let (_, _, _, stored) = stored_row(&store, id);
+        assert_eq!(
+            stored,
+            meta(&[
+                ("pocketsmith_id", "42"),
+                ("original_payee", "COFFEE SHP"),
+                ("pocketsmith_category", "Dining"),
+            ]),
+            "incoming keys win; omitted ones are kept"
+        );
+        assert!(
+            fts_match_rowids(&store, "Dining").contains(&id),
+            "new metadata must be searchable"
+        );
+    }
+
+    #[test]
+    fn a_description_only_refinement_leaves_metadata_byte_identical() {
+        // Re-encoding a HashMap reorders its keys, so an unchanged map must be
+        // written back verbatim rather than churned on every refinement.
+        let (_temp, store, account_id) = store_ready_for_insert();
+        let metadata = meta(&[
+            ("pocketsmith_id", "42"),
+            ("pocketsmith_category", "Professional Services"),
+            ("original_payee", "BPAY SALES"),
+        ]);
+        let id = insert_tx_with_meta(&store, account_id, "BPAY SALES", &metadata, "ps-42");
+        let raw_before: String = store
+            .conn
+            .query_row(
+                "SELECT metadata FROM transactions WHERE id = ?",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let outcome = reimport(&store, account_id, "ACT REVENUE OFFICE", &metadata, "ps-42");
+        assert_eq!(outcome, ImportOutcome::Updated);
+
+        let raw_after: String = store
+            .conn
+            .query_row(
+                "SELECT metadata FROM transactions WHERE id = ?",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_before, raw_after);
+    }
+
+    #[test]
+    fn reimport_never_blanks_a_stored_description() {
+        let (_temp, store, account_id) = store_ready_for_insert();
+        let empty = HashMap::new();
+        let id = insert_tx_with_meta(&store, account_id, "ACT REVENUE OFFICE", &empty, "ps-7");
+
+        let outcome = reimport(&store, account_id, "   ", &empty, "ps-7");
+        assert_eq!(outcome, ImportOutcome::Unchanged);
+        assert_eq!(stored_row(&store, id).0, "ACT REVENUE OFFICE");
+    }
+
+    #[test]
+    fn reimport_keeps_the_note_in_the_searchable_text() {
+        let (_temp, mut store, account_id) = store_ready_for_insert();
+        let empty = HashMap::new();
+        let id = insert_tx_with_meta(&store, account_id, "BPAY SALES", &empty, "ps-9");
+        store.set_note(id, "reimbursable zzmarker").unwrap();
+
+        let outcome = reimport(&store, account_id, "ACT REVENUE OFFICE", &empty, "ps-9");
+        assert_eq!(outcome, ImportOutcome::Updated);
+
+        assert_eq!(fts_match_rowids(&store, "revenue"), vec![id]);
+        assert_eq!(
+            fts_match_rowids(&store, "zzmarker"),
+            vec![id],
+            "the note must survive the description rewrite in the FTS text"
+        );
+    }
+
+    #[test]
+    fn refresh_applies_a_description_the_feed_refined() {
+        let temp = TempDir::new().unwrap();
+        let account_dir = temp.path().join("TestBank").join("Mastercard");
+        fs::create_dir_all(&account_dir).unwrap();
+        let script = account_dir.join("pull");
+        write_pull_script(&script, "BPAY SALES PARRAMATTA AUS", "ps-1955648710");
+
+        let mut store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        let report = store.refresh().unwrap();
+        assert_eq!(report.transactions_added, 1);
+        assert_eq!(report.transactions_updated, 0);
+
+        write_pull_script(&script, "BPAYN ACT REVENUE OFFICE BPAY", "ps-1955648710");
+        let report = store.refresh().unwrap();
+        assert_eq!(report.transactions_added, 0);
+        assert_eq!(report.transactions_updated, 1);
+        assert_eq!(report.transactions_skipped, 0);
+
+        let txs = store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].description, "BPAYN ACT REVENUE OFFICE BPAY");
+
+        // And a third, identical pull is a plain skip.
+        let report = store.refresh().unwrap();
+        assert_eq!(report.transactions_updated, 0);
+        assert_eq!(report.transactions_skipped, 1);
     }
 }

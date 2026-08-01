@@ -383,6 +383,34 @@ All monetary values are integers in cents to avoid floating-point errors.
 - Hash computed from: `date|description|amount_cents|balance_cents`
 - Files tracked by content hash to skip re-importing unchanged files
 
+### Re-import refines, it doesn't duplicate
+
+A dedup hit is not automatically a no-op. Feeds refine text after first posting
+— a CommBank card BPAY lands as `BPAY SALES PARRAMATTA AUS` and only later
+resolves to `BPAYN ACT REVENUE OFFICE BPAY, Camp Rates Aug26` — so when
+`(account_id, hash)` already exists, `refine_existing_transaction`
+(`src/store/import.rs`) applies the newer **description** and merges the
+incoming **metadata** over the stored map (incoming keys win; keys the newer
+payload omits are kept, so a narrowed pull script never deletes data). It
+reindexes FTS through the note-aware path, so a note stays part of the row's
+searchable text.
+
+Nothing else moves. The hash asserts this is the same real-world transaction, so
+`account_id`, `date`, `amount_cents` and `balance_cents` are never overwritten:
+a feed that changed those is reporting a different transaction, not a
+refinement. `source_file` and `import_batch_id` keep recording the original
+import. The row id is preserved, so categories, notes, tags and transfer links
+all survive a refinement. A blank incoming description is ignored rather than
+applied — losing stored payee text is unrecoverable.
+
+This matters most for pull sources, whose hashes are stable external ids
+(`ps-<pocketsmith_id>`) while the payee text is mutable; CSV content-hash rows
+rarely re-present the same hash with different text, and get the same treatment
+when they do. Refinements are counted separately as
+`RefreshReport::transactions_updated` (distinct from added/skipped) and shown by
+`tally pull` and the TUI refresh status, so daily pull logs reveal that
+refinements landed.
+
 ### Soft Deletes
 
 Banks/accounts that disappear from `exports/` are soft-deleted (`deleted_at`
@@ -568,7 +596,7 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `C`                 | Apply a category to **all** transactions matching the current DB search (Transactions tab and Todo → AI Review) — opens the category popup, then the bulk-apply checkbox list so the user can scroll and deselect rows to skip before applying; unlike `c` it does not offer the similar-transactions score ranking, and transfer legs are skipped (they can't be categorised). Hidden while a fuzzy (`~`) search is active, since that only narrows the visible rows                                                                              |
 | `A`                 | Accept **all** matching items on the current DB search: on Todo → AI Review, confirm the existing AI-suggested categories; on Todo → Transfer Review, confirm the pending transfers. Opens the same bulk-apply checkbox list as `C` (scroll + deselect to skip). Does not run on the Transactions tab. Hidden while a fuzzy (`~`) search is active. On AI Review, `A` and `C` coexist (`C` assigns a new category; `A` confirms the existing suggestions)                                                                                          |
 | `C`                 | Run local auto-classification (Todo → Uncategorised) — claims the shared background-job slot (`BackgroundJob::Classify`); runs on a background thread (its own store connection); a "Classifying..." tab-bar indicator shows while it runs, replaced by a green summary (filter/transfer/suggestion counts) for a few seconds on completion. Blocked with "… in progress" if another background job holds the slot. The UI stays fully interactive throughout                                                                                      |
-| `R`                 | Refresh imports (Todo → Uncategorised) — claims the shared background-job slot (`BackgroundJob::Refresh`); same flow as the automatic startup refresh (`App::request_refresh`); "Refreshing..." tab-bar indicator while it runs, green added/skipped/files summary on completion. Blocked with "… in progress" if another background job holds the slot                                                                                                                                                                                            |
+| `R`                 | Refresh imports (Todo → Uncategorised) — claims the shared background-job slot (`BackgroundJob::Refresh`); same flow as the automatic startup refresh (`App::request_refresh`); "Refreshing..." tab-bar indicator while it runs, green added/skipped/files summary on completion (plus `updated: N` when a feed refined an already-imported description). Blocked with "… in progress" if another background job holds the slot                                                                                                                    |
 | `d` / `Delete`      | Delete transfer (Transfers tab), delete filter (Filters tab; prompts to confirm), delete category (Categories tab; prompts to confirm, noting how many transactions will be left uncategorised), or delete account (Accounts tab; prompts to confirm, noting the exports-folder removal and retained-transaction count)                                                                                                                                                                                                                            |
 | `u`                 | Transactions tab: unlink the selected transfer, else uncategorise the transaction (prompts to confirm). The hint reads "unlink" on a linked transfer and "uncategorise" otherwise, and is hidden when the row has neither                                                                                                                                                                                                                                                                                                                          |
 | `Delete`            | AI Review: remove category. Transfer Review: unlink transfer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -830,7 +858,9 @@ with the account folder as its working directory, so it owns its own incremental
 state. There is no file-hash skip — overlap is expected and deduped by `hash`,
 so pulls should set a stable `hash` (e.g. the source row's id). Account-level
 overrides bank-level (`find_pull_script` / `run_pull_script` in
-`src/import.rs`).
+`src/import.rs`). A re-pulled row that already exists is not silently dropped:
+improved description/metadata are applied to the stored row — see "Re-import
+refines, it doesn't duplicate".
 
 **PocketSmith** is wired up via `tools/pocketsmith-pull` (generic, checked-in,
 no account data — safe to publish; needs `POCKETSMITH_KEY`):

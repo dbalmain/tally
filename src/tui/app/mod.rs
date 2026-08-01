@@ -493,10 +493,22 @@ impl App {
         self.active_job = None;
         self.refresh_data();
         match result {
-            Ok(report) => self.show_status(format!(
-                "Refreshed — added: {}, skipped: {}, files: {}",
-                report.transactions_added, report.transactions_skipped, report.files_processed,
-            )),
+            Ok(report) => {
+                // Updates are the rare case (a feed refining an already
+                // imported description), so they earn a slot in the status
+                // line only when they happened.
+                let updated = match report.transactions_updated {
+                    0 => String::new(),
+                    n => format!(", updated: {n}"),
+                };
+                self.show_status(format!(
+                    "Refreshed — added: {}{}, skipped: {}, files: {}",
+                    report.transactions_added,
+                    updated,
+                    report.transactions_skipped,
+                    report.files_processed,
+                ))
+            }
             Err(e) => self.error_message = Some(format!("Refresh failed: {e}")),
         }
     }

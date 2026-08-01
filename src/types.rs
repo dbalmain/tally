@@ -78,6 +78,9 @@ pub struct RefreshReport {
     pub accounts_deleted: usize,
     pub files_processed: usize,
     pub transactions_added: usize,
+    /// Already-imported rows whose source has since refined the description or
+    /// metadata (see `TransactionStore::refine_existing_transaction`).
+    pub transactions_updated: usize,
     pub transactions_skipped: usize,
 }
 
