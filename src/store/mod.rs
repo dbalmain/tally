@@ -6,6 +6,7 @@
 //! focused submodules, each contributing an `impl TransactionStore` block.
 
 mod accounts;
+mod annotations;
 mod categories;
 mod enrichments;
 mod filters;

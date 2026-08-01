@@ -87,7 +87,34 @@ CREATE TABLE IF NOT EXISTS filters (
     created_at TEXT NOT NULL
 );
 
+-- Free-form note attached to a transaction. Deliberately its own table rather
+-- than a column on transaction_enrichments: that row means "category
+-- assignment" and create_transfer deletes it on both endpoints, but a note must
+-- survive marking a transfer. Being additive it also needs no migration.
+CREATE TABLE IF NOT EXISTS transaction_notes (
+    transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id),
+    note TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Tags are `#no-space-strings`, stored canonicalised (lowercase, no leading
+-- `#`). Same reasoning as notes for living outside transaction_enrichments: a
+-- transfer leg can be tagged.
+CREATE TABLE IF NOT EXISTS tags (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS transaction_tags (
+    transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+    tag_id INTEGER NOT NULL REFERENCES tags(id),
+    PRIMARY KEY (transaction_id, tag_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_transactions_account_date ON transactions(account_id, date);
+CREATE INDEX IF NOT EXISTS idx_transaction_tags_tag ON transaction_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_hash ON transactions(hash);
 CREATE INDEX IF NOT EXISTS idx_accounts_bank ON accounts(bank_id);
 CREATE INDEX IF NOT EXISTS idx_enrichments_category ON transaction_enrichments(category_id);
@@ -134,16 +161,25 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Build searchable text from description and metadata for FTS indexing.
-/// Flattens all string and number values from metadata.
+/// Build searchable text from description, metadata, and the transaction's
+/// note for FTS indexing. Flattens all string and number values from metadata.
+///
+/// The note is folded in here so bare-word search finds note text; every FTS
+/// write path must therefore pass the current note, or saving one would make
+/// the row's postings stale.
 pub(crate) fn build_searchable_text(
     description: &str,
     metadata: &std::collections::HashMap<String, serde_json::Value>,
+    note: Option<&str>,
 ) -> String {
     let mut parts = vec![description.to_string()];
 
     for value in metadata.values() {
         flatten_json_value(value, &mut parts);
+    }
+
+    if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
+        parts.push(note.to_string());
     }
 
     parts.join(" ")
@@ -373,10 +409,23 @@ mod tests {
         );
         metadata.insert("amount".to_string(), serde_json::json!(42.50));
 
-        let text = build_searchable_text("Grocery purchase", &metadata);
+        let text = build_searchable_text("Grocery purchase", &metadata, None);
         assert!(text.contains("Grocery purchase"));
         assert!(text.contains("Woolworths"));
         assert!(text.contains("42.5"));
+    }
+
+    #[test]
+    fn test_build_searchable_text_includes_note() {
+        let metadata = std::collections::HashMap::new();
+
+        let text = build_searchable_text("Purchase", &metadata, Some("reimbursable by Acme"));
+        assert!(text.contains("Purchase"));
+        assert!(text.contains("reimbursable by Acme"));
+
+        // A blank note contributes nothing (and no stray whitespace).
+        let blank = build_searchable_text("Purchase", &metadata, Some("   "));
+        assert_eq!(blank, "Purchase");
     }
 
     #[test]
@@ -387,7 +436,7 @@ mod tests {
             serde_json::json!({"category": "food", "tags": ["organic", "local"]}),
         );
 
-        let text = build_searchable_text("Purchase", &metadata);
+        let text = build_searchable_text("Purchase", &metadata, None);
         assert!(text.contains("Purchase"));
         assert!(text.contains("food"));
         assert!(text.contains("organic"));

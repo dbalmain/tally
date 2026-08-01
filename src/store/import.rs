@@ -453,26 +453,29 @@ impl TransactionStore {
 
         if result > 0 {
             let rowid = self.conn.last_insert_rowid();
-            self.write_transaction_fts(rowid, description, metadata)?;
+            // A row that was just inserted has no note yet, so there is nothing
+            // to fold in; `set_note` rewrites the posting when one is added.
+            self.write_transaction_fts(rowid, description, metadata, None)?;
         }
 
         Ok(result > 0)
     }
 
     /// Replace the contentless FTS posting for `rowid` with
-    /// [`build_searchable_text`] of the given description and metadata.
+    /// [`build_searchable_text`] of the given description, metadata, and note.
     ///
     /// Contentless FTS5 permits multiple postings per rowid and never
     /// cross-checks them against the real row, so every write must DELETE
     /// first — otherwise a reused or re-imported rowid leaves phantom tokens
     /// that produce false-positive search matches.
-    fn write_transaction_fts(
+    pub(super) fn write_transaction_fts(
         &self,
         rowid: i64,
         description: &str,
         metadata: &std::collections::HashMap<String, serde_json::Value>,
+        note: Option<&str>,
     ) -> Result<()> {
-        let searchable_text = build_searchable_text(description, metadata);
+        let searchable_text = build_searchable_text(description, metadata, note);
         self.conn.execute(
             "DELETE FROM transactions_fts WHERE rowid = ?",
             params![rowid],
@@ -484,6 +487,36 @@ impl TransactionStore {
         Ok(())
     }
 
+    /// Re-derive one transaction's FTS posting from its current stored row and
+    /// note. Used after a note changes, where the caller has the id but not the
+    /// description/metadata.
+    pub(super) fn refresh_transaction_fts(&self, tx_id: i64) -> Result<()> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT t.description, t.metadata, n.note
+                 FROM transactions t
+                 LEFT JOIN transaction_notes n ON n.transaction_id = t.id
+                 WHERE t.id = ?",
+                params![tx_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((description, metadata_json, note)) = row else {
+            return Ok(());
+        };
+        let metadata: HashMap<String, serde_json::Value> =
+            serde_json::from_str(&metadata_json).unwrap_or_default();
+        self.write_transaction_fts(tx_id, &description, &metadata, note.as_deref())
+    }
+
     /// Drop and recreate `transactions_fts`, then repopulate one posting per
     /// transaction from [`build_searchable_text`]. Returns the number of rows
     /// reindexed. This is the only safe full-rebuild path.
@@ -492,23 +525,26 @@ impl TransactionStore {
             .execute_batch("DROP TABLE IF EXISTS transactions_fts;")?;
         self.conn.execute_batch(TRANSACTIONS_FTS_DDL)?;
 
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, description, metadata FROM transactions")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.description, t.metadata, n.note
+             FROM transactions t
+             LEFT JOIN transaction_notes n ON n.transaction_id = t.id",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?;
 
         let mut count = 0usize;
         for row in rows {
-            let (id, description, metadata_json) = row?;
+            let (id, description, metadata_json, note) = row?;
             let metadata: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&metadata_json).unwrap_or_default();
-            let searchable_text = build_searchable_text(&description, &metadata);
+            let searchable_text = build_searchable_text(&description, &metadata, note.as_deref());
             self.conn.execute(
                 "INSERT INTO transactions_fts (rowid, searchable_text) VALUES (?, ?)",
                 params![id, searchable_text],
@@ -684,7 +720,7 @@ mod tests {
 
     /// Whitespace-separated FTS tokens of a transaction's searchable text.
     fn tokens_of(description: &str, metadata: &HashMap<String, serde_json::Value>) -> Vec<String> {
-        build_searchable_text(description, metadata)
+        build_searchable_text(description, metadata, None)
             .split_whitespace()
             .map(|t| t.to_string())
             .filter(|t| !t.is_empty())
@@ -883,7 +919,7 @@ mod tests {
 
         // Rewrite via the production path (DELETE-then-INSERT).
         store
-            .write_transaction_fts(rowid, "Google YouTubePremium", &meta)
+            .write_transaction_fts(rowid, "Google YouTubePremium", &meta, None)
             .unwrap();
 
         assert!(

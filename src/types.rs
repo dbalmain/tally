@@ -108,6 +108,42 @@ pub struct Category {
     pub created_at: DateTime<Utc>,
 }
 
+/// A `#tag` label. Stored canonicalised: no leading `#`, lowercase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tag {
+    pub id: i64,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Characters a tag name may contain, beyond ASCII alphanumerics. `/` is
+/// allowed so hierarchical tags (`work/travel`) come for free.
+const EXTRA_TAG_CHARS: [char; 4] = ['-', '_', '.', '/'];
+
+pub fn is_tag_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || EXTRA_TAG_CHARS.contains(&c)
+}
+
+/// Lenient canonicalisation for *matching*: drop a leading `#`, trim, and
+/// lowercase, so a search for `#Groceries` finds the stored `groceries`.
+/// Performs no validation — see [`validate_tag`] for the storage path.
+pub fn normalise_tag(input: &str) -> String {
+    input
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Canonicalise a tag for *storage*, or `None` when the input isn't a usable
+/// tag (empty, or containing characters outside [`is_tag_char`]). Tags are
+/// no-space strings by definition, so whitespace anywhere inside is a reject
+/// rather than something to silently mangle.
+pub fn validate_tag(input: &str) -> Option<String> {
+    let name = normalise_tag(input);
+    (!name.is_empty() && name.chars().all(is_tag_char)).then_some(name)
+}
+
 /// How a category was assigned to a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CategorySource {
