@@ -242,6 +242,8 @@ fn overlay_open(app: &App) -> bool {
     matches!(
         app.input_mode,
         InputMode::Category
+            | InputMode::Note
+            | InputMode::Tags
             | InputMode::TextPrompt
             | InputMode::BulkApply
             | InputMode::Confirm
@@ -259,6 +261,14 @@ fn draw_overlays(
 ) {
     if app.input_mode == InputMode::Category {
         draw_category_popup(f, app);
+    }
+
+    if app.input_mode == InputMode::Note {
+        draw_note_popup(f, app);
+    }
+
+    if app.input_mode == InputMode::Tags {
+        draw_tag_popup(f, app);
     }
 
     if app.input_mode == InputMode::TextPrompt {
@@ -810,7 +820,7 @@ fn draw_transaction_table(
                         Cell::from(tx.date.to_string()).style(Style::default().fg(fg))
                     }
                     TxColumn::Description => {
-                        Cell::from(tx.description.clone()).style(Style::default().fg(fg))
+                        Cell::from(description_line(app, tx, w, is_selected, is_disabled))
                     }
                     TxColumn::Account => {
                         let account = compact_account_label(app, tx);
@@ -840,6 +850,58 @@ fn draw_transaction_table(
 
         Row::new(cells).style(base_style)
     });
+}
+
+/// The description cell: the description, then any `#tags` in magenta, then a
+/// dim `✎` when the row has a note.
+///
+/// Tags are worth the width because scanning for them is most of the point of
+/// having them; the note itself stays hidden until the row is expanded (`v`),
+/// but the marker has to be visible or a note you wrote is invisible.
+/// The description gives up width to the annotations rather than the reverse —
+/// it is already truncated by the column planner when space is tight.
+fn description_line(
+    app: &App,
+    tx: &Transaction,
+    width: usize,
+    selected: bool,
+    disabled: bool,
+) -> Line<'static> {
+    let tags = app.get_cached_tags(tx.id);
+    let has_note = app.get_cached_note(tx.id).is_some();
+    let fg = if disabled {
+        Color::DarkGray
+    } else {
+        Color::Reset
+    };
+
+    if tags.is_empty() && !has_note {
+        return Line::from(Span::styled(
+            tx.description.clone(),
+            Style::default().fg(fg),
+        ));
+    }
+
+    let note_width = usize::from(has_note) * 2;
+    // Leave the description at least a third of the cell, so a heavily tagged
+    // row is still identifiable.
+    let annotation_budget = width.saturating_sub(width.div_ceil(3));
+    let (tag_spans, tag_width) = if disabled {
+        (Vec::new(), 0)
+    } else {
+        tag_spans(tags, annotation_budget.saturating_sub(note_width), selected)
+    };
+
+    let description_width = width.saturating_sub(tag_width + note_width);
+    let mut spans = vec![Span::styled(
+        truncate_width(&tx.description, description_width),
+        Style::default().fg(fg),
+    )];
+    spans.extend(tag_spans);
+    if has_note {
+        spans.push(Span::styled(" ✎", Style::default().fg(dim_fg(selected))));
+    }
+    Line::from(spans)
 }
 
 /// Text + colour for the category column: the category path (yellow, like the
@@ -956,6 +1018,21 @@ fn transaction_detail_pairs(app: &App, tx: &Transaction) -> Vec<(String, String)
         pairs.push(("Category".to_string(), category.to_string()));
     }
 
+    let tags = app.get_cached_tags(tx.id);
+    if !tags.is_empty() {
+        pairs.push((
+            "Tags".to_string(),
+            tags.iter()
+                .map(|tag| format!("#{tag}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ));
+    }
+    // The note is only ever shown here, on an expanded row.
+    if let Some(note) = app.get_cached_note(tx.id) {
+        pairs.push(("Note".to_string(), note.to_string()));
+    }
+
     pairs.push(("Source".to_string(), tx.source_file.clone()));
     pairs.push(("Hash".to_string(), tx.hash.clone()));
     pairs.push(("Import batch".to_string(), tx.import_batch_id.to_string()));
@@ -994,7 +1071,14 @@ fn build_detail_lines(app: &App, tx: &Transaction, width: u16) -> Vec<Line<'stat
 
     let mut lines = Vec::new();
     for (label, value) in pairs {
-        for (i, chunk) in wrap_text(&value, value_width).into_iter().enumerate() {
+        // Split on newlines before wrapping: a multi-line note's blank lines
+        // are meaningful, and `wrap_text` works on whitespace-separated words
+        // so it would otherwise run the paragraphs together.
+        let wrapped: Vec<String> = value
+            .split('\n')
+            .flat_map(|segment| wrap_text(segment, value_width))
+            .collect();
+        for (i, chunk) in wrapped.into_iter().enumerate() {
             let label_cell = if i == 0 {
                 let label = truncate_width(&label, label_width);
                 format!("{label:<label_width$}")
@@ -1485,6 +1569,129 @@ fn draw_category_popup(f: &mut Frame, app: &App) {
     f.render_widget(suggestions_widget, chunks[1]);
 }
 
+/// Colour for `#tags` everywhere they appear. Magenta is the one hue the
+/// palette hadn't claimed (yellow is categories, cyan transfers).
+const TAG_COLOR: Color = Color::Magenta;
+
+/// Render `tags` as ` #a #b`, truncated to `width` columns (nothing at all if
+/// even one tag won't fit). Returns the spans and the columns they occupy.
+fn tag_spans(tags: &[String], width: usize, selected: bool) -> (Vec<Span<'static>>, usize) {
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for tag in tags {
+        let text = format!(" #{tag}");
+        let len = text.chars().count();
+        if used + len > width {
+            // Signal the overflow rather than silently showing a subset.
+            if used + 2 <= width {
+                spans.push(Span::styled(" …", Style::default().fg(dim_fg(selected))));
+                used += 2;
+            }
+            break;
+        }
+        spans.push(Span::styled(text, Style::default().fg(TAG_COLOR)));
+        used += len;
+    }
+    (spans, used)
+}
+
+fn draw_note_popup(f: &mut Frame, app: &App) {
+    let Some(editor) = app.note_editor.as_ref() else {
+        return;
+    };
+
+    let screen = f.area();
+    let area = center(screen.width * 60 / 100, screen.height * 60 / 100, screen);
+    let hints = keymap::footer_hints(app);
+    let body = Modal {
+        title: "Note",
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
+
+    let layout = editor.layout(body.width as usize);
+    let height = body.height as usize;
+    // Scroll the minimum needed to keep the cursor on screen.
+    let scroll = (layout.cursor.1 + 1).saturating_sub(height);
+
+    let lines: Vec<Line> = layout
+        .lines
+        .iter()
+        .skip(scroll)
+        .take(height)
+        .map(|line| Line::raw(line.clone()))
+        .collect();
+    f.render_widget(Paragraph::new(lines), body);
+
+    f.set_cursor_position((
+        body.x + layout.cursor.0 as u16,
+        body.y + (layout.cursor.1 - scroll) as u16,
+    ));
+}
+
+fn draw_tag_popup(f: &mut Frame, app: &App) {
+    let Some(editor) = app.tag_editor.as_ref() else {
+        return;
+    };
+
+    let screen = f.area();
+    let area = center(screen.width * 50 / 100, screen.height * 60 / 100, screen);
+    let hints = keymap::footer_hints(app);
+    let body = Modal {
+        title: "Tags",
+        hints: &hints,
+        border: Color::Cyan,
+    }
+    .draw(f, area);
+
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(body);
+
+    // Colour each token by whether it is a usable tag, so a typo is visible
+    // before it is saved (invalid tokens are dropped, never mangled).
+    let invalid = editor.invalid_tokens();
+    let mut spans = Vec::new();
+    for (i, token) in editor.input().split(' ').enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        if token.is_empty() {
+            continue;
+        }
+        let colour = if invalid.contains(&token) {
+            Color::Red
+        } else {
+            TAG_COLOR
+        };
+        spans.push(Span::styled(token.to_string(), Style::default().fg(colour)));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+
+    let suggestions = editor.suggestions();
+    let rows: Vec<Line> = suggestions
+        .iter()
+        .enumerate()
+        .take(chunks[1].height as usize)
+        .map(|(i, suggestion)| {
+            let selected = i == editor.selected();
+            let bg = row_bg(selected);
+            // A ✓ marks tags already on this transaction, so the list doubles
+            // as "what is on it" as well as "what exists".
+            let mark = if suggestion.applied { "✓ " } else { "  " };
+            Line::from(vec![
+                Span::styled(mark, Style::default().fg(Color::Green).bg(bg)),
+                Span::styled(
+                    format!("#{}", suggestion.name),
+                    Style::default().fg(TAG_COLOR).bg(bg),
+                ),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(rows), chunks[1]);
+
+    f.set_cursor_position((chunks[0].x + editor.cursor() as u16, chunks[0].y));
+}
+
 fn draw_bulk_apply_popup(f: &mut Frame, app: &App) {
     let Some(state) = app.bulk_apply.as_ref() else {
         return;
@@ -1962,6 +2169,111 @@ mod tests {
             transfer_counterpart(&app, &to),
             Some(("from", "TestBank/Checking".to_string()))
         );
+    }
+
+    /// Concatenate a Line's span contents, for assertions on rendered text.
+    fn line_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn tag_spans_truncate_rather_than_show_a_silent_subset() {
+        let tags = vec!["work".to_string(), "travel".to_string()];
+
+        // Both fit: " #work #travel" is 14 columns.
+        let (spans, used) = tag_spans(&tags, 20, false);
+        assert_eq!(used, 14);
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+            " #work #travel"
+        );
+        assert!(spans.iter().all(|s| s.style.fg == Some(TAG_COLOR)));
+
+        // Only the first fits: the rest becomes an explicit ellipsis, so the
+        // row never reads as "these are all the tags".
+        let (spans, used) = tag_spans(&tags, 9, false);
+        assert_eq!(used, 8);
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+            " #work …"
+        );
+
+        // Nothing fits at all.
+        let (spans, used) = tag_spans(&tags, 1, false);
+        assert!(spans.is_empty());
+        assert_eq!(used, 0);
+    }
+
+    #[test]
+    fn description_cell_appends_tags_and_a_note_marker() {
+        let (_temp, mut app, from, _to) = app_with_transfer();
+        app.store
+            .set_transaction_tags(from.id, &["work".into()])
+            .unwrap();
+        app.store.set_note(from.id, "check this").unwrap();
+        app.refresh_data();
+
+        let line = description_line(&app, &from, 40, false, false);
+        assert_eq!(line_text(&line), "Transfer out #work ✎");
+
+        // A row with neither is just the description, with no stray spans.
+        let plain = description_line(&app, &_to, 40, false, false);
+        assert_eq!(line_text(&plain), "Transfer in");
+        assert_eq!(plain.spans.len(), 1);
+    }
+
+    #[test]
+    fn description_cell_keeps_a_third_of_the_width_for_the_description() {
+        let (_temp, mut app, from, _to) = app_with_transfer();
+        app.store
+            .set_transaction_tags(
+                from.id,
+                &[
+                    "alpha".into(),
+                    "beta".into(),
+                    "gamma".into(),
+                    "delta".into(),
+                ],
+            )
+            .unwrap();
+        app.refresh_data();
+
+        let line = description_line(&app, &from, 24, false, false);
+        assert!(line_text(&line).chars().count() <= 24);
+        // The description is truncated but never squeezed out entirely.
+        assert!(line_text(&line).starts_with("Trans"));
+    }
+
+    #[test]
+    fn detail_panel_shows_tags_and_the_note_with_its_line_breaks() {
+        let (_temp, mut app, from, _to) = app_with_transfer();
+        app.store
+            .set_transaction_tags(from.id, &["work".into(), "travel".into()])
+            .unwrap();
+        app.store
+            .set_note(from.id, "first line\n\nsecond line")
+            .unwrap();
+        app.refresh_data();
+
+        let pairs = transaction_detail_pairs(&app, &from);
+        let tags = pairs.iter().find(|(label, _)| label == "Tags").unwrap();
+        assert_eq!(tags.1, "#travel #work");
+
+        // The blank line between paragraphs must survive wrapping.
+        let rendered: Vec<String> = build_detail_lines(&app, &from, 60)
+            .iter()
+            .map(line_text)
+            .collect();
+        let note_at = rendered
+            .iter()
+            .position(|line| line.contains("first line"))
+            .unwrap();
+        assert!(rendered[note_at].starts_with("Note"));
+        assert!(rendered[note_at + 1].trim().is_empty());
+        assert!(rendered[note_at + 2].contains("second line"));
     }
 
     #[test]

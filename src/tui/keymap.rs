@@ -70,6 +70,8 @@ pub enum Act {
     RemoveCategory,
     Confirm,
     ClearSearch,
+    EditNote,
+    EditTags,
     ToggleDetails,
     ToggleSum,
     CategoriseMatching,
@@ -396,6 +398,36 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
         ));
     }
 
+    // Notes and tags apply to any row that is a transaction. The note hint
+    // names whichever operation applies, the way `u` does.
+    if is_transaction_view(app)
+        && let Some(tx) = app.selected_transaction()
+    {
+        let note_desc = if app.get_cached_note(tx.id).is_some() {
+            "edit note"
+        } else {
+            "note"
+        };
+        out.push(bh(
+            &[Char('n')],
+            "n",
+            note_desc,
+            "edit note",
+            true,
+            true,
+            EditNote,
+        ));
+        out.push(bh(
+            &[Char('#')],
+            "#",
+            "tags",
+            "edit tags",
+            true,
+            true,
+            EditTags,
+        ));
+    }
+
     // Hidden: shown in the `?` popover only, not the footer.
     if app.current_tab == Tab::Transactions {
         out.push(bh(
@@ -672,6 +704,8 @@ fn run_normal(app: &mut App, act: Act) {
             app.confirm_transfer_review();
         }
         Act::ClearSearch => app.clear_search(),
+        Act::EditNote => app.start_note_edit(),
+        Act::EditTags => app.start_tag_edit(),
         Act::ToggleDetails => app.toggle_view_details(),
         Act::ToggleSum => app.toggle_sum(),
         Act::CategoriseMatching => app.start_bulk_categorise_matching(),
@@ -706,6 +740,14 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
         InputMode::FuzzySearch => vec![("Enter", "keep filter"), ("Esc", "clear & exit")],
         InputMode::FilterEdit => filter_edit_footer_hints(),
         InputMode::Category => vec![("↑/↓", "select"), ("Enter", "assign"), ("Esc", "cancel")],
+        InputMode::Note => vec![("Enter", "new line"), ("Ctrl-S", "save"), ("Esc", "cancel")],
+        InputMode::Tags => vec![
+            ("↑/↓", "select"),
+            ("Tab", "complete"),
+            ("Space", "next tag"),
+            ("Enter", "save"),
+            ("Esc", "cancel"),
+        ],
         InputMode::TextPrompt => vec![("Enter", "save"), ("Esc", "cancel")],
         InputMode::BulkApply => vec![
             ("↑/↓", "select"),
@@ -754,6 +796,8 @@ pub fn help_lines(app: &App) -> Vec<HelpLine> {
         InputMode::FuzzySearch => fuzzy_search_lines(&mut lines),
         InputMode::FilterEdit => filter_edit_lines(&mut lines),
         InputMode::Category => category_lines(&mut lines),
+        InputMode::Note => note_lines(&mut lines),
+        InputMode::Tags => tag_lines(&mut lines),
         InputMode::TextPrompt => text_prompt_lines(app, &mut lines),
         InputMode::BulkApply => bulk_apply_lines(&mut lines),
         InputMode::Confirm if confirming_merge(app) => confirm_merge_lines(&mut lines),
@@ -821,6 +865,26 @@ fn category_lines(lines: &mut Vec<HelpLine>) {
     bind_line(lines, "Backspace", "delete text");
     bind_line(lines, "↑/↓", "select suggestion");
     bind_line(lines, "Enter", "assign");
+    bind_line(lines, "Esc", "cancel");
+}
+
+fn note_lines(lines: &mut Vec<HelpLine>) {
+    group(lines, "Note");
+    bind_line(lines, "Type", "edit text");
+    bind_line(lines, "Enter", "new line");
+    bind_line(lines, "Arrows/Home/End", "move cursor");
+    bind_line(lines, "Ctrl-S", "save");
+    bind_line(lines, "Esc", "cancel (confirms if edited)");
+}
+
+fn tag_lines(lines: &mut Vec<HelpLine>) {
+    group(lines, "Tags");
+    bind_line(lines, "Type", "filter tags (a leading # is optional)");
+    bind_line(lines, "↑/↓", "select suggestion");
+    bind_line(lines, "Tab", "accept the selected suggestion");
+    bind_line(lines, "Space", "keep what you typed, start the next tag");
+    bind_line(lines, "Ctrl-W", "delete the tag before the cursor");
+    bind_line(lines, "Enter / Ctrl-S", "save");
     bind_line(lines, "Esc", "cancel");
 }
 
@@ -1247,6 +1311,50 @@ mod tests {
             Trigger::Ctrl('s')
         ));
         assert!(footer_hints(&app).contains(&("Ctrl-S", "save filter")));
+    }
+
+    #[test]
+    fn note_and_tag_binds_are_offered_on_transaction_views_only() {
+        let mut app = app_with_rows();
+        app.current_tab = Tab::Transactions;
+        let binds = normal_binds(&app);
+        assert!(has_act_trigger(&binds, Act::EditNote, Trigger::Char('n')));
+        assert!(has_act_trigger(&binds, Act::EditTags, Trigger::Char('#')));
+
+        // The Categories tab has no transaction rows, and `n` there belongs to
+        // the Filters tab's "new filter" — neither may claim these.
+        app.current_tab = Tab::Categories;
+        let binds = normal_binds(&app);
+        assert!(find_act(&binds, Act::EditNote).is_none());
+        assert!(find_act(&binds, Act::EditTags).is_none());
+
+        app.current_tab = Tab::Filters;
+        let binds = normal_binds(&app);
+        assert!(find_act(&binds, Act::EditNote).is_none());
+        assert!(has_act_trigger(
+            &binds,
+            Act::CreateFilter,
+            Trigger::Char('n')
+        ));
+    }
+
+    #[test]
+    fn note_and_tag_modes_have_curated_hints_and_help() {
+        let mut app = app_with_rows();
+
+        app.input_mode = InputMode::Note;
+        let hints = footer_hints(&app);
+        assert!(hints.contains(&("Ctrl-S", "save")));
+        // Enter must never be advertised as "save" in a multi-line editor.
+        assert!(hints.contains(&("Enter", "new line")));
+        assert!(!help_lines(&app).is_empty());
+
+        app.input_mode = InputMode::Tags;
+        let hints = footer_hints(&app);
+        assert!(hints.contains(&("Tab", "complete")));
+        assert!(hints.contains(&("Space", "next tag")));
+        assert!(hints.contains(&("Enter", "save")));
+        assert!(!help_lines(&app).is_empty());
     }
 
     #[test]

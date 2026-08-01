@@ -7,10 +7,12 @@
 //! - `tabs` — Tab/TodoSubTab enums + `TabLists` (all per-tab dispatch)
 //! - `search` — per-tab search state, DB/fuzzy search, autocomplete
 //! - `categories` — category popup, AI review, rename/merge
+//! - `annotations` — note and tag editors
 //! - `filters` — saved-search filter management
 //! - `transfers` — transfer marking, confirmation, deletion
 
 mod accounts;
+mod annotations;
 mod categories;
 mod filters;
 mod search;
@@ -29,7 +31,9 @@ use tui_input::Input;
 use crate::classify::{SimilarityIndex, normalise};
 use crate::config::Config;
 use crate::search::{ParsedQuery, SearchOptions};
+use crate::tui::note_editor::NoteEditor;
 use crate::tui::search_bar::SearchBar;
+use crate::tui::tag_editor::TagEditor;
 use crate::{
     Account, Bank, Category, FuzzyMatcher, Result, Transaction, TransactionStore, Transfer,
 };
@@ -54,6 +58,10 @@ pub enum InputMode {
     FuzzySearch,
     FilterEdit,
     Category,
+    /// Multi-line free-form note editor (`n`), backed by `note_editor`.
+    Note,
+    /// Space-separated `#tag` line editor (`#`), backed by `tag_editor`.
+    Tags,
     TextPrompt,
     BulkApply,
     /// Generic yes/no confirmation driven by `confirm_action`.
@@ -87,6 +95,8 @@ pub enum ConfirmAction {
     },
     /// Leaving the filter edit screen with unsaved query changes.
     DiscardFilterEdit,
+    /// Leaving the note editor with unsaved text.
+    DiscardNoteEdit,
     /// Deleting a saved filter from the Filters tab.
     DeleteFilter(i64),
     /// Unlinking the selected transaction's transfer (`u` on Transactions).
@@ -217,11 +227,17 @@ pub struct App {
     tx_by_id: HashMap<i64, Transaction>,
     category_by_tx_id: HashMap<i64, String>,
     transfer_by_tx_id: HashMap<i64, Transfer>,
-    /// Every known tag, most-used first — feeds `tag:` autocomplete.
+    tags_by_tx_id: HashMap<i64, Vec<String>>,
+    note_by_tx_id: HashMap<i64, String>,
+    /// Every known tag, most-used first — feeds `tag:` autocomplete and the
+    /// tag editor's suggestion list.
     tag_options: Vec<String>,
     category_tx_count: HashMap<i64, usize>,
     account_tx_count: HashMap<i64, usize>,
     similarity_candidates: HashMap<i64, Transaction>,
+    // Note / tag editors (self-contained widgets; see `app::annotations`)
+    pub note_editor: Option<NoteEditor>,
+    pub tag_editor: Option<TagEditor>,
     // Shared single-line text prompt state
     text_prompt: Option<TextPrompt>,
     // Dedicated saved-filter query editor state
@@ -366,7 +382,11 @@ impl App {
             tx_by_id: HashMap::new(),
             category_by_tx_id: HashMap::new(),
             transfer_by_tx_id: HashMap::new(),
+            tags_by_tx_id: HashMap::new(),
+            note_by_tx_id: HashMap::new(),
             tag_options: Vec::new(),
+            note_editor: None,
+            tag_editor: None,
             category_tx_count: HashMap::new(),
             account_tx_count: HashMap::new(),
             similarity_candidates: HashMap::new(),
@@ -600,6 +620,15 @@ impl App {
             s.get_transfers_for_transactions(&all_tx_ids)
         });
 
+        // Annotations are cached for every loaded transaction, not just the
+        // Transactions tab's, because tags render inline on every transaction
+        // table and the detail panel can be opened from several of them.
+        self.tags_by_tx_id = self.load_or_show("load transaction tags", |s| {
+            s.tags_for_transactions(&all_tx_ids)
+        });
+        self.note_by_tx_id = self.load_or_show("load transaction notes", |s| {
+            s.notes_for_transactions(&all_tx_ids)
+        });
         self.reload_tag_options();
     }
 
@@ -614,16 +643,27 @@ impl App {
         self.rebuild_search_configs();
     }
 
-    pub fn tag_options(&self) -> &[String] {
-        &self.tag_options
-    }
-
     pub fn get_cached_transaction(&self, id: i64) -> Option<&Transaction> {
         self.tx_by_id.get(&id)
     }
 
     pub fn get_cached_category(&self, tx_id: i64) -> Option<&str> {
         self.category_by_tx_id.get(&tx_id).map(|s| s.as_str())
+    }
+
+    pub fn get_cached_tags(&self, tx_id: i64) -> &[String] {
+        self.tags_by_tx_id
+            .get(&tx_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn get_cached_note(&self, tx_id: i64) -> Option<&str> {
+        self.note_by_tx_id.get(&tx_id).map(String::as_str)
+    }
+
+    pub fn tag_options(&self) -> &[String] {
+        &self.tag_options
     }
 
     pub fn category_path(&self, category_id: i64) -> Option<&str> {
@@ -1105,7 +1145,13 @@ impl App {
                     | InputMode::ConfirmApplyFilters
                     | InputMode::TransferNoMatch
             );
-        self.input_mode = text_prompt_return_mode.unwrap_or(if return_to_filter_edit {
+        // Declining the "discard this note?" confirm must put the user back in
+        // the editor with their text intact, not drop them to Normal.
+        let return_to_note_edit =
+            self.input_mode == InputMode::Confirm && self.note_editor.is_some();
+        self.input_mode = text_prompt_return_mode.unwrap_or(if return_to_note_edit {
+            InputMode::Note
+        } else if return_to_filter_edit {
             InputMode::FilterEdit
         } else {
             InputMode::Normal
@@ -1203,6 +1249,7 @@ impl App {
                 }
             }
             ConfirmAction::DiscardFilterEdit => self.exit_filter_edit(),
+            ConfirmAction::DiscardNoteEdit => self.close_note_editor(),
             ConfirmAction::DeleteFilter(filter_id) => {
                 if self.try_mutation("delete filter", |s| s.delete_filter(filter_id)) {
                     self.reapply_filters();
@@ -1263,6 +1310,189 @@ mod tests {
                 .id,
             target_id
         );
+    }
+
+    /// Type `text` into whichever editor is open, one key at a time.
+    fn type_into_editor(app: &mut App, text: &str) {
+        for c in text.chars() {
+            let key = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            );
+            match app.input_mode {
+                InputMode::Note => app.handle_note_key(&key),
+                InputMode::Tags => app.handle_tag_key(&key),
+                other => panic!("no editor open (mode {other:?})"),
+            }
+        }
+    }
+
+    fn press(app: &mut App, code: crossterm::event::KeyCode) {
+        let key = crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        match app.input_mode {
+            InputMode::Note => app.handle_note_key(&key),
+            InputMode::Tags => app.handle_tag_key(&key),
+            other => panic!("no editor open (mode {other:?})"),
+        }
+    }
+
+    fn ctrl_s(app: &mut App) {
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('s'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        match app.input_mode {
+            InputMode::Note => app.handle_note_key(&key),
+            InputMode::Tags => app.handle_tag_key(&key),
+            other => panic!("no editor open (mode {other:?})"),
+        }
+    }
+
+    fn app_with_one_transaction() -> (TempDir, App, i64) {
+        let (temp, store) = store_with_transactions(&[FixtureTx {
+            description: "Coffee",
+            amount_cents: -450,
+        }]);
+        let tx_id = tx_by_description(&store, "Coffee").id;
+        let app = App::new(store).unwrap();
+        (temp, app, tx_id)
+    }
+
+    #[test]
+    fn note_editor_saves_and_caches_the_note() {
+        let (_temp, mut app, tx_id) = app_with_one_transaction();
+
+        app.start_note_edit();
+        assert_eq!(app.input_mode, InputMode::Note);
+        type_into_editor(&mut app, "reimbursable");
+        ctrl_s(&mut app);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.note_editor.is_none());
+        assert_eq!(app.get_cached_note(tx_id), Some("reimbursable"));
+        assert_eq!(
+            app.store.get_note(tx_id).unwrap().as_deref(),
+            Some("reimbursable")
+        );
+    }
+
+    #[test]
+    fn reopening_the_note_editor_loads_the_saved_text_and_clearing_removes_it() {
+        let (_temp, mut app, tx_id) = app_with_one_transaction();
+
+        app.start_note_edit();
+        type_into_editor(&mut app, "first");
+        ctrl_s(&mut app);
+
+        app.start_note_edit();
+        assert_eq!(app.note_editor.as_ref().unwrap().text(), "first");
+        for _ in 0.."first".len() {
+            press(&mut app, crossterm::event::KeyCode::Backspace);
+        }
+        ctrl_s(&mut app);
+
+        assert_eq!(app.get_cached_note(tx_id), None);
+        assert_eq!(app.store.get_note(tx_id).unwrap(), None);
+    }
+
+    #[test]
+    fn escaping_a_dirty_note_confirms_and_declining_returns_to_the_editor() {
+        let (_temp, mut app, tx_id) = app_with_one_transaction();
+
+        app.start_note_edit();
+        type_into_editor(&mut app, "draft");
+        press(&mut app, crossterm::event::KeyCode::Esc);
+
+        // Dirty: the editor must not be thrown away without asking.
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        assert!(matches!(
+            app.confirm_action,
+            Some(ConfirmAction::DiscardNoteEdit)
+        ));
+
+        cancel_current_confirmation(&mut app);
+        assert_eq!(app.input_mode, InputMode::Note);
+        assert_eq!(app.note_editor.as_ref().unwrap().text(), "draft");
+
+        // Confirming does discard it.
+        press(&mut app, crossterm::event::KeyCode::Esc);
+        app.confirm_proceed();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.note_editor.is_none());
+        assert_eq!(app.store.get_note(tx_id).unwrap(), None);
+    }
+
+    #[test]
+    fn escaping_an_unchanged_note_closes_without_confirming() {
+        let (_temp, mut app, _tx_id) = app_with_one_transaction();
+
+        app.start_note_edit();
+        press(&mut app, crossterm::event::KeyCode::Esc);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.confirm_action.is_none());
+    }
+
+    #[test]
+    fn tag_editor_saves_and_feeds_tag_autocomplete() {
+        let (_temp, mut app, tx_id) = app_with_one_transaction();
+
+        app.start_tag_edit();
+        assert_eq!(app.input_mode, InputMode::Tags);
+        type_into_editor(&mut app, "#work travel");
+        press(&mut app, crossterm::event::KeyCode::Enter);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.get_cached_tags(tx_id), ["travel", "work"]);
+        // A newly created tag must be offered by `tag:` autocomplete at once.
+        assert_eq!(app.tag_options().len(), 2);
+        assert!(app.tag_options().contains(&"work".to_string()));
+    }
+
+    #[test]
+    fn clearing_every_tag_removes_it_from_autocomplete() {
+        let (_temp, mut app, tx_id) = app_with_one_transaction();
+
+        app.start_tag_edit();
+        type_into_editor(&mut app, "work");
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        assert_eq!(app.tag_options(), ["work".to_string()]);
+
+        app.start_tag_edit();
+        for _ in 0.."work ".len() {
+            press(&mut app, crossterm::event::KeyCode::Backspace);
+        }
+        press(&mut app, crossterm::event::KeyCode::Enter);
+
+        assert!(app.get_cached_tags(tx_id).is_empty());
+        assert!(app.tag_options().is_empty());
+    }
+
+    #[test]
+    fn note_footer_hint_says_edit_once_the_row_has_one() {
+        let (_temp, mut app, _tx_id) = app_with_one_transaction();
+        app.current_tab = Tab::Transactions;
+        assert!(crate::tui::keymap::footer_hints(&app).contains(&("n", "note")));
+
+        app.start_note_edit();
+        type_into_editor(&mut app, "noted");
+        ctrl_s(&mut app);
+
+        assert!(crate::tui::keymap::footer_hints(&app).contains(&("n", "edit note")));
+    }
+
+    #[test]
+    fn note_and_tag_edits_are_no_ops_without_a_selected_transaction() {
+        let (_temp, store) = store_with_transactions(&[]);
+        let mut app = App::new(store).unwrap();
+
+        app.start_note_edit();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.note_editor.is_none());
+
+        app.start_tag_edit();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.tag_editor.is_none());
     }
 
     #[test]

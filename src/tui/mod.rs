@@ -2,8 +2,10 @@ mod app;
 mod filtered_list;
 mod keymap;
 mod modal;
+mod note_editor;
 pub mod search_bar;
 mod table;
+mod tag_editor;
 mod ui;
 
 pub use app::App;
@@ -289,6 +291,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     KeyCode::Char(c) => app.update_category_input(c),
                     _ => {}
                 },
+                // Both editors own their key handling entirely (see
+                // `tui::note_editor` / `tui::tag_editor`), so the loop just
+                // forwards. `?` help is disabled for the note editor, where a
+                // literal `?` is text.
+                InputMode::Note => app.handle_note_key(&key),
+                InputMode::Tags => app.handle_tag_key(&key),
                 InputMode::BulkApply => match key.code {
                     KeyCode::Esc => app.bulk_apply_cancel(),
                     KeyCode::Enter => app.bulk_apply_confirm(),
