@@ -140,7 +140,9 @@ impl TransactionStore {
             [],
         )?;
 
-        let config = SearchConfig::standard(Vec::new(), None, self.search_options);
+        // Option lists only drive autocomplete, which has no meaning here —
+        // parsing a saved `tag:`/`category:` query works without them.
+        let config = SearchConfig::standard(Vec::new(), None, Vec::new(), self.search_options);
         let mut claimed: HashSet<i64> = HashSet::new();
         let mut applied = Vec::new();
 

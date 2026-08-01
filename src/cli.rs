@@ -1120,8 +1120,12 @@ fn transactions_list(
     format: Format,
     search_options: SearchOptions,
 ) -> Result<(), String> {
-    let config =
-        tally::search::SearchConfig::standard(Vec::new(), Some(Vec::new()), search_options);
+    let config = tally::search::SearchConfig::standard(
+        Vec::new(),
+        Some(Vec::new()),
+        Vec::new(),
+        search_options,
+    );
     let parsed = if query.trim().is_empty() {
         tally::search::ParsedQuery::empty()
     } else {

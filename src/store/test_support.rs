@@ -19,6 +19,7 @@ fn search_config() -> SearchConfig {
     SearchConfig::standard(
         vec![],
         Some(vec![]),
+        vec![],
         SearchOptions::new(
             NaiveDate::from_ymd_opt(2026, 7, 9).unwrap(),
             Weekday::Mon,

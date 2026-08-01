@@ -217,6 +217,8 @@ pub struct App {
     tx_by_id: HashMap<i64, Transaction>,
     category_by_tx_id: HashMap<i64, String>,
     transfer_by_tx_id: HashMap<i64, Transfer>,
+    /// Every known tag, most-used first — feeds `tag:` autocomplete.
+    tag_options: Vec<String>,
     category_tx_count: HashMap<i64, usize>,
     account_tx_count: HashMap<i64, usize>,
     similarity_candidates: HashMap<i64, Transaction>,
@@ -364,6 +366,7 @@ impl App {
             tx_by_id: HashMap::new(),
             category_by_tx_id: HashMap::new(),
             transfer_by_tx_id: HashMap::new(),
+            tag_options: Vec::new(),
             category_tx_count: HashMap::new(),
             account_tx_count: HashMap::new(),
             similarity_candidates: HashMap::new(),
@@ -596,6 +599,23 @@ impl App {
         self.transfer_by_tx_id = self.load_or_show("load transaction transfers", |s| {
             s.get_transfers_for_transactions(&all_tx_ids)
         });
+
+        self.reload_tag_options();
+    }
+
+    /// Refresh the known-tag list and push it into every search bar, so
+    /// `tag:` autocomplete reflects a tag that was just created or GC'd.
+    pub(super) fn reload_tag_options(&mut self) {
+        self.tag_options = self
+            .load_or_show("load tags", |s| s.list_tags())
+            .into_iter()
+            .map(|tag| tag.name)
+            .collect();
+        self.rebuild_search_configs();
+    }
+
+    pub fn tag_options(&self) -> &[String] {
+        &self.tag_options
     }
 
     pub fn get_cached_transaction(&self, id: i64) -> Option<&Transaction> {

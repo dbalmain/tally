@@ -101,6 +101,21 @@ pub fn tokenize(input: &str) -> Vec<RawToken> {
         let negated = chars[pos] == '-' && chars.get(pos + 1).is_some_and(|c| !c.is_whitespace());
         let token_start = if negated { pos + 1 } else { pos };
 
+        // `#tag` is shorthand for `tag:tag`, because that is how tags are
+        // written everywhere else in the UI. It desugars into a normal filter
+        // token so autocomplete and negation (`-#work`) work unchanged; the
+        // value span starts after the `#` so completions replace just the name.
+        if chars[token_start] == '#' {
+            let mut hash_token = parse_tag_shorthand(&chars, token_start);
+            pos = hash_token.span().end;
+            if negated {
+                rewrite_span_start(&mut hash_token, dash);
+                set_negated(&mut hash_token);
+            }
+            tokens.push(hash_token);
+            continue;
+        }
+
         // Check for regex at word boundary (pos == 0 or after whitespace)
         if chars[token_start] == '/' {
             let mut regex_token = parse_regex(&chars, token_start);
@@ -206,6 +221,28 @@ fn try_parse_filter(chars: &[char], start: usize) -> Option<(RawToken, usize)> {
         },
         pos,
     ))
+}
+
+/// Desugar `#name` (starting at the `#`) into a `tag:name` filter token.
+///
+/// The token span covers the `#`, so highlighting and cursor context treat it
+/// as one unit, while `value_span` starts after it so autocomplete rewrites
+/// only the name.
+fn parse_tag_shorthand(chars: &[char], start: usize) -> RawToken {
+    let len = chars.len();
+    let value_start = start + 1;
+    let mut pos = value_start;
+    while pos < len && !chars[pos].is_whitespace() {
+        pos += 1;
+    }
+
+    RawToken::Filter {
+        name: "tag".to_string(),
+        value: chars[value_start..pos].iter().collect(),
+        span: Span::new(start, pos),
+        value_span: Span::new(value_start, pos),
+        negated: false,
+    }
 }
 
 /// Parse a regex token starting at the opening '/'.
@@ -594,6 +631,71 @@ mod tests {
             }
             _ => panic!("Expected Filter token"),
         }
+    }
+
+    #[test]
+    fn test_tokenize_hash_shorthand_is_a_tag_filter() {
+        let tokens = tokenize("#work");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            RawToken::Filter {
+                name,
+                value,
+                span,
+                value_span,
+                negated,
+            } => {
+                assert_eq!(name, "tag");
+                assert_eq!(value, "work");
+                // Span covers the `#`; the value span starts after it so
+                // autocomplete replaces only the name.
+                assert_eq!(*span, Span::new(0, 5));
+                assert_eq!(*value_span, Span::new(1, 5));
+                assert!(!negated);
+            }
+            _ => panic!("Expected Filter token"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_hash_shorthand_negates() {
+        let tokens = tokenize("-#work");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            RawToken::Filter {
+                name,
+                value,
+                span,
+                negated,
+                ..
+            } => {
+                assert_eq!(name, "tag");
+                assert_eq!(value, "work");
+                assert!(negated);
+                assert_eq!(*span, Span::new(0, 6));
+            }
+            _ => panic!("Expected Filter token"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_bare_hash_is_an_empty_tag_filter() {
+        // A lone `#` is the start of typing a tag: an empty value, which the
+        // filter treats as Empty and autocomplete fills from the tag list.
+        let tokens = tokenize("#");
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(
+            &tokens[0],
+            RawToken::Filter { name, value, .. } if name == "tag" && value.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_tokenize_hash_mid_token_is_literal_fts() {
+        // Only a `#` at a word boundary is shorthand; `c#` stays FTS text.
+        let tokens = tokenize("c#work");
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(&tokens[0], RawToken::Fts { text, .. } if text == "c#work"));
     }
 
     #[test]

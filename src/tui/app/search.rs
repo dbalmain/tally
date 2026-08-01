@@ -87,7 +87,12 @@ impl App {
                 .collect()
         });
 
-        SearchConfig::standard(account_options, category_options, self.search_options)
+        SearchConfig::standard(
+            account_options,
+            category_options,
+            self.tag_options.clone(),
+            self.search_options,
+        )
     }
 
     pub(super) fn rebuild_search_configs(&mut self) {

@@ -46,14 +46,17 @@ impl SearchConfig {
     /// and every search bar picks them up.
     ///
     /// `category_options` is `None` for contexts where a category filter is
-    /// meaningless (e.g. lists of uncategorised transactions).
+    /// meaningless (e.g. lists of uncategorised transactions). `tag_options`
+    /// is the known tag list, used only for autocomplete.
     pub fn standard(
         account_options: Vec<String>,
         category_options: Option<Vec<String>>,
+        tag_options: Vec<String>,
         options: SearchOptions,
     ) -> Self {
         use super::filters::{
-            AccountFilter, AmountFilter, CategoryFilter, ConfidenceFilter, DateFilter, SortFilter,
+            AccountFilter, AmountFilter, CategoryFilter, ConfidenceFilter, DateFilter, NoteFilter,
+            SortFilter, TagFilter,
         };
 
         let mut filters: Vec<Box<dyn Filter>> = vec![
@@ -61,6 +64,8 @@ impl SearchConfig {
             Box::new(AmountFilter),
             Box::new(AccountFilter::new(account_options)),
             Box::new(ConfidenceFilter),
+            Box::new(TagFilter::new(tag_options)),
+            Box::new(NoteFilter),
             Box::new(SortFilter),
         ];
         if let Some(options) = category_options {

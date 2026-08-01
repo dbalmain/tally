@@ -221,13 +221,13 @@ mod tests {
     use chrono::NaiveDate;
     use rusqlite::params;
 
-    use crate::CategorySource;
     use crate::search::ParsedQuery;
     use crate::store::test_support::{
         annotate_transaction, assert_category_matches_db, assert_enrichment_matches_db,
         assert_transaction_matches_db, insert_tx, q, q_exact, setup_rich_fixture,
         store_with_two_accounts,
     };
+    use crate::{CategorySource, TransactionStore};
 
     // ----- query_transactions: filter coverage -----
 
@@ -313,6 +313,123 @@ mod tests {
             .query_transactions(&q("confidence:none"), None)
             .unwrap();
         assert_eq!(unscored.len(), 6);
+    }
+
+    /// Descriptions matching `query`, sorted, for tag/note filter assertions.
+    fn matching_descriptions(store: &TransactionStore, query: &str) -> Vec<String> {
+        let mut descs: Vec<String> = store
+            .query_transactions(&q(query), None)
+            .unwrap()
+            .into_iter()
+            .map(|tx| tx.description)
+            .collect();
+        descs.sort();
+        descs
+    }
+
+    fn tx_id(store: &TransactionStore, description: &str) -> i64 {
+        store
+            .query_transactions(&ParsedQuery::empty(), None)
+            .unwrap()
+            .into_iter()
+            .find(|tx| tx.description == description)
+            .unwrap_or_else(|| panic!("missing {description:?}"))
+            .id
+    }
+
+    #[test]
+    fn query_tag_matches_the_tag_and_its_sub_tags() {
+        let (_t, mut store) = setup_rich_fixture();
+        let coffee = tx_id(&store, "Coffee Shop");
+        let salary = tx_id(&store, "Salary");
+        store
+            .set_transaction_tags(coffee, &["work/travel".into()])
+            .unwrap();
+        store
+            .set_transaction_tags(salary, &["work".into()])
+            .unwrap();
+
+        // A parent tag covers everything beneath it, like `category:` does.
+        assert_eq!(
+            matching_descriptions(&store, "tag:work"),
+            vec!["Coffee Shop", "Salary"]
+        );
+        assert_eq!(
+            matching_descriptions(&store, "tag:work/travel"),
+            vec!["Coffee Shop"]
+        );
+        assert!(matching_descriptions(&store, "tag:groceries").is_empty());
+    }
+
+    #[test]
+    fn query_tag_supports_hash_shorthand_negation_and_presence() {
+        let (_t, mut store) = setup_rich_fixture();
+        let coffee = tx_id(&store, "Coffee Shop");
+        store
+            .set_transaction_tags(coffee, &["work".into()])
+            .unwrap();
+
+        // `#work` is shorthand for `tag:work`.
+        assert_eq!(matching_descriptions(&store, "#work"), vec!["Coffee Shop"]);
+        assert_eq!(
+            matching_descriptions(&store, "tag:any"),
+            vec!["Coffee Shop"]
+        );
+
+        // Negation keeps untagged rows, and `none` selects exactly those.
+        let untagged = matching_descriptions(&store, "tag:none");
+        assert_eq!(untagged.len(), 6);
+        assert!(!untagged.contains(&"Coffee Shop".to_string()));
+        assert_eq!(matching_descriptions(&store, "-#work"), untagged);
+    }
+
+    #[test]
+    fn query_note_matches_substrings_and_presence() {
+        let (_t, mut store) = setup_rich_fixture();
+        let coffee = tx_id(&store, "Coffee Shop");
+        store.set_note(coffee, "Reimbursable by ACME Pty").unwrap();
+
+        assert_eq!(
+            matching_descriptions(&store, "note:acme"),
+            vec!["Coffee Shop"]
+        );
+        // A substring, unlike the stemmed FTS path over the same text.
+        assert_eq!(
+            matching_descriptions(&store, "note:cme"),
+            vec!["Coffee Shop"]
+        );
+        assert!(matching_descriptions(&store, "note:zzz").is_empty());
+
+        assert_eq!(
+            matching_descriptions(&store, "note:any"),
+            vec!["Coffee Shop"]
+        );
+        assert_eq!(matching_descriptions(&store, "note:none").len(), 6);
+    }
+
+    #[test]
+    fn query_tag_and_note_combine_with_other_filters() {
+        let (_t, mut store) = setup_rich_fixture();
+        let coffee = tx_id(&store, "Coffee Shop");
+        let salary = tx_id(&store, "Salary");
+        store
+            .set_transaction_tags(coffee, &["work".into()])
+            .unwrap();
+        store
+            .set_transaction_tags(salary, &["work".into()])
+            .unwrap();
+        store.set_note(salary, "quarterly").unwrap();
+
+        assert_eq!(
+            matching_descriptions(&store, "#work note:quarterly"),
+            vec!["Salary"]
+        );
+        // Salary is the only credit, so pairing the tag with a debit-only
+        // amount filter must exclude it.
+        assert_eq!(
+            matching_descriptions(&store, "#work amount:<0"),
+            vec!["Coffee Shop"]
+        );
     }
 
     #[test]

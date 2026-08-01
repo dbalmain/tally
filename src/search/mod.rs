@@ -56,6 +56,19 @@
 //!   transfers) hold NULL and so match neither comparisons nor ranges;
 //!   `confidence:none` selects exactly those, `confidence:any` the scored ones.
 //!   Aliased as `conf:`.
+//! - `tag:work` — tagged `#work`; a parent tag also matches everything beneath
+//!   it, so `tag:work` covers `#work/travel` the way `category:Food` covers
+//!   `Food/Groceries`. `tag:work|travel` — OR. Values are matched leniently: a
+//!   leading `#` is dropped and case is ignored, so `tag:#Work` finds `work`.
+//!   `tag:none` / `tag:any` select untagged / tagged rows.
+//! - `#work` — shorthand for `tag:work`, since that is how tags are written
+//!   everywhere else. It desugars into the same filter token, so autocomplete
+//!   and negation (`-#work`) work identically.
+//! - `note:acme` — case-insensitive **substring** of the note text (`%` and `_`
+//!   in the value are stripped, not treated as wildcards). Substring is the
+//!   complement to bare FTS words, which already search notes because note text
+//!   is folded into `transactions_fts`. `note:none` / `note:any` select rows
+//!   without / with a note.
 //! - `sort:category,amount` — transaction DB searches only: order by the listed
 //!   columns in order. Columns are `date`, `description`, `amount`, `balance`,
 //!   `account`, `bank`, `category`, and `confidence`. Prefix a column with `-`
@@ -85,6 +98,8 @@
 //! - `-category:Food`, `-account:ING`, `-amount:>100`, `-date:2024` — exclude
 //!   rows matching that filter (`-category:Food` still keeps uncategorised rows,
 //!   whose NULL path counts as "did not match")
+//! - `-#work` / `-tag:work`, `-note:acme` — exclude tagged/noted rows; untagged
+//!   and un-noted rows are kept, since they did not match
 //! - `-/regex/i` — exclude rows whose description matches the regex
 //! - A lone `-` (followed by whitespace or end-of-input) is literal FTS text,
 //!   NOT negation. A `-` *inside* a filter value is untouched, so
@@ -112,7 +127,8 @@ mod tokenize;
 pub use context::CursorContext;
 pub use filter::{Filter, FilterResult};
 pub use filters::{
-    AccountFilter, AmountFilter, CategoryFilter, ConfidenceFilter, DateFilter, SortFilter,
+    AccountFilter, AmountFilter, CategoryFilter, ConfidenceFilter, DateFilter, NoteFilter,
+    SortFilter, TagFilter,
 };
 pub use parse::{SearchConfig, SearchOptions, parse};
 pub use query::{ParsedQuery, QueryPart, SortColumn, SortKey, Span};
