@@ -86,6 +86,8 @@ principles:
 | Account actions (rename/move, delete, view transactions)            | `src/tui/app/accounts.rs`                                                                                                           |
 | Filter actions (create, rename, categorise, override/review/delete) | `src/tui/app/filters.rs`                                                                                                            |
 | Transfer actions (mark, confirm, delete)                            | `src/tui/app/transfers.rs`                                                                                                          |
+| Note/tag editor lifecycle and persistence                           | `src/tui/app/annotations.rs`                                                                                                        |
+| How the note or tag editor _behaves_ (keys, completion, cursor)     | `src/tui/note_editor.rs` / `src/tui/tag_editor.rs` — self-contained, one file per interaction model                                 |
 | Search-bar widget (rendering, cursor-context keys, autocomplete)    | `src/tui/search_bar.rs`                                                                                                             |
 | SQL queries / store methods                                         | `src/store/` (column consts + row parsers in `mod.rs`; methods per submodule)                                                       |
 | Schema, FTS index, `transactions_view`                              | `src/db.rs`                                                                                                                         |
@@ -111,6 +113,7 @@ src/
 │   ├── categories.rs       # Category CRUD, rename/merge/delete, counts
 │   ├── accounts.rs         # Account list/lookup, rename/move + delete (exports-folder sync), counts
 │   ├── enrichments.rs      # set/confirm/clear category, confirmed examples
+│   ├── annotations.rs      # Notes + #tags: CRUD, batch reads, FTS reindex on note change
 │   ├── transfers.rs        # Transfer lifecycle, candidates, transfer queries
 │   ├── filters.rs          # Filter CRUD, apply_filters/preview_filters
 │   └── test_support.rs     # Shared test fixtures (cfg(test))
@@ -124,7 +127,7 @@ src/
 │   ├── query.rs            # ParsedQuery / QueryPart / Span types
 │   ├── render.rs           # SqlContext + ParsedQuery::render → WHERE+params
 │   ├── filter.rs           # Filter trait
-│   ├── filters/            # Built-in filters (date, amount, account, category)
+│   ├── filters/            # Built-in filters (date, amount, account, category, confidence, tag, note)
 │   ├── context.rs          # CursorContext for key handling
 │   └── fuzzy.rs            # Nucleo-based fuzzy matcher
 └── tui/
@@ -133,12 +136,15 @@ src/
     ├── ui.rs               # Rendering: layout, tables, details, popups
     ├── table.rs            # Domain-agnostic scrollable table + inline detail panel geometry
     ├── search_bar.rs       # Search bar widget (context-aware keys, autocomplete)
+    ├── note_editor.rs      # Multi-line note editor (self-contained: state + keys)
+    ├── tag_editor.rs       # #tag line editor (self-contained; swappable interaction model)
     ├── filtered_list.rs    # FilteredList<T>: items + fuzzy-filtered view
     └── app/
         ├── mod.rs          # App struct, construction, caches, navigation, bulk-apply state
         ├── tabs.rs         # Tab/TodoSubTab enums + TabLists (per-tab dispatch)
         ├── search.rs       # TabSearchState + search/autocomplete actions
         ├── categories.rs   # Category popup, AI review, rename/merge
+        ├── annotations.rs  # Note/tag editor lifecycle and persistence
         ├── accounts.rs      # Account rename/move, delete, transaction side panel
         ├── filters.rs      # Saved-search filter management
         └── transfers.rs    # Transfer marking, confirmation, deletion
@@ -212,6 +218,12 @@ Transaction {
 - `filters` —
   `id, name, query, category_id, override_mode, review_required, position, created_at`
 
+**Annotation tables** (notes and `#tags`; see Notes and Tags below):
+
+- `transaction_notes` — `transaction_id (PK), note, created_at, updated_at`
+- `tags` — `id, name, created_at` (canonical: lowercase, no leading `#`)
+- `transaction_tags` — `transaction_id, tag_id` (composite PK)
+
 **Import tracking:**
 
 - `imported_files` —
@@ -268,11 +280,14 @@ hides already-linked transactions — it offers them and the caller confirms.
 
 ### Integrity invariants
 
-SQLite foreign keys are **not** enforced — there is no `PRAGMA foreign_keys`, so
-the `REFERENCES` clauses in the schema are documentation only. Store methods are
-therefore the only safe mutation path: raw SQL bypasses every invariant
-silently, so agents must never mutate via ad-hoc SQL. The invariants the store
-maintains:
+SQLite foreign keys **are** enforced, but only by accident of the build: nothing
+sets `PRAGMA foreign_keys`, and `rusqlite`'s bundled SQLite is compiled with
+`SQLITE_DEFAULT_FOREIGN_KEYS=1`, so `REFERENCES` clauses do reject dangling ids
+(verifiable with `PRAGMA foreign_keys`, which reads back `1`). Do not rely on
+that staying true — a non-bundled build would silently turn it off. Store
+methods remain the only safe mutation path regardless: FKs catch dangling ids
+and nothing else, so raw SQL still bypasses every invariant below silently, and
+agents must never mutate via ad-hoc SQL. The invariants the store maintains:
 
 - A transaction is either categorised or in a transfer, never both
   (`create_transfer` clears enrichments; `set_category` rejects a transfer leg
@@ -285,11 +300,56 @@ maintains:
   merging onto an existing one); delete removes the folder and soft-deletes the
   row while retaining the account's transactions. Both are store-only.
 - `transactions_fts` rowid N always holds exactly
-  `build_searchable_text(description, metadata)` of transaction N — never
+  `build_searchable_text(description, metadata, note)` of transaction N — never
   leftover or foreign postings. Contentless FTS5 permits multiple postings per
   rowid and never cross-checks them against the real row, so the store maintains
-  this by DELETE-then-INSERT on every FTS write (`insert_transaction`) and by
-  the full rebuild path `store.rebuild_fts()` (never ad-hoc FTS SQL).
+  this by DELETE-then-INSERT on every FTS write (`insert_transaction`,
+  `set_note` via `refresh_transaction_fts`) and by the full rebuild path
+  `store.rebuild_fts()` (never ad-hoc FTS SQL). **A note is part of the indexed
+  text**, so any new write path that touches note text must reindex that row.
+- A tag exists exactly while something is tagged with it: `set_transaction_tags`
+  deletes tags left with no transactions, so the tag list is the set in use and
+  autocomplete never offers a dead tag.
+
+### Notes and tags
+
+Two kinds of user annotation on a transaction, both in their own tables rather
+than on `transaction_enrichments`. That table means "category assignment" and
+`create_transfer` deletes it on both endpoints — a note or tag must survive
+marking a transfer, and a transfer leg must be taggable. Being additive
+(`CREATE TABLE IF NOT EXISTS`), they also landed without deleting `tally.db`.
+
+- **Notes** are free-form multi-line text, one per transaction, edited in a
+  modal (`n`) and shown **only** in the expanded detail panel (`v`); an
+  unexpanded row carries just a dim `✎` marker so a written note is never
+  invisible. Note text is folded into `transactions_fts`, so bare-word search
+  finds it; `note:` adds substring and presence matching. A blank note deletes
+  the row rather than storing whitespace, so `note:none` agrees with the UI.
+- **Tags** are `#no-space-strings`, canonicalised to lowercase over
+  `[a-z0-9._/-]` (so `work/travel` gives hierarchy for free). They render inline
+  in the transactions table in magenta and are filtered by `tag:` / `#tag`.
+
+Both filters render as `EXISTS` subqueries keyed on `{transaction_id}` alone, so
+they need no joins and work unchanged in every context that can identify a
+transaction, transfer searches included.
+
+The tag editor's interaction model is one space-separated text line with
+autocomplete on the token under the cursor — ordinary text editing, no chip
+model, no separate deletion mode. Its keys are chosen so nothing commits by
+surprise: **Space** commits the token exactly as typed (never the highlighted
+suggestion, or typing `coffee` under a highlighted `coffee-shop` would silently
+give the wrong tag), **Tab** takes the highlighted suggestion, and **Enter** and
+**Ctrl-S** always save. `src/tui/tag_editor.rs` is deliberately self-contained —
+state, keys, and the view model the renderer needs — so swapping the interaction
+model is a one-file change. `src/tui/note_editor.rs` is the same shape for the
+multi-line editor (vertical movement is by source line, not wrapped line).
+
+**Durability caveat:** notes are the first genuinely irreplaceable hand-authored
+data in the vault — categories can be re-derived by the classifier, prose
+cannot. The "delete `tally.db` and re-import" escape hatch of the no-migrations
+policy therefore now costs real work. Insurance (not yet built) would be a
+`tally annotations export|import` round-tripping via `(account path, tx hash)`
+rather than id, since `hash` is stable across re-imports.
 
 ### Saved filters
 
@@ -392,9 +452,10 @@ handling and data flow stay uniform:
 - **Context over labels** — Tab names provide context, no redundant headers
 - **Row-level styling** — Use `Row::style()` for backgrounds, not per-cell
   `.bg()`
-- **Color coding:** Red = negative amounts / transfer "from"; Green = positive
-  amounts / transfer "to"; Yellow = categories, pending items; Cyan = transfer
-  indicators, confidence scores; DarkGray = labels, disabled items
+- **Color coding:** Red = negative amounts / transfer "from" / invalid input;
+  Green = positive amounts / transfer "to"; Yellow = categories, pending items;
+  Cyan = transfer indicators, confidence scores; Magenta = `#tags`
+  (`ui::TAG_COLOR`); DarkGray = labels, disabled items, the note marker `✎`
 
 ## Performance
 
@@ -466,7 +527,8 @@ Store query methods don't change; the search bar UI is filter-agnostic.
 ### Adding a Key Binding
 
 1. Implement the action as an `App` method in the matching feature file
-   (`app/categories.rs`, `app/transfers.rs`, `app/search.rs`, or `app/mod.rs`).
+   (`app/categories.rs`, `app/annotations.rs`, `app/transfers.rs`,
+   `app/search.rs`, or `app/mod.rs`).
 2. For Normal mode, add one `Bind` row to `normal_binds` in `src/tui/keymap.rs`
    (plus an `Act` variant and `run_normal` arm if needed). Footer and popover
    text come from that same row.
@@ -501,6 +563,8 @@ modal handlers live in `src/tui/mod.rs` with curated hints in `keymap.rs`.
 | `v`                 | Toggle filter review requirement (Filters tab); toggle "view transactions?" — a side panel listing the selected category's transactions (Transactions-view format, no category column) to the right of the category list (Categories tab); or toggle "view details?" — an inline two-column (name/value) detail panel listing every field of the transaction (incl. source file, hash, and metadata) with wrapping values (Transactions tab, Todo → Uncategorised); or toggle a side panel of the selected account's transactions (Accounts tab)   |
 | `t`                 | Mark as transfer (including Todo → AI Review); if a chosen endpoint is already linked, prompts to break the existing transfer                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `m`                 | Manage transactions: jump to the Transactions tab with its DB search set to `category:<path>` (Categories tab) or `account:<path>` (Accounts tab) and focus on the first transaction                                                                                                                                                                                                                                                                                                                                                               |
+| `n`                 | Edit the selected transaction's note (any transaction view) — opens the multi-line note modal. The hint reads "note" when the row has none and "edit note" when it does. Note text is searchable (bare FTS words and `note:`) but only rendered on an expanded row (`v`); unexpanded rows show a dim `✎` marker. On the Filters tab `n` is "new filter" instead                                                                                                                                                                                    |
+| `#`                 | Edit the selected transaction's tags (any transaction view) — opens the tag modal: one space-separated line with type-ahead over existing tags. `Space` keeps what you typed and starts the next tag, `Tab` accepts the highlighted suggestion, `Enter`/`Ctrl-S` save. Tags render inline in magenta on the transaction row                                                                                                                                                                                                                        |
 | `C`                 | Apply a category to **all** transactions matching the current DB search (Transactions tab and Todo → AI Review) — opens the category popup, then the bulk-apply checkbox list so the user can scroll and deselect rows to skip before applying; unlike `c` it does not offer the similar-transactions score ranking, and transfer legs are skipped (they can't be categorised). Hidden while a fuzzy (`~`) search is active, since that only narrows the visible rows                                                                              |
 | `A`                 | Accept **all** matching items on the current DB search: on Todo → AI Review, confirm the existing AI-suggested categories; on Todo → Transfer Review, confirm the pending transfers. Opens the same bulk-apply checkbox list as `C` (scroll + deselect to skip). Does not run on the Transactions tab. Hidden while a fuzzy (`~`) search is active. On AI Review, `A` and `C` coexist (`C` assigns a new category; `A` confirms the existing suggestions)                                                                                          |
 | `C`                 | Run local auto-classification (Todo → Uncategorised) — claims the shared background-job slot (`BackgroundJob::Classify`); runs on a background thread (its own store connection); a "Classifying..." tab-bar indicator shows while it runs, replaced by a green summary (filter/transfer/suggestion counts) for a few seconds on completion. Blocked with "… in progress" if another background job holds the slot. The UI stays fully interactive throughout                                                                                      |
@@ -555,6 +619,48 @@ feedback.
 | `↑` / `↓` | Navigate suggestions       |
 | Type      | Filter categories          |
 | `Alt-?`   | Toggle bottom key-hint bar |
+
+### Note Editor (`n`)
+
+Multi-line free-form text. Enter inserts a newline, so it cannot also mean
+"save" — `Ctrl-S` saves. Esc prompts to confirm when there are unsaved edits
+(the `DiscardNoteEdit` confirm), and declining returns to the editor with the
+text intact. Vertical movement is by source line, not wrapped display line.
+Saving a blank note clears it. Implemented by `src/tui/note_editor.rs`.
+
+| Key                     | Action                      |
+| ----------------------- | --------------------------- |
+| Type                    | Edit text                   |
+| `Enter`                 | New line                    |
+| `Arrows` / `Home` `End` | Move cursor                 |
+| `Ctrl-S`                | Save                        |
+| `Esc`                   | Cancel (confirms if edited) |
+| `Alt-?`                 | Toggle bottom key-hint bar  |
+
+### Tag Editor (`#`)
+
+One space-separated line holding the whole tag set, with type-ahead over the
+token under the cursor — so ordinary text editing applies (backspace fixes a
+typo mid-tag; `Ctrl-Left/Right` moves tag by tag). With an empty token the list
+shows every known tag, marking applied ones with `✓`, so the modal doubles as a
+tag browser. Invalid tokens render red and are dropped on save. A leading `#` is
+optional. Implemented by `src/tui/tag_editor.rs`, which is deliberately
+self-contained so the interaction model can be swapped in one file.
+
+The key semantics exist so nothing commits by surprise — see Notes and Tags
+under Design Decisions.
+
+| Key       | Action                                                  |
+| --------- | ------------------------------------------------------- |
+| Type      | Filter tags (`#` optional)                              |
+| `Space`   | Keep the token **exactly as typed**, start the next tag |
+| `Tab`     | Accept the highlighted suggestion, cursor after a space |
+| `↑` / `↓` | Select a different suggestion                           |
+| `Ctrl-W`  | Delete the tag before the cursor                        |
+| `Enter`   | Save (always — never "accept the suggestion")           |
+| `Ctrl-S`  | Save                                                    |
+| `Esc`     | Cancel                                                  |
+| `Alt-?`   | Toggle bottom key-hint bar                              |
 
 ### Bulk Apply Popup
 
@@ -614,8 +720,14 @@ Full reference: the `src/search/mod.rs` doc comment (canonical).
   that displays as 85%, so `confidence:0.6` means 0.6% and values above 100 are
   rejected; `none`/`any` select rows with a NULL/non-NULL score. On transaction
   searches it filters the category suggestion's confidence, on transfer searches
-  the transfer's), `sort:category,-amount` (ORDER BY; columns: `date`,
-  `description`, `amount`, `balance`, `account`, `bank`, `category`,
+  the transfer's), `tag:work` (or the shorthand `#work`; a parent tag also
+  matches everything beneath it, so `tag:work` covers `#work/travel`; `|` for
+  OR; a leading `#` and case are ignored in the value; `none`/`any` select
+  untagged/tagged rows), `note:acme` (case-insensitive substring of the note
+  text — `%`/`_` are stripped, not wildcards; `none`/`any` select rows
+  without/with a note; bare FTS words already search note text, since notes are
+  folded into `transactions_fts`), `sort:category,-amount` (ORDER BY; columns:
+  `date`, `description`, `amount`, `balance`, `account`, `bank`, `category`,
   `confidence`; last `sort:` wins; the nullable columns keep their empty rows
   last in both directions — uncategorised rows for `category`, unscored ones for
   `confidence`, so `sort:confidence` is "shakiest suggestions first"). Bare
@@ -624,9 +736,10 @@ Full reference: the `src/search/mod.rs` doc comment (canonical).
   filters.
 - **Negation (`-`)**: a leading `-` at a word boundary excludes matches —
   `-coffee` / `-"asdf"` (FTS), `-category:Food` (keeps uncategorised rows),
-  `-account:ING`, `-amount:>100`, `-/regex/`. A lone `-`, or a `-` inside a
-  value (`amount:-50`), is literal. `-sort:...` is invalid. Ignored on Transfers
-  searches.
+  `-account:ING`, `-amount:>100`, `-/regex/`, `-#work` / `-tag:work` and
+  `-note:acme` (both keep the rows that have no tag / no note). A lone `-`, or a
+  `-` inside a value (`amount:-50`), is literal. `-sort:...` is invalid. Ignored
+  on Transfers searches.
 - **Fuzzy search (`~`)** is in-memory nucleo scoring over the loaded rows.
 - On the Categories tab, **DB search (`/`)** is not SQL-backed: it is an
   in-memory, case-insensitive boundary-prefix filter over the category path
@@ -669,6 +782,16 @@ store.list_accounts_with_bank() -> Vec<AccountWithBank>   // path = "Bank/Accoun
 store.get_account_by_path(path) -> Option<AccountWithBank>
 store.rename_account(id, "Bank/Account")                  // moves the exports folder; never merges
 store.delete_account(id) -> usize                         // removes folder, soft-deletes; returns tx count
+
+// Notes and tags (src/store/annotations.rs)
+store.get_note(tx_id) -> Option<String>
+store.set_note(tx_id, note) -> bool                       // blank clears; reindexes FTS; true = note kept
+store.notes_for_transactions(&ids) -> HashMap<i64, String>
+store.list_tags() -> Vec<Tag>                             // most-used first, then alphabetical
+store.tag_transaction_counts() -> HashMap<String, usize>
+store.tags_for_transaction(tx_id) -> Vec<String>
+store.tags_for_transactions(&ids) -> HashMap<i64, Vec<String>>
+store.set_transaction_tags(tx_id, &names) -> Vec<String>  // canonicalises, dedupes, GCs orphan tags
 
 // Full-text search index
 store.rebuild_fts() -> usize                              // drop+recreate transactions_fts; returns reindexed count
