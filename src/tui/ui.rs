@@ -1132,9 +1132,21 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// AI Review's fixed columns (date, amount, category, confidence); the
-/// description takes whatever is left.
-const AI_REVIEW_FIXED_COLS: u16 = 12 + 12 + 25 + 6;
+const AI_REVIEW_DATE_WIDTH: u16 = 12;
+const AI_REVIEW_AMOUNT_WIDTH: u16 = 12;
+const AI_REVIEW_CATEGORY_WIDTH: u16 = 25;
+const AI_REVIEW_CONFIDENCE_WIDTH: u16 = 6;
+const AI_REVIEW_COLS: [Constraint; 5] = [
+    Constraint::Length(AI_REVIEW_DATE_WIDTH),
+    Constraint::Min(20),
+    Constraint::Length(AI_REVIEW_AMOUNT_WIDTH),
+    Constraint::Length(AI_REVIEW_CATEGORY_WIDTH),
+    Constraint::Length(AI_REVIEW_CONFIDENCE_WIDTH),
+];
+const AI_REVIEW_FIXED_COLS: u16 = AI_REVIEW_DATE_WIDTH
+    + AI_REVIEW_AMOUNT_WIDTH
+    + AI_REVIEW_CATEGORY_WIDTH
+    + AI_REVIEW_CONFIDENCE_WIDTH;
 
 fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
     let ai_reviews: Vec<_> = app.lists.ai_reviews.iter().collect();
@@ -1152,57 +1164,51 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
         .map(|review| ai_review_detail_lines(app, review))
         .unwrap_or_default();
 
-    ScrollTable::new(
-        &ai_reviews,
-        app.selected_index,
-        &[
-            Constraint::Length(12),
-            Constraint::Min(20),
-            Constraint::Length(12),
-            Constraint::Length(25),
-            Constraint::Length(6),
-        ],
-    )
-    // +2 keeps the two blank rows that separated the panel from the next row
-    // when its height was fixed at 8.
-    .detail(detail_lines.len() as u16 + 2, move |f, _review, area| {
-        f.render_widget(
-            Paragraph::new(detail_lines.clone()).wrap(ratatui::widgets::Wrap { trim: false }),
-            area,
-        );
-    })
-    .render(f, area, |i, review| {
-        let is_selected = i == app.selected_index;
+    ScrollTable::new(&ai_reviews, app.selected_index, &AI_REVIEW_COLS)
+        // +2 keeps the two blank rows that separated the panel from the next row
+        // when its height was fixed at 8.
+        // Detail is intentionally for the selected row only — the closure ignores
+        // its per-row `review` arg and renders the pre-built `detail_lines` for
+        // `app.selected_index` because ScrollTable only shows detail for the
+        // selected row on this tab (no `v` toggle).
+        .detail(detail_lines.len() as u16 + 2, move |f, _review, area| {
+            f.render_widget(
+                Paragraph::new(detail_lines.clone()).wrap(ratatui::widgets::Wrap { trim: false }),
+                area,
+            );
+        })
+        .render(f, area, |i, review| {
+            let is_selected = i == app.selected_index;
 
-        let tx = &review.transaction;
-        let category_path = review
-            .category
-            .as_ref()
-            .map(|c| c.path.as_str())
-            .unwrap_or("-");
-        let confidence = review
-            .enrichment
-            .as_ref()
-            .and_then(|e| e.ai_confidence)
-            .map(format_confidence_percent)
-            .unwrap_or_default();
+            let tx = &review.transaction;
+            let category_path = review
+                .category
+                .as_ref()
+                .map(|c| c.path.as_str())
+                .unwrap_or("-");
+            let confidence = review
+                .enrichment
+                .as_ref()
+                .and_then(|e| e.ai_confidence)
+                .map(format_confidence_percent)
+                .unwrap_or_default();
 
-        Row::new(vec![
-            Cell::from(tx.date.to_string()),
-            Cell::from(description_line(
-                app,
-                tx,
-                description_width,
-                is_selected,
-                false,
-            )),
-            Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
-                .style(Style::default().fg(amount_color(tx.amount_cents))),
-            Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
-            Cell::from(confidence).style(Style::default().fg(Color::Cyan)),
-        ])
-        .style(row_style(is_selected))
-    });
+            Row::new(vec![
+                Cell::from(tx.date.to_string()),
+                Cell::from(description_line(
+                    app,
+                    tx,
+                    description_width,
+                    is_selected,
+                    false,
+                )),
+                Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
+                    .style(Style::default().fg(amount_color(tx.amount_cents))),
+                Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
+                Cell::from(confidence).style(Style::default().fg(Color::Cyan)),
+            ])
+            .style(row_style(is_selected))
+        });
 }
 
 /// Display fields for a transfer-review row (date / from / amount / to /

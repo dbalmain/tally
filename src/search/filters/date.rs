@@ -367,25 +367,16 @@ struct AgoDuration {
 }
 
 const AGO_UNITS: &[(u8, i8)] = &[(b'y', 0), (b'm', 1), (b'w', 2), (b'd', 3)];
-const AGO_UNITS_ASC: &[(u8, i8)] = &[(b'd', 3), (b'w', 2), (b'm', 1), (b'y', 0)];
 
 fn parse_ago(value: &str) -> Result<Option<AgoDuration>, String> {
-    if !looks_like_ago(value) {
+    let Some((ago, last_rank, trailing)) = parse_ago_prefix(value) else {
         return Ok(None);
-    }
-    match parse_ago_prefix(value) {
-        Some((ago, last_rank, None)) if last_rank >= 0 => Ok(Some(ago)),
-        Some((_, _, Some(_))) => Err("duration is missing a unit (y, m, w, or d)".to_string()),
+    };
+    match trailing {
+        None if last_rank >= 0 => Ok(Some(ago)),
+        Some(_) => Err("duration is missing a unit (y, m, w, or d)".to_string()),
         _ => Err("duration units must be y, m, w, d in that order, each at most once".to_string()),
     }
-}
-
-fn looks_like_ago(value: &str) -> bool {
-    let s = value.as_bytes();
-    !s.is_empty()
-        && s[0].is_ascii_digit()
-        && s.iter()
-            .any(|b| matches!(b, b'y' | b'm' | b'w' | b'd' | b'Y' | b'M' | b'W' | b'D'))
 }
 
 /// Walk a compact duration like `1y3m2w1d`.
@@ -457,8 +448,9 @@ fn ago_completions(segment: &str) -> Option<Vec<String>> {
         return None;
     }
     let complete = &segment[..segment.len() - trailing.len()];
-    let suggestions: Vec<String> = AGO_UNITS_ASC
+    let suggestions: Vec<String> = AGO_UNITS
         .iter()
+        .rev()
         .filter(|(_, rank)| *rank > last_rank)
         .map(|(unit, _)| format!("{complete}{trailing}{}", *unit as char))
         .collect();

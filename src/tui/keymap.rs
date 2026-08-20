@@ -1314,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn note_and_tag_binds_are_offered_on_transaction_views_only() {
+    fn note_and_tag_binds_follow_selected_transaction() {
         let mut app = app_with_rows();
         for (tab, subtab) in [
             (Tab::Transactions, TodoSubTab::Uncategorised),
