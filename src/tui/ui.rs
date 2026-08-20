@@ -16,8 +16,6 @@ use super::modal::{MODAL_CHROME_HEIGHT, Modal, hint_line};
 use super::search_bar::SearchBar;
 use super::table::{COLUMN_SPACING, ScrollTable, aligned_table, calculate_scroll_offset};
 
-const DETAILS_HEIGHT: u16 = 8;
-
 /// Inline detail height for the transfer panels: one account line aligned to
 /// the description columns, plus one source/status line.
 const TRANSFER_DETAIL_HEIGHT: u16 = 2;
@@ -1134,8 +1132,25 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// AI Review's fixed columns (date, amount, category, confidence); the
+/// description takes whatever is left.
+const AI_REVIEW_FIXED_COLS: u16 = 12 + 12 + 25 + 6;
+
 fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
     let ai_reviews: Vec<_> = app.lists.ai_reviews.iter().collect();
+    let description_width =
+        area.width
+            .saturating_sub(AI_REVIEW_FIXED_COLS + COLUMN_SPACING * 4) as usize;
+
+    // The detail panel is always open on the selected row here, so build its
+    // lines up front and size the panel to them: a note only exists on this
+    // tab if it is readable, `v` being unavailable.
+    let detail_lines = app
+        .lists
+        .ai_reviews
+        .get(app.selected_index)
+        .map(|review| ai_review_detail_lines(app, review))
+        .unwrap_or_default();
 
     ScrollTable::new(
         &ai_reviews,
@@ -1148,8 +1163,13 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(6),
         ],
     )
-    .detail(DETAILS_HEIGHT, |f, review, area| {
-        draw_ai_review_details(f, app, review, area);
+    // +2 keeps the two blank rows that separated the panel from the next row
+    // when its height was fixed at 8.
+    .detail(detail_lines.len() as u16 + 2, move |f, _review, area| {
+        f.render_widget(
+            Paragraph::new(detail_lines.clone()).wrap(ratatui::widgets::Wrap { trim: false }),
+            area,
+        );
     })
     .render(f, area, |i, review| {
         let is_selected = i == app.selected_index;
@@ -1169,7 +1189,13 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
 
         Row::new(vec![
             Cell::from(tx.date.to_string()),
-            Cell::from(tx.description.as_str()),
+            Cell::from(description_line(
+                app,
+                tx,
+                description_width,
+                is_selected,
+                false,
+            )),
             Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
                 .style(Style::default().fg(amount_color(tx.amount_cents))),
             Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
@@ -2024,12 +2050,11 @@ fn draw_transfer_pair(
     f.render_widget(aligned_table(vec![account_row], widths), row_area);
 }
 
-fn draw_ai_review_details(
-    f: &mut Frame,
-    app: &App,
-    review: &TransactionWithEnrichment,
-    area: Rect,
-) {
+/// The always-open detail panel under the selected AI Review row. Tags and the
+/// note appear only when the row has them, so the panel grows rather than
+/// reserving space; this tab has no `v` toggle, so it is the only place a note
+/// written here can be read back.
+fn ai_review_detail_lines(app: &App, review: &TransactionWithEnrichment) -> Vec<Line<'static>> {
     let tx = &review.transaction;
     let amount_style = Style::default().fg(amount_color(tx.amount_cents));
 
@@ -2046,7 +2071,7 @@ fn draw_ai_review_details(
         .map(format_confidence_percent)
         .unwrap_or_else(|| "-".to_string());
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::styled("Date: ", Style::default().fg(Color::DarkGray)),
@@ -2064,23 +2089,48 @@ fn draw_ai_review_details(
         ]),
         Line::from(vec![
             Span::styled("Description: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&tx.description),
+            Span::raw(tx.description.clone()),
         ]),
         Line::from(vec![
             Span::styled("AI Category: ", Style::default().fg(Color::Yellow)),
-            Span::raw(category_path),
+            Span::raw(category_path.to_string()),
             Span::raw("  "),
             Span::styled("Confidence: ", Style::default().fg(Color::Cyan)),
             Span::raw(confidence),
         ]),
-        Line::from(vec![
-            Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&tx.source_file),
-        ]),
     ];
 
-    let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(paragraph, area);
+    let tags = app.get_cached_tags(tx.id);
+    if !tags.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Tags: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                tags.iter()
+                    .map(|tag| format!("#{tag}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                Style::default().fg(TAG_COLOR),
+            ),
+        ]));
+    }
+    if let Some(note) = app.get_cached_note(tx.id) {
+        // A multi-line note keeps its line breaks: `Wrap` only folds long
+        // lines, it does not split on `\n` for us.
+        for (i, note_line) in note.lines().enumerate() {
+            let label = if i == 0 { "Note: " } else { "      " };
+            lines.push(Line::from(vec![
+                Span::styled(label, Style::default().fg(Color::DarkGray)),
+                Span::raw(note_line.to_string()),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(tx.source_file.clone()),
+    ]));
+
+    lines
 }
 
 fn draw_pending_transfer_details(f: &mut Frame, app: &App, transfer: &crate::Transfer, area: Rect) {
@@ -2274,6 +2324,46 @@ mod tests {
         assert!(rendered[note_at].starts_with("Note"));
         assert!(rendered[note_at + 1].trim().is_empty());
         assert!(rendered[note_at + 2].contains("second line"));
+    }
+
+    #[test]
+    fn ai_review_details_show_tags_and_the_note() {
+        // AI Review has no `v` toggle, so its always-open panel is the only
+        // place a note written on that tab can be read back.
+        let (_temp, mut app, from, _to) = app_with_transfer();
+        app.store
+            .set_transaction_tags(from.id, &["work".into()])
+            .unwrap();
+        app.store.set_note(from.id, "chase the receipt").unwrap();
+        app.refresh_data();
+
+        let review = TransactionWithEnrichment {
+            transaction: from.clone(),
+            enrichment: None,
+            category: None,
+        };
+        let rendered: Vec<String> = ai_review_detail_lines(&app, &review)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(rendered.iter().any(|line| line.contains("#work")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("chase the receipt"))
+        );
+        // Source stays the last line, so an annotated row reads like an
+        // unannotated one with extra rows inserted.
+        assert!(rendered.last().unwrap().starts_with("Source"));
+
+        // An unannotated row keeps the original six-line panel.
+        let plain = TransactionWithEnrichment {
+            transaction: _to.clone(),
+            enrichment: None,
+            category: None,
+        };
+        assert_eq!(ai_review_detail_lines(&app, &plain).len(), 6);
     }
 
     #[test]

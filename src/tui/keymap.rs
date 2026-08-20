@@ -398,11 +398,11 @@ pub fn normal_binds(app: &App) -> Vec<Bind> {
         ));
     }
 
-    // Notes and tags apply to any row that is a transaction. The note hint
-    // names whichever operation applies, the way `u` does.
-    if is_transaction_view(app)
-        && let Some(tx) = app.selected_transaction()
-    {
+    // Notes and tags need nothing but a transaction id, so they apply wherever
+    // a row resolves to a transaction — including Todo → AI Review, which
+    // `is_transaction_view` excludes because it has no `v` detail toggle. The
+    // note hint names whichever operation applies, the way `u` does.
+    if let Some(tx) = app.selected_transaction() {
         let note_desc = if app.get_cached_note(tx.id).is_some() {
             "edit note"
         } else {
@@ -1316,10 +1316,33 @@ mod tests {
     #[test]
     fn note_and_tag_binds_are_offered_on_transaction_views_only() {
         let mut app = app_with_rows();
-        app.current_tab = Tab::Transactions;
+        for (tab, subtab) in [
+            (Tab::Transactions, TodoSubTab::Uncategorised),
+            (Tab::Todo, TodoSubTab::Uncategorised),
+            // AI Review is where an annotation is most useful — a row you are
+            // about to categorise — and it is not an `is_transaction_view`.
+            (Tab::Todo, TodoSubTab::AiReview),
+        ] {
+            app.current_tab = tab;
+            app.todo_subtab = subtab;
+            let binds = normal_binds(&app);
+            assert!(
+                has_act_trigger(&binds, Act::EditNote, Trigger::Char('n')),
+                "expected `n` on {tab:?}/{subtab:?}"
+            );
+            assert!(
+                has_act_trigger(&binds, Act::EditTags, Trigger::Char('#')),
+                "expected `#` on {tab:?}/{subtab:?}"
+            );
+        }
+
+        // Transfer Review's rows are transfers, not transactions: there is no
+        // single row to annotate.
+        app.current_tab = Tab::Todo;
+        app.todo_subtab = TodoSubTab::TransferReview;
         let binds = normal_binds(&app);
-        assert!(has_act_trigger(&binds, Act::EditNote, Trigger::Char('n')));
-        assert!(has_act_trigger(&binds, Act::EditTags, Trigger::Char('#')));
+        assert!(find_act(&binds, Act::EditNote).is_none());
+        assert!(find_act(&binds, Act::EditTags).is_none());
 
         // The Categories tab has no transaction rows, and `n` there belongs to
         // the Filters tab's "new filter" — neither may claim these.
