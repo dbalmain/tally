@@ -736,7 +736,11 @@ Full reference: the `src/search/mod.rs` doc comment (canonical).
 
 - **DB search (`/`)** pushes filters to SQL: `date:2024-01..2024-06`,
   `date:last-month`, `date:this-financial-year`, `date:last-3-months`,
-  `date:last-quarter..yesterday`, `amount:>100` (comparisons are always signed —
+  `date:2y` / `date:1y3m2w1d` (from that day onward, open-ended; `m` keeps
+  the day of month, `w` is 7 days; as range endpoints they are that day, so
+  `date:2y..1y` is two years ago through one year ago; `date:2y..` is the same
+  open window as `date:2y` — not `date:last-2-years`, which is complete
+  calendar years), `date:last-quarter..yesterday`, `amount:>100` (comparisons are always signed —
   `>100` never matches a -$101 debit, `>0` = credits, `<0` = debits; bare exact
   values and ranges are precision-aware and match either sign unless a `+`/`-`
   sign or a zero range endpoint makes them signed, e.g. `amount:0..` = credits,

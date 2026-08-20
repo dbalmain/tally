@@ -41,9 +41,11 @@ const RELATIVE_PERIODS: &[&str] = &[
 /// - `2024-01` -> entire month
 /// - `2024-01-15` -> exact date
 /// - `last-month`, `this-financial-year`, `last-3-months` -> preset ranges
+/// - `2y`, `3m`, `1y3m2w1d` -> ago durations from that day onward (open end)
+/// - `2y..1y` -> from two years ago to one year ago (endpoint is that day)
 /// - `2024-01..last-month` -> explicit range with preset endpoints
 /// - `..2024` -> up to end of 2024
-/// - `2024..` -> from start of 2024
+/// - `2024..` -> from start of 2024 (open end)
 pub struct DateFilter {
     today: NaiveDate,
     week_start: Weekday,
@@ -75,7 +77,17 @@ impl DateFilter {
             None
         } else {
             match self.parse_spec(to) {
-                Ok((_, end)) => Some(end),
+                Ok((start, end)) => {
+                    // Ago durations are a point (today minus the duration). A
+                    // bare `date:2y` is from that day onward; as a range
+                    // endpoint `1y` means that day, so `date:2y..1y` is from
+                    // two years ago to one year ago.
+                    Some(if parse_ago(to).ok().flatten().is_some() {
+                        start
+                    } else {
+                        end
+                    })
+                }
                 Err(message) => {
                     return FilterResult::Invalid(format!("Invalid end date: {message}"));
                 }
@@ -84,10 +96,7 @@ impl DateFilter {
 
         match (from_date, to_date) {
             (Some(from), Some(to)) => valid_between(from, to),
-            (Some(from), None) => FilterResult::Valid {
-                sql: format!("{} >= ?", ph::reference(ph::DATE)),
-                params: vec![Value::Text(from.to_string())],
-            },
+            (Some(from), None) => valid_from(from),
             (None, Some(to)) => FilterResult::Valid {
                 sql: format!("{} <= ?", ph::reference(ph::DATE)),
                 params: vec![Value::Text(to.to_string())],
@@ -119,12 +128,43 @@ impl DateFilter {
             "last-year" => Some(self.last_period(1, Period::Years)?),
             "this-financial-year" => Some(self.this_financial_year()?),
             "last-financial-year" => Some(self.last_period(1, Period::FinancialYears)?),
-            _ => match parse_relative(value)? {
-                Some((count, period)) => Some(self.last_period(count, period)?),
-                None => None,
-            },
+            _ => {
+                if let Some(ago) = parse_ago(value)? {
+                    let from = self.ago_anchor(ago)?;
+                    Some((from, from))
+                } else {
+                    match parse_relative(value)? {
+                        Some((count, period)) => Some(self.last_period(count, period)?),
+                        None => None,
+                    }
+                }
+            }
         };
         Ok(range)
+    }
+
+    fn ago_anchor(&self, ago: AgoDuration) -> Result<NaiveDate, String> {
+        let mut from = self.today;
+        if ago.years > 0 {
+            let months = ago
+                .years
+                .checked_mul(12)
+                .ok_or_else(|| "duration year count overflow".to_string())?;
+            from = subtract_months(from, months)?;
+        }
+        if ago.months > 0 {
+            from = subtract_months(from, ago.months)?;
+        }
+        let extra_days = i64::from(ago.weeks)
+            .checked_mul(7)
+            .and_then(|week_days| week_days.checked_add(i64::from(ago.days)))
+            .ok_or_else(|| "duration day count overflow".to_string())?;
+        if extra_days > 0 {
+            from = from
+                .checked_sub_signed(Duration::days(extra_days))
+                .ok_or_else(|| "date underflow".to_string())?;
+        }
+        Ok(from)
     }
 
     fn this_week(&self) -> (NaiveDate, NaiveDate) {
@@ -246,14 +286,24 @@ impl Filter for DateFilter {
             return self.parse_range(from, to);
         }
 
-        match self.parse_spec(value) {
-            Ok((from, to)) => valid_between(from, to),
+        match parse_ago(value) {
+            Ok(Some(ago)) => match self.ago_anchor(ago) {
+                Ok(from) => valid_from(from),
+                Err(message) => FilterResult::Invalid(format!("Invalid date: {message}")),
+            },
+            Ok(None) => match self.parse_spec(value) {
+                Ok((from, to)) => valid_between(from, to),
+                Err(message) => FilterResult::Invalid(format!("Invalid date: {message}")),
+            },
             Err(message) => FilterResult::Invalid(format!("Invalid date: {message}")),
         }
     }
 
     fn completions(&self, value: &str, cursor: usize) -> Option<(Vec<String>, usize)> {
         let (segment, anchor) = range_segment_at_cursor(value, cursor);
+        if let Some(suggestions) = ago_completions(segment) {
+            return Some((suggestions, anchor));
+        }
         if segment.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             return None;
         }
@@ -306,6 +356,120 @@ enum Period {
     Quarters,
     Years,
     FinancialYears,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct AgoDuration {
+    years: u32,
+    months: u32,
+    weeks: u32,
+    days: u32,
+}
+
+const AGO_UNITS: &[(u8, i8)] = &[(b'y', 0), (b'm', 1), (b'w', 2), (b'd', 3)];
+const AGO_UNITS_ASC: &[(u8, i8)] = &[(b'd', 3), (b'w', 2), (b'm', 1), (b'y', 0)];
+
+fn parse_ago(value: &str) -> Result<Option<AgoDuration>, String> {
+    if !looks_like_ago(value) {
+        return Ok(None);
+    }
+    match parse_ago_prefix(value) {
+        Some((ago, last_rank, None)) if last_rank >= 0 => Ok(Some(ago)),
+        Some((_, _, Some(_))) => Err("duration is missing a unit (y, m, w, or d)".to_string()),
+        _ => Err("duration units must be y, m, w, d in that order, each at most once".to_string()),
+    }
+}
+
+fn looks_like_ago(value: &str) -> bool {
+    let s = value.as_bytes();
+    !s.is_empty()
+        && s[0].is_ascii_digit()
+        && s.iter()
+            .any(|b| matches!(b, b'y' | b'm' | b'w' | b'd' | b'Y' | b'M' | b'W' | b'D'))
+}
+
+/// Walk a compact duration like `1y3m2w1d`.
+///
+/// Returns `None` when the string is not duration-shaped (so year/month specs
+/// and named presets can still match). Returns `Some` with a trailing digit
+/// run when the value is an in-progress duration (`1y3`).
+fn parse_ago_prefix(value: &str) -> Option<(AgoDuration, i8, Option<&str>)> {
+    let s = value.as_bytes();
+    if s.is_empty() || !s[0].is_ascii_digit() {
+        return None;
+    }
+    if !s
+        .iter()
+        .any(|b| matches!(b, b'y' | b'm' | b'w' | b'd' | b'Y' | b'M' | b'W' | b'D'))
+    {
+        return None;
+    }
+
+    let mut i = 0;
+    let mut ago = AgoDuration::default();
+    let mut last_rank = -1i8;
+    while i < s.len() {
+        let digit_start = i;
+        while i < s.len() && s[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digit_start {
+            return None;
+        }
+        if i == s.len() {
+            return Some((ago, last_rank, Some(&value[digit_start..])));
+        }
+
+        let count: u32 = value[digit_start..i].parse().ok()?;
+        if count == 0 {
+            return None;
+        }
+
+        let unit = s[i].to_ascii_lowercase();
+        i += 1;
+        let rank = AGO_UNITS.iter().find(|(u, _)| *u == unit)?.1;
+        if rank <= last_rank {
+            return None;
+        }
+        last_rank = rank;
+        match unit {
+            b'y' => ago.years = count,
+            b'm' => ago.months = count,
+            b'w' => ago.weeks = count,
+            b'd' => ago.days = count,
+            _ => return None,
+        }
+    }
+    Some((ago, last_rank, None))
+}
+
+fn ago_completions(segment: &str) -> Option<Vec<String>> {
+    let (ago, last_rank, trailing) = parse_ago_prefix(segment)?;
+    let trailing = trailing?;
+    if ago == AgoDuration::default() {
+        return None;
+    }
+    if trailing.starts_with('0') {
+        return None;
+    }
+    let count: u32 = trailing.parse().ok()?;
+    if count == 0 {
+        return None;
+    }
+    let complete = &segment[..segment.len() - trailing.len()];
+    let suggestions: Vec<String> = AGO_UNITS_ASC
+        .iter()
+        .filter(|(_, rank)| *rank > last_rank)
+        .map(|(unit, _)| format!("{complete}{trailing}{}", *unit as char))
+        .collect();
+    (!suggestions.is_empty()).then_some(suggestions)
+}
+
+fn valid_from(from: NaiveDate) -> FilterResult {
+    FilterResult::Valid {
+        sql: format!("{} >= ?", ph::reference(ph::DATE)),
+        params: vec![Value::Text(from.to_string())],
+    }
 }
 
 fn valid_between(from: NaiveDate, to: NaiveDate) -> FilterResult {
@@ -509,6 +673,16 @@ mod tests {
         }
     }
 
+    fn assert_from(filter: &DateFilter, value: &str, from: NaiveDate) {
+        match filter.parse(value) {
+            FilterResult::Valid { sql, params } => {
+                assert_eq!(sql, "{date} >= ?");
+                assert_eq!(params, vec![Value::Text(from.to_string())]);
+            }
+            other => panic!("Expected Valid, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_empty() {
         assert!(matches!(parse(""), FilterResult::Empty));
@@ -536,14 +710,7 @@ mod tests {
 
     #[test]
     fn test_open_end_range() {
-        match parse("2024..") {
-            FilterResult::Valid { sql, params } => {
-                assert_eq!(sql, "{date} >= ?");
-                assert_eq!(params.len(), 1);
-                assert_eq!(params[0], Value::Text("2024-01-01".to_string()));
-            }
-            other => panic!("Expected Valid, got {other:?}"),
-        }
+        assert_from(&filter(), "2024..", d(2024, 1, 1));
     }
 
     #[test]
@@ -634,6 +801,47 @@ mod tests {
     }
 
     #[test]
+    fn ago_durations_count_back_from_today_open_ended() {
+        let filter = filter_with(Weekday::Mon, (6, 30), d(2026, 8, 21));
+        for (value, from) in [
+            ("2y", d(2024, 8, 21)),
+            ("2Y", d(2024, 8, 21)),
+            ("2m", d(2026, 6, 21)),
+            ("2w", d(2026, 8, 7)),
+            ("1d", d(2026, 8, 20)),
+            ("1y3m2w1d", d(2025, 5, 6)),
+        ] {
+            assert_from(&filter, value, from);
+        }
+    }
+
+    #[test]
+    fn ago_months_clamp_to_end_of_shorter_month() {
+        let filter = filter_with(Weekday::Mon, (6, 30), d(2026, 3, 31));
+        assert_from(&filter, "1m", d(2026, 2, 28));
+
+        let leap = filter_with(Weekday::Mon, (6, 30), d(2024, 2, 29));
+        assert_from(&leap, "1y", d(2023, 2, 28));
+    }
+
+    #[test]
+    fn ago_durations_work_as_range_endpoints() {
+        let filter = filter_with(Weekday::Mon, (6, 30), d(2026, 8, 21));
+        assert_range(&filter, "2y..1y", d(2024, 8, 21), d(2025, 8, 21));
+        assert_range(&filter, "2m..1m", d(2026, 6, 21), d(2026, 7, 21));
+        assert_range(&filter, "2m..yesterday", d(2026, 6, 21), d(2026, 8, 20));
+        assert_range(&filter, "2026-01-01..2m", d(2026, 1, 1), d(2026, 6, 21));
+        assert_from(&filter, "2y..", d(2024, 8, 21));
+        match filter.parse("..1y") {
+            FilterResult::Valid { sql, params } => {
+                assert_eq!(sql, "{date} <= ?");
+                assert_eq!(params[0], Value::Text("2025-08-21".to_string()));
+            }
+            other => panic!("Expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn presets_work_as_range_endpoints() {
         assert_range(
             &filter(),
@@ -660,6 +868,10 @@ mod tests {
             FilterResult::Invalid(_)
         ));
         assert!(matches!(parse("lastweek"), FilterResult::Invalid(_)));
+        assert!(matches!(parse("2d1y"), FilterResult::Invalid(_)));
+        assert!(matches!(parse("2y3"), FilterResult::Invalid(_)));
+        assert!(matches!(parse("0d"), FilterResult::Invalid(_)));
+        assert!(matches!(parse("2yy"), FilterResult::Invalid(_)));
     }
 
     #[test]
@@ -680,6 +892,19 @@ mod tests {
     fn completions_digit_segment_returns_none() {
         assert!(filter().completions("2", 1).is_none());
         assert!(filter().completions("..2", 3).is_none());
+        assert!(filter().completions("2024", 4).is_none());
+        assert!(filter().completions("2y", 2).is_none());
+    }
+
+    #[test]
+    fn completions_ago_prefix_suggests_remaining_units() {
+        let (suggestions, anchor) = filter().completions("1y3", 3).unwrap();
+        assert_eq!(anchor, 0);
+        assert_eq!(suggestions, vec!["1y3d", "1y3w", "1y3m"]);
+
+        let (suggestions, anchor) = filter().completions("..2m1", 5).unwrap();
+        assert_eq!(anchor, 2);
+        assert_eq!(suggestions, vec!["2m1d", "2m1w"]);
     }
 
     #[test]

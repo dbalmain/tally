@@ -55,7 +55,7 @@ cargo run -q -- transactions list category:Food amount:>50 --limit 20 --json
 #   "amount_cents":-1500,"balance_cents":12345,"category":"Food/Groceries"}, ...]
 ```
 
-QUERY syntax (subset): `date:2024-01..2024-06`, `amount:>100`,
+QUERY syntax (subset): `date:2024-01..2024-06`, `date:2y`, `amount:>100`,
 `account:ING/Orange`, `category:Food|Transport`, bare words = full-text search,
 `/regex/i` = regex. Narrow with QUERY rather than dumping everything.
 

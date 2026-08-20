@@ -16,6 +16,7 @@
 //!   `date:2024` — entire year
 //! - `date:2024-01..2024-06` — inclusive range; `date:..2024-06` — up to
 //!   the end of June 2024; `date:2024-01..` — from the start of January 2024
+//!   with no upper bound
 //! - Date presets work anywhere a date spec works, including range endpoints:
 //!   `date:yesterday`, `date:last-month`, `date:this-quarter`,
 //!   `date:last-financial-year`, `date:last-quarter..yesterday`
@@ -24,6 +25,14 @@
 //!   `date:last-7-days`, `date:last-3-months`,
 //!   `date:last-2-financial-years`. Supported periods are `days`, `weeks`,
 //!   `months`, `quarters`, `years`, and `financial-years`
+//! - Compact ago durations count back from today with an open end (no
+//!   injected `today` bound): `date:2y` on 21 Aug 2026 is from 21 Aug 2024
+//!   onward. Combine units in order `y`, `m`, `w`, `d` (any may be omitted):
+//!   `date:1y3m2w1d`. Months keep the day of month, clamping to the last day
+//!   of shorter months; weeks are 7 days. In a range the duration is that
+//!   day: `date:2y..1y` is 21 Aug 2024..21 Aug 2025; `date:2y..` is the same
+//!   open-ended window as `date:2y`. This is not `date:last-2-years`, which
+//!   is complete calendar years excluding the current year.
 //! - `amount:100` — precision-aware: any $100-something ($100.00–$100.99);
 //!   `amount:7.5` — any $7.5x; `amount:7.50` — exactly $7.50 (two decimals =
 //!   exact cents). Matches either sign.
