@@ -145,10 +145,15 @@ impl App {
     }
 
     /// Clear the DB-search state without touching the input mode.
+    /// An empty query never changed the list, so keep the current row.
     fn clear_db_state(&mut self) {
+        let empty = self.db_search_value().is_empty();
         let state = self.current_search_state_mut();
         state.search_bar.reset();
         state.db_search_active = false;
+        if empty {
+            return;
+        }
         state.selected_index = 0;
         self.selected_index = 0;
         self.reload_current_tab();
@@ -281,5 +286,46 @@ impl App {
         self.current_search_state()
             .map(|s| s.fuzzy_search_input.visual_cursor())
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tui_input::InputRequest;
+
+    use crate::TransactionStore;
+
+    use super::*;
+
+    fn empty_app() -> (tempfile::TempDir, App) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TransactionStore::open_in_memory(temp.path()).unwrap();
+        let app = App::new(store).unwrap();
+        (temp, app)
+    }
+
+    #[test]
+    fn escaping_empty_db_search_keeps_selection() {
+        let (_temp, mut app) = empty_app();
+        app.selected_index = 7;
+        app.start_db_search();
+        app.clear_db_search();
+
+        assert_eq!(app.selected_index, 7);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(!app.db_search_active());
+    }
+
+    #[test]
+    fn escaping_nonempty_db_search_resets_selection() {
+        let (_temp, mut app) = empty_app();
+        app.start_db_search();
+        app.handle_db_search_input(InputRequest::InsertChar('x'));
+        app.selected_index = 7;
+        app.clear_db_search();
+
+        assert_eq!(app.selected_index, 0);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(!app.db_search_active());
     }
 }
