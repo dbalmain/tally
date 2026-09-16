@@ -91,6 +91,64 @@ fn dim_fg(selected: bool) -> Color {
     }
 }
 
+/// How a transaction row is emphasised while a transfer is being marked
+/// (`t`). Shared by every table that can host the transfer flow (Transactions,
+/// Todo → AI Review) so both legs light up the same way wherever `t` is
+/// pressed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TxRowEmphasis {
+    /// Ordinary row: outside the transfer flow, or a candidate not under the
+    /// cursor.
+    Normal,
+    /// The transaction `t` was pressed on.
+    TransferPending,
+    /// The candidate under the cursor.
+    TransferCandidate,
+    /// Neither leg while marking: dimmed, not selectable.
+    Disabled,
+}
+
+impl TxRowEmphasis {
+    fn of(app: &App, tx_id: i64, is_selected: bool) -> Self {
+        if app.is_pending_transfer_tx(tx_id) {
+            Self::TransferPending
+        } else if app.input_mode != InputMode::TransferPending {
+            Self::Normal
+        } else if is_selected {
+            Self::TransferCandidate
+        } else if app.is_transfer_candidate(tx_id) {
+            Self::Normal
+        } else {
+            Self::Disabled
+        }
+    }
+
+    fn is_disabled(self) -> bool {
+        self == Self::Disabled
+    }
+
+    /// Row style: the pending leg on blue, the candidate on green. Both are
+    /// pastels on light-palette terminals, where the terminal's default
+    /// (light) foreground washes out, so those rows force black text
+    /// throughout — `fg` below overrides the amount/category colours too.
+    fn row_style(self, is_selected: bool) -> Style {
+        match self {
+            Self::TransferPending => Style::default().bg(Color::Blue).fg(Color::Black),
+            Self::TransferCandidate => Style::default().bg(Color::Green).fg(Color::Black),
+            Self::Normal | Self::Disabled => row_style(is_selected),
+        }
+    }
+
+    /// Foreground for a cell that would otherwise be `color`.
+    fn fg(self, color: Color) -> Color {
+        match self {
+            Self::TransferPending | Self::TransferCandidate => Color::Black,
+            Self::Disabled => Color::DarkGray,
+            Self::Normal => color,
+        }
+    }
+}
+
 fn bank_account(app: &App, bank_id: i64, account_id: i64, separator: &str) -> String {
     format!(
         "{}{}{}",
@@ -784,30 +842,9 @@ fn draw_transaction_table(
 
     table.render(f, area, |i, tx| {
         let is_selected = focused && i == selected;
-        let is_pending = app.is_pending_transfer_tx(tx.id);
-        let is_candidate = app.is_transfer_candidate(tx.id);
-        let is_disabled =
-            app.input_mode == InputMode::TransferPending && !is_candidate && !is_pending;
-
-        let base_style = if is_pending {
-            Style::default().bg(Color::Blue)
-        } else if is_selected && app.input_mode == InputMode::TransferPending {
-            Style::default().bg(Color::Green)
-        } else {
-            row_style(is_selected)
-        };
-
-        let fg = if is_disabled {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
-
-        let amount_fg = if is_disabled {
-            Color::DarkGray
-        } else {
-            amount_color(tx.amount_cents)
-        };
+        let emphasis = TxRowEmphasis::of(app, tx.id, is_selected);
+        let fg = emphasis.fg(Color::Reset);
+        let amount_fg = emphasis.fg(amount_color(tx.amount_cents));
 
         let cells = cols
             .iter()
@@ -818,19 +855,18 @@ fn draw_transaction_table(
                         Cell::from(tx.date.to_string()).style(Style::default().fg(fg))
                     }
                     TxColumn::Description => {
-                        Cell::from(description_line(app, tx, w, is_selected, is_disabled))
+                        Cell::from(description_line(app, tx, w, is_selected, emphasis))
                     }
                     TxColumn::Account => {
                         let account = compact_account_label(app, tx);
                         // The account is contextual, so dim it whether or not
                         // the row is disabled.
                         Cell::from(fit_path(&account, w))
-                            .style(Style::default().fg(dim_fg(is_selected)))
+                            .style(Style::default().fg(emphasis.fg(dim_fg(is_selected))))
                     }
                     TxColumn::Category => match category_cell_text(app, tx, w) {
                         Some((text, color)) => {
-                            let color = if is_disabled { Color::DarkGray } else { color };
-                            Cell::from(text).style(Style::default().fg(color))
+                            Cell::from(text).style(Style::default().fg(emphasis.fg(color)))
                         }
                         None => Cell::from(""),
                     },
@@ -846,7 +882,7 @@ fn draw_transaction_table(
             })
             .collect::<Vec<_>>();
 
-        Row::new(cells).style(base_style)
+        Row::new(cells).style(emphasis.row_style(is_selected))
     });
 }
 
@@ -863,15 +899,12 @@ fn description_line(
     tx: &Transaction,
     width: usize,
     selected: bool,
-    disabled: bool,
+    emphasis: TxRowEmphasis,
 ) -> Line<'static> {
     let tags = app.get_cached_tags(tx.id);
     let has_note = app.get_cached_note(tx.id).is_some();
-    let fg = if disabled {
-        Color::DarkGray
-    } else {
-        Color::Reset
-    };
+    let disabled = emphasis.is_disabled();
+    let fg = emphasis.fg(Color::Reset);
 
     if tags.is_empty() && !has_note {
         return Line::from(Span::styled(
@@ -887,7 +920,12 @@ fn description_line(
     let (tag_spans, tag_width) = if disabled {
         (Vec::new(), 0)
     } else {
-        tag_spans(tags, annotation_budget.saturating_sub(note_width), selected)
+        tag_spans(
+            tags,
+            annotation_budget.saturating_sub(note_width),
+            selected,
+            emphasis,
+        )
     };
 
     let description_width = width.saturating_sub(tag_width + note_width);
@@ -897,7 +935,10 @@ fn description_line(
     )];
     spans.extend(tag_spans);
     if has_note {
-        spans.push(Span::styled(" ✎", Style::default().fg(dim_fg(selected))));
+        spans.push(Span::styled(
+            " ✎",
+            Style::default().fg(emphasis.fg(dim_fg(selected))),
+        ));
     }
     Line::from(spans)
 }
@@ -1179,8 +1220,9 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
         })
         .render(f, area, |i, review| {
             let is_selected = i == app.selected_index;
-
             let tx = &review.transaction;
+            let emphasis = TxRowEmphasis::of(app, tx.id, is_selected);
+
             let category_path = review
                 .category
                 .as_ref()
@@ -1194,20 +1236,21 @@ fn draw_ai_review_table(f: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or_default();
 
             Row::new(vec![
-                Cell::from(tx.date.to_string()),
+                Cell::from(tx.date.to_string())
+                    .style(Style::default().fg(emphasis.fg(Color::Reset))),
                 Cell::from(description_line(
                     app,
                     tx,
                     description_width,
                     is_selected,
-                    false,
+                    emphasis,
                 )),
                 Cell::from(Line::from(format_cents(tx.amount_cents)).alignment(Alignment::Right))
-                    .style(Style::default().fg(amount_color(tx.amount_cents))),
-                Cell::from(category_path).style(Style::default().fg(Color::Yellow)),
-                Cell::from(confidence).style(Style::default().fg(Color::Cyan)),
+                    .style(Style::default().fg(emphasis.fg(amount_color(tx.amount_cents)))),
+                Cell::from(category_path).style(Style::default().fg(emphasis.fg(Color::Yellow))),
+                Cell::from(confidence).style(Style::default().fg(emphasis.fg(Color::Cyan))),
             ])
-            .style(row_style(is_selected))
+            .style(emphasis.row_style(is_selected))
         });
 }
 
@@ -1607,7 +1650,12 @@ const TAG_COLOR: Color = Color::Magenta;
 
 /// Render `tags` as ` #a #b`, truncated to `width` columns (nothing at all if
 /// even one tag won't fit). Returns the spans and the columns they occupy.
-fn tag_spans(tags: &[String], width: usize, selected: bool) -> (Vec<Span<'static>>, usize) {
+fn tag_spans(
+    tags: &[String],
+    width: usize,
+    selected: bool,
+    emphasis: TxRowEmphasis,
+) -> (Vec<Span<'static>>, usize) {
     let mut spans = Vec::new();
     let mut used = 0;
     for tag in tags {
@@ -1616,12 +1664,18 @@ fn tag_spans(tags: &[String], width: usize, selected: bool) -> (Vec<Span<'static
         if used + len > width {
             // Signal the overflow rather than silently showing a subset.
             if used + 2 <= width {
-                spans.push(Span::styled(" …", Style::default().fg(dim_fg(selected))));
+                spans.push(Span::styled(
+                    " …",
+                    Style::default().fg(emphasis.fg(dim_fg(selected))),
+                ));
                 used += 2;
             }
             break;
         }
-        spans.push(Span::styled(text, Style::default().fg(TAG_COLOR)));
+        spans.push(Span::styled(
+            text,
+            Style::default().fg(emphasis.fg(TAG_COLOR)),
+        ));
         used += len;
     }
     (spans, used)
@@ -2240,7 +2294,7 @@ mod tests {
         let tags = vec!["work".to_string(), "travel".to_string()];
 
         // Both fit: " #work #travel" is 14 columns.
-        let (spans, used) = tag_spans(&tags, 20, false);
+        let (spans, used) = tag_spans(&tags, 20, false, TxRowEmphasis::Normal);
         assert_eq!(used, 14);
         assert_eq!(
             spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
@@ -2250,7 +2304,7 @@ mod tests {
 
         // Only the first fits: the rest becomes an explicit ellipsis, so the
         // row never reads as "these are all the tags".
-        let (spans, used) = tag_spans(&tags, 9, false);
+        let (spans, used) = tag_spans(&tags, 9, false, TxRowEmphasis::Normal);
         assert_eq!(used, 8);
         assert_eq!(
             spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
@@ -2258,9 +2312,45 @@ mod tests {
         );
 
         // Nothing fits at all.
-        let (spans, used) = tag_spans(&tags, 1, false);
+        let (spans, used) = tag_spans(&tags, 1, false, TxRowEmphasis::Normal);
         assert!(spans.is_empty());
         assert_eq!(used, 0);
+    }
+
+    #[test]
+    fn transfer_marking_emphasises_both_legs_and_dims_the_rest() {
+        let (_temp, mut app, from, to) = app_with_transfer();
+        // Outside the flow every row is plain, selected or not.
+        assert_eq!(
+            TxRowEmphasis::of(&app, from.id, true),
+            TxRowEmphasis::Normal
+        );
+
+        app.pending_transfer_tx = Some(from.clone());
+        app.transfer_candidates = vec![to.clone()];
+        app.input_mode = InputMode::TransferPending;
+
+        assert_eq!(
+            TxRowEmphasis::of(&app, from.id, false),
+            TxRowEmphasis::TransferPending
+        );
+        assert_eq!(
+            TxRowEmphasis::of(&app, to.id, true),
+            TxRowEmphasis::TransferCandidate
+        );
+        // A candidate not under the cursor stays plain; any other row is dimmed.
+        assert_eq!(TxRowEmphasis::of(&app, to.id, false), TxRowEmphasis::Normal);
+        assert_eq!(
+            TxRowEmphasis::of(&app, 9999, false),
+            TxRowEmphasis::Disabled
+        );
+
+        // Highlighted legs force black text over every cell colour; disabled
+        // rows go DarkGray; normal rows keep the colour they were given.
+        assert_eq!(TxRowEmphasis::TransferPending.fg(Color::Red), Color::Black);
+        assert_eq!(TxRowEmphasis::TransferCandidate.fg(TAG_COLOR), Color::Black);
+        assert_eq!(TxRowEmphasis::Disabled.fg(Color::Red), Color::DarkGray);
+        assert_eq!(TxRowEmphasis::Normal.fg(Color::Red), Color::Red);
     }
 
     #[test]
@@ -2272,11 +2362,11 @@ mod tests {
         app.store.set_note(from.id, "check this").unwrap();
         app.refresh_data();
 
-        let line = description_line(&app, &from, 40, false, false);
+        let line = description_line(&app, &from, 40, false, TxRowEmphasis::Normal);
         assert_eq!(line_text(&line), "Transfer out #work ✎");
 
         // A row with neither is just the description, with no stray spans.
-        let plain = description_line(&app, &_to, 40, false, false);
+        let plain = description_line(&app, &_to, 40, false, TxRowEmphasis::Normal);
         assert_eq!(line_text(&plain), "Transfer in");
         assert_eq!(plain.spans.len(), 1);
     }
@@ -2297,7 +2387,7 @@ mod tests {
             .unwrap();
         app.refresh_data();
 
-        let line = description_line(&app, &from, 24, false, false);
+        let line = description_line(&app, &from, 24, false, TxRowEmphasis::Normal);
         assert!(line_text(&line).chars().count() <= 24);
         // The description is truncated but never squeezed out entirely.
         assert!(line_text(&line).starts_with("Trans"));
