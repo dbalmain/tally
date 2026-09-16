@@ -1,0 +1,16 @@
+# Local notes — tally
+
+Machine-specific paths and tooling. **Gitignored — never commit this file.**
+Copy to `.ai/local.md` and fill in. **No secrets**: `POCKETSMITH_KEY` and the
+like belong in your environment (`.envrc`) or a secret store, never here.
+
+## Vaults
+
+Where the private data lives (selected with `--vault PATH` / `$FM_VAULT`). Each
+vault holds `exports/`, `tally.db`, and optionally `tally.toml`.
+
+- `<name>`: `/path/to/vault` — <whose data, how it is fed (CSV drop / pull)>
+
+## Sibling checkouts
+
+- `<other-repo>`: `/path/to/<other-repo>` — <why you'd open it>

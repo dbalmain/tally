@@ -11,6 +11,25 @@ doc comments (single source of truth); this file tells you where to look and
 what conventions to follow. When you find a discrepancy, the code is right — fix
 this file.
 
+> **Two layers.** This file is committed and true for everyone. Anything true
+> only of _one machine_ — where the private data vault lives, local tooling
+> paths — belongs in **`.ai/local.md`**, which is **gitignored**. Read
+> `.ai/local.md` too if it is present; `.ai/local.md.example` is the committed
+> template. Never move machine-specific paths into this file, and never commit
+> `local.md`.
+
+## Where the data lives
+
+This repo is the generic, publishable tool; it holds **no financial data** (see
+"Project Goals"). Real vaults — an `exports/` tree plus `tally.db` and
+`tally.toml` — live outside the repo and are selected with `--vault PATH` or
+`$FM_VAULT`. Their location varies per developer, so it is **not** recorded
+here. It lives in `.ai/local.md`, which is gitignored. **Read `.ai/local.md`
+now if it exists.** If it's missing, copy `.ai/local.md.example` to
+`.ai/local.md` and fill it in; if you can't locate a vault at all, say so and
+work against the test fixtures (`src/store/test_support.rs`) rather than
+guessing a path.
+
 ## Commands
 
 ```bash
@@ -100,10 +119,18 @@ principles:
 
 ```
 src/
-├── main.rs                 # CLI entry point, argument parsing
+├── main.rs                 # CLI entry point, --vault/FM_VAULT resolution, argument parsing
+├── cli.rs                  # Headless subcommands (categories/accounts/transactions/categorise/ai)
 ├── lib.rs                  # Public API exports
 ├── config.rs               # tally.toml loader and validation
 ├── classify/               # Pure temporal + TF-IDF/SVM classification, similarity index, adapter
+│   ├── mod.rs              # train/predict pipeline (pure)
+│   ├── tfidf.rs            # Word/char n-gram TF-IDF
+│   ├── svm.rs              # One-vs-rest linear SVM
+│   ├── transfers.rs        # Transfer detection
+│   ├── similarity.rs       # Similar-transaction index for the category popup offer
+│   ├── adapter.rs          # Store adapter: the only classify code that touches SQLite
+│   └── tests.rs            # incl. #[ignore]d TALLY_EVAL_CSV accuracy pin
 ├── types.rs                # Core data structures
 ├── db.rs                   # SQLite schema, transactions_view, FTS index
 ├── store/                  # TransactionStore: all database operations
@@ -127,7 +154,8 @@ src/
 │   ├── query.rs            # ParsedQuery / QueryPart / Span types
 │   ├── render.rs           # SqlContext + ParsedQuery::render → WHERE+params
 │   ├── filter.rs           # Filter trait
-│   ├── filters/            # Built-in filters (date, amount, account, category, confidence, tag, note)
+│   ├── placeholders.rs     # Named SQL placeholder consts ({date}, {category_path}, …)
+│   ├── filters/            # Built-in filters (date, amount, account, category, confidence, tag, note, sort; list.rs = shared `|` helpers)
 │   ├── context.rs          # CursorContext for key handling
 │   └── fuzzy.rs            # Nucleo-based fuzzy matcher
 └── tui/
@@ -135,6 +163,7 @@ src/
     ├── keymap.rs           # Normal-mode key table + footer/help hint text
     ├── ui.rs               # Rendering: layout, tables, details, popups
     ├── table.rs            # Domain-agnostic scrollable table + inline detail panel geometry
+    ├── modal.rs            # Shared overlay-modal chrome (title, padding, hint row)
     ├── search_bar.rs       # Search bar widget (context-aware keys, autocomplete)
     ├── note_editor.rs      # Multi-line note editor (self-contained: state + keys)
     ├── tag_editor.rs       # #tag line editor (self-contained; swappable interaction model)
@@ -145,7 +174,7 @@ src/
         ├── search.rs       # TabSearchState + search/autocomplete actions
         ├── categories.rs   # Category popup, AI review, rename/merge
         ├── annotations.rs  # Note/tag editor lifecycle and persistence
-        ├── accounts.rs      # Account rename/move, delete, transaction side panel
+        ├── accounts.rs     # Account rename/move, delete, transaction side panel
         ├── filters.rs      # Saved-search filter management
         └── transfers.rs    # Transfer marking, confirmation, deletion
 
