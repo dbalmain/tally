@@ -15,21 +15,39 @@ impl App {
             s.find_matching_transfer_candidates(&tx)
         });
 
-        if candidates.is_empty() {
-            self.input_mode = InputMode::TransferNoMatch;
-            self.pending_transfer_tx = Some(tx);
-            self.transfer_candidates = Vec::new();
-        } else {
-            self.pending_transfer_tx = Some(tx);
-            let first_id = candidates.first().map(|c| c.id);
-            self.transfer_candidates = candidates;
-            self.input_mode = InputMode::TransferPending;
-            if let Some(first_id) = first_id
-                && let Some(pos) = self.find_filtered_position_by_tx_id(first_id)
-            {
+        self.pending_transfer_tx = Some(tx);
+        self.transfer_candidates = candidates;
+
+        // Only a candidate on the current list can be selected. The list may
+        // be a subset of the vault (a DB search, or a Todo subtab that shows
+        // only AI-suggested rows), so the closest-dated candidate is often
+        // not on it; start on the closest one that is, and treat "none on
+        // this list" like "none at all" so the user isn't left in a mode
+        // where nothing responds.
+        match self.visible_candidate_positions().first() {
+            Some(&pos) => {
+                self.input_mode = InputMode::TransferPending;
                 self.selected_index = pos;
             }
+            None => self.input_mode = InputMode::TransferNoMatch,
         }
+    }
+
+    /// Positions on the current list of the transfer candidates, in candidate
+    /// order (closest date first). Candidates the list doesn't show are
+    /// omitted, so `j`/`k` in transfer mode never stall on a row that isn't
+    /// there.
+    pub(super) fn visible_candidate_positions(&self) -> Vec<usize> {
+        self.transfer_candidates
+            .iter()
+            .filter_map(|c| self.find_filtered_position_by_tx_id(c.id))
+            .collect()
+    }
+
+    /// Whether the no-match popup is reporting candidates that exist but are
+    /// off the current list (as opposed to none anywhere).
+    pub fn has_hidden_transfer_candidates(&self) -> bool {
+        !self.transfer_candidates.is_empty()
     }
 
     pub fn complete_transfer(&mut self) {

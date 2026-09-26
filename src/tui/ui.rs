@@ -1974,14 +1974,19 @@ fn draw_search_autocomplete_popup(f: &mut Frame, search_bar: &SearchBar, search_
 
 fn draw_no_match_popup(f: &mut Frame, app: &App) {
     let tx = app.pending_transfer_tx.as_ref();
-    let msg = if let Some(tx) = tx {
-        format!(
+    let msg = match (tx, app.has_hidden_transfer_candidates()) {
+        (Some(tx), true) => format!(
+            "Matching transactions exist for\n{} ({})\nbut none are in this list. \
+             Clear the search or use the Transactions tab.",
+            format_cents(tx.amount_cents),
+            tx.description
+        ),
+        (Some(tx), false) => format!(
             "No matching transaction found for\n{} ({})",
             format_cents(tx.amount_cents),
             tx.description
-        )
-    } else {
-        "No matching transaction found.".to_string()
+        ),
+        (None, _) => "No matching transaction found.".to_string(),
     };
 
     let hints = keymap::footer_hints(app);

@@ -804,22 +804,8 @@ impl App {
     pub fn next(&mut self) {
         let len = self.list_len();
         if len > 0 {
-            if self.input_mode == InputMode::TransferPending && !self.transfer_candidates.is_empty()
-            {
-                let current_tx_id = self
-                    .get_current_transaction(self.selected_index)
-                    .map(|t| t.id);
-                let current_pos = self
-                    .transfer_candidates
-                    .iter()
-                    .position(|c| current_tx_id == Some(c.id))
-                    .unwrap_or(0);
-                if current_pos + 1 < self.transfer_candidates.len() {
-                    let next_candidate_id = self.transfer_candidates[current_pos + 1].id;
-                    if let Some(pos) = self.find_filtered_position_by_tx_id(next_candidate_id) {
-                        self.selected_index = pos;
-                    }
-                }
+            if self.input_mode == InputMode::TransferPending {
+                self.step_transfer_candidate(1);
             } else {
                 self.selected_index = next_wrapping(self.selected_index, len);
             }
@@ -831,22 +817,8 @@ impl App {
     pub fn previous(&mut self) {
         let len = self.list_len();
         if len > 0 {
-            if self.input_mode == InputMode::TransferPending && !self.transfer_candidates.is_empty()
-            {
-                let current_tx_id = self
-                    .get_current_transaction(self.selected_index)
-                    .map(|t| t.id);
-                let current_pos = self
-                    .transfer_candidates
-                    .iter()
-                    .position(|c| current_tx_id == Some(c.id))
-                    .unwrap_or(0);
-                if current_pos > 0 {
-                    let prev_candidate_id = self.transfer_candidates[current_pos - 1].id;
-                    if let Some(pos) = self.find_filtered_position_by_tx_id(prev_candidate_id) {
-                        self.selected_index = pos;
-                    }
-                }
+            if self.input_mode == InputMode::TransferPending {
+                self.step_transfer_candidate(-1);
             } else {
                 self.selected_index = prev_wrapping(self.selected_index, len);
             }
@@ -857,6 +829,25 @@ impl App {
 
     fn list_len(&self) -> usize {
         self.lists.len(self.current_tab_key())
+    }
+
+    /// Move the selection `delta` steps through the candidates that are on
+    /// the current list, in candidate order (closest date first), stopping at
+    /// either end. From a row that isn't a candidate (the pending leg, say)
+    /// any step lands on the first visible candidate.
+    fn step_transfer_candidate(&mut self, delta: isize) {
+        let positions = self.visible_candidate_positions();
+        let Some(&first) = positions.first() else {
+            return;
+        };
+        let target = match positions.iter().position(|&p| p == self.selected_index) {
+            Some(i) => {
+                let i = (i as isize + delta).clamp(0, positions.len() as isize - 1);
+                positions[i as usize]
+            }
+            None => first,
+        };
+        self.selected_index = target;
     }
 
     fn clamp_selection(&mut self) {
@@ -2209,6 +2200,85 @@ mod tests {
             InputMode::Confirm => app.cancel_input(),
             mode => panic!("expected confirmation mode, got {mode:?}"),
         }
+    }
+
+    /// A DB search that hides some candidates: `t` starts on the closest
+    /// candidate that is on the list, and j/k step only through those.
+    fn app_searching_shop() -> (TempDir, App) {
+        let (_temp, store) = store_with_transactions(&[
+            FixtureTx {
+                description: "Pay out shop",
+                amount_cents: -1000,
+            },
+            FixtureTx {
+                description: "Refund A",
+                amount_cents: 1000,
+            },
+            FixtureTx {
+                description: "Refund B shop",
+                amount_cents: 1000,
+            },
+            FixtureTx {
+                description: "Refund C shop",
+                amount_cents: 1000,
+            },
+        ]);
+        let mut app = App::new(store).unwrap();
+        app.current_tab = Tab::Transactions;
+        app.reload_current_tab();
+        app.start_db_search();
+        for c in "shop".chars() {
+            app.handle_db_search_input(tui_input::InputRequest::InsertChar(c));
+        }
+        app.confirm_db_search();
+        (_temp, app)
+    }
+
+    #[test]
+    fn transfer_marking_steps_only_through_candidates_on_the_list() {
+        let (_temp, mut app) = app_searching_shop();
+        let visible_desc = |app: &App| {
+            app.selected_transaction()
+                .map(|tx| tx.description.clone())
+                .unwrap()
+        };
+        let pending_id = tx_by_description(&app.store, "Pay out shop").id;
+        app.selected_index = app
+            .lists
+            .position_of_tx(app.current_tab_key(), pending_id)
+            .unwrap();
+
+        app.start_transfer_mark();
+        assert_eq!(app.input_mode, InputMode::TransferPending);
+        // Refund A is the closest by date but hidden by the search, so the
+        // cursor lands on B — never on a row the user cannot see.
+        assert_eq!(visible_desc(&app), "Refund B shop");
+
+        app.next();
+        assert_eq!(visible_desc(&app), "Refund C shop");
+        app.next();
+        assert_eq!(visible_desc(&app), "Refund C shop", "stops at the last");
+        app.previous();
+        assert_eq!(visible_desc(&app), "Refund B shop");
+        app.previous();
+        assert_eq!(visible_desc(&app), "Refund B shop", "stops at the first");
+    }
+
+    #[test]
+    fn transfer_marking_with_every_candidate_hidden_reports_no_match() {
+        let (_temp, mut app) = app_searching_shop();
+        // Narrow to the pending leg alone: candidates exist but none show.
+        app.start_db_search();
+        for c in " pay".chars() {
+            app.handle_db_search_input(tui_input::InputRequest::InsertChar(c));
+        }
+        app.confirm_db_search();
+        assert_eq!(app.list_len(), 1);
+
+        app.start_transfer_mark();
+        assert_eq!(app.input_mode, InputMode::TransferNoMatch);
+        assert!(app.has_hidden_transfer_candidates());
+        assert_eq!(app.selected_index, 0);
     }
 
     fn store_with_transactions(rows: &[FixtureTx]) -> (TempDir, TransactionStore) {
